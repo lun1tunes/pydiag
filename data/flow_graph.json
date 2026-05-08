@@ -1,0 +1,450 @@
+{
+  "schema_version": "1.0",
+  "version": 1,
+  "responsibles": {
+    "planning": {
+      "label": "Планирование",
+      "fill": "#dcecff",
+      "border": "#356ca8",
+      "text": "#17314f"
+    },
+    "geology": {
+      "label": "Геология",
+      "fill": "#e3f7ea",
+      "border": "#3f8a55",
+      "text": "#17311e"
+    },
+    "procurement": {
+      "label": "Закупки",
+      "fill": "#fff2d6",
+      "border": "#b17a23",
+      "text": "#43300d"
+    },
+    "hse": {
+      "label": "ПБОТОС",
+      "fill": "#ffe3e3",
+      "border": "#b84c4c",
+      "text": "#4e1717"
+    },
+    "drilling": {
+      "label": "Бурение",
+      "fill": "#e9e4ff",
+      "border": "#6954b8",
+      "text": "#261b53"
+    },
+    "completion": {
+      "label": "Заканчивание",
+      "fill": "#dff5f2",
+      "border": "#16877d",
+      "text": "#123834"
+    },
+    "logistics": {
+      "label": "Логистика",
+      "fill": "#edf2f7",
+      "border": "#64748b",
+      "text": "#253041"
+    }
+  },
+  "nodes": [
+    {
+      "id": "input_geo_license",
+      "kind": "input_data",
+      "title": "Лицензия и исходные геоданные",
+      "position": { "x": 80.0, "y": 260.0 },
+      "size": { "w": 250, "h": 94 },
+      "note": "Контур участка, ограничения, целевые горизонты",
+      "approvers": [],
+      "duration_hours": 4,
+      "metadata": {}
+    },
+    {
+      "id": "db_offset_wells",
+      "kind": "database",
+      "title": "Архив соседних скважин",
+      "position": { "x": 80.0, "y": 500.0 },
+      "size": { "w": 250, "h": 96 },
+      "note": "Фактические осложнения и НПВ",
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    },
+    {
+      "id": "proc_initial_review",
+      "kind": "process",
+      "title": "Первичный анализ и паспорт скважины",
+      "position": { "x": 420.0, "y": 260.0 },
+      "size": { "w": 300, "h": 116 },
+      "note": "Собрать ограничения, риски, базовый календарь",
+      "approvers": [
+        { "responsible": "geology", "label": "Геология" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 16,
+      "responsible": "planning",
+      "metadata": {}
+    },
+    {
+      "id": "dec_data_complete",
+      "kind": "decision_diamond",
+      "title": "Данные полные?",
+      "position": { "x": 810.0, "y": 270.0 },
+      "size": { "w": 230, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "card_data_rework",
+      "kind": "decision_card",
+      "title": "Запросить недостающие данные",
+      "position": { "x": 810.0, "y": 82.0 },
+      "size": { "w": 250, "h": 98 },
+      "note": "Вернуть пакет в планирование",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 8,
+      "metadata": {}
+    },
+    {
+      "id": "proc_well_design",
+      "kind": "process",
+      "title": "Проект профиля и конструкции",
+      "position": { "x": 1160.0, "y": 260.0 },
+      "size": { "w": 300, "h": 116 },
+      "note": "Траектория, обсадные колонны, ожидаемые давления",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 24,
+      "responsible": "geology",
+      "metadata": {}
+    },
+    {
+      "id": "proc_hse_review",
+      "kind": "process",
+      "title": "Проверка HSE и разрешений",
+      "position": { "x": 1510.0, "y": 82.0 },
+      "size": { "w": 280, "h": 104 },
+      "note": "План реагирования, допуски, матрица рисков",
+      "approvers": [
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 12,
+      "responsible": "hse",
+      "metadata": {}
+    },
+    {
+      "id": "dec_design_ok",
+      "kind": "decision_diamond",
+      "title": "Проект согласован?",
+      "position": { "x": 1510.0, "y": 270.0 },
+      "size": { "w": 240, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    },
+    {
+      "id": "proc_procurement",
+      "kind": "process",
+      "title": "Закупка сервисов и материалов",
+      "position": { "x": 1870.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Долота, растворы, подрядчики, мобилизация",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" },
+        { "responsible": "drilling", "label": "Бурение" }
+      ],
+      "duration_hours": 72,
+      "responsible": "procurement",
+      "metadata": {}
+    },
+    {
+      "id": "db_contracts",
+      "kind": "database",
+      "title": "Договоры и заявки",
+      "position": { "x": 1870.0, "y": 500.0 },
+      "size": { "w": 270, "h": 96 },
+      "note": "Единый реестр обеспеченности",
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "proc_mobilization",
+      "kind": "process",
+      "title": "Мобилизация буровой и сервисов",
+      "position": { "x": 2250.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Площадка, логистика, готовность оборудования",
+      "approvers": [
+        { "responsible": "logistics", "label": "Логистика" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 48,
+      "responsible": "logistics",
+      "metadata": {}
+    },
+    {
+      "id": "proc_spud",
+      "kind": "process",
+      "title": "Спуск направления и начало бурения",
+      "position": { "x": 2630.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Старт работ, сводка смены, контроль параметров",
+      "approvers": [],
+      "duration_hours": 18,
+      "responsible": "drilling",
+      "metadata": {}
+    },
+    {
+      "id": "dec_operational_issue",
+      "kind": "decision_diamond",
+      "title": "Есть осложнение?",
+      "position": { "x": 3010.0, "y": 270.0 },
+      "size": { "w": 240, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "card_mitigation",
+      "kind": "decision_card",
+      "title": "План ликвидации осложнения",
+      "position": { "x": 3010.0, "y": 82.0 },
+      "size": { "w": 270, "h": 102 },
+      "note": "Согласовать действия и вернуться к бурению",
+      "approvers": [
+        { "responsible": "drilling", "label": "Бурение" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 6,
+      "metadata": {}
+    },
+    {
+      "id": "proc_drilling_complete",
+      "kind": "process",
+      "title": "Завершение бурения и крепление",
+      "position": { "x": 3370.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Колонна, цементаж, финальная сводка",
+      "approvers": [
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 36,
+      "responsible": "drilling",
+      "metadata": {}
+    },
+    {
+      "id": "proc_completion",
+      "kind": "process",
+      "title": "Заканчивание и передача в освоение",
+      "position": { "x": 3750.0, "y": 260.0 },
+      "size": { "w": 320, "h": 116 },
+      "note": "Компоновка, испытания, акт передачи",
+      "approvers": [
+        { "responsible": "completion", "label": "Заканчивание" },
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 30,
+      "responsible": "completion",
+      "metadata": {}
+    },
+    {
+      "id": "input_lessons",
+      "kind": "input_data",
+      "title": "Извлеченные уроки",
+      "position": { "x": 3750.0, "y": 500.0 },
+      "size": { "w": 270, "h": 96 },
+      "note": "Фактический опыт для следующих программ",
+      "approvers": [],
+      "duration_hours": 4,
+      "metadata": {}
+    },
+    {
+      "id": "db_final_archive",
+      "kind": "database",
+      "title": "Финальный архив скважины",
+      "position": { "x": 4140.0, "y": 260.0 },
+      "size": { "w": 280, "h": 100 },
+      "note": "Программа, акты, фактические параметры",
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_input_review",
+      "kind": "default",
+      "source": "input_geo_license",
+      "target": "proc_initial_review",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_offsets_review",
+      "kind": "dashed",
+      "source": "db_offset_wells",
+      "target": "proc_initial_review",
+      "label": "контекст",
+      "metadata": {}
+    },
+    {
+      "id": "e_review_decision",
+      "kind": "default",
+      "source": "proc_initial_review",
+      "target": "dec_data_complete",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_data_yes",
+      "kind": "yes",
+      "source": "dec_data_complete",
+      "target": "proc_well_design",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_data_no",
+      "kind": "no",
+      "source": "dec_data_complete",
+      "target": "card_data_rework",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_rework_back",
+      "kind": "dashed",
+      "source": "card_data_rework",
+      "target": "proc_initial_review",
+      "label": "доработка",
+      "metadata": {}
+    },
+    {
+      "id": "e_design_hse",
+      "kind": "default",
+      "source": "proc_well_design",
+      "target": "proc_hse_review",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_hse_design_ok",
+      "kind": "default",
+      "source": "proc_hse_review",
+      "target": "dec_design_ok",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_design_to_decision",
+      "kind": "default",
+      "source": "proc_well_design",
+      "target": "dec_design_ok",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_design_yes",
+      "kind": "yes",
+      "source": "dec_design_ok",
+      "target": "proc_procurement",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_design_no",
+      "kind": "no",
+      "source": "dec_design_ok",
+      "target": "proc_well_design",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_procurement_contracts",
+      "kind": "dashed",
+      "source": "proc_procurement",
+      "target": "db_contracts",
+      "label": "реестр",
+      "metadata": {}
+    },
+    {
+      "id": "e_procurement_mob",
+      "kind": "default",
+      "source": "proc_procurement",
+      "target": "proc_mobilization",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_mob_spud",
+      "kind": "default",
+      "source": "proc_mobilization",
+      "target": "proc_spud",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_spud_issue",
+      "kind": "default",
+      "source": "proc_spud",
+      "target": "dec_operational_issue",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_issue_yes",
+      "kind": "yes",
+      "source": "dec_operational_issue",
+      "target": "card_mitigation",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_mitigation_back",
+      "kind": "dashed",
+      "source": "card_mitigation",
+      "target": "proc_spud",
+      "label": "после мер",
+      "metadata": {}
+    },
+    {
+      "id": "e_issue_no",
+      "kind": "no",
+      "source": "dec_operational_issue",
+      "target": "proc_drilling_complete",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_drill_completion",
+      "kind": "default",
+      "source": "proc_drilling_complete",
+      "target": "proc_completion",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_completion_lessons",
+      "kind": "dashed",
+      "source": "proc_completion",
+      "target": "input_lessons",
+      "label": "факт",
+      "metadata": {}
+    },
+    {
+      "id": "e_completion_archive",
+      "kind": "default",
+      "source": "proc_completion",
+      "target": "db_final_archive",
+      "label": null,
+      "metadata": {}
+    }
+  ]
+}
+

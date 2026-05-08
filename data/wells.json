@@ -1,0 +1,171 @@
+{
+  "schema_version": "1.0",
+  "version": 1,
+  "wells": [
+    {
+      "id": "well_1001",
+      "name": "Скв. 1001",
+      "current_node_id": "proc_initial_review",
+      "history": [
+        {
+          "ts": "2026-05-08T08:00:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T10:30:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "Передана в планирование"
+        }
+      ],
+      "metadata": {
+        "field": "Восточный куст",
+        "rig": "БУ-17"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1002",
+      "name": "Скв. 1002",
+      "current_node_id": "dec_design_ok",
+      "history": [
+        {
+          "ts": "2026-05-08T08:15:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T11:10:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "Паспорт готов"
+        },
+        {
+          "ts": "2026-05-08T15:20:00Z",
+          "node_id": "dec_data_complete",
+          "action": "move",
+          "from_node_id": "proc_initial_review",
+          "to_node_id": "dec_data_complete",
+          "by": "planner@example.com",
+          "comment": "Пакет данных проверен"
+        },
+        {
+          "ts": "2026-05-08T16:00:00Z",
+          "node_id": "proc_well_design",
+          "action": "move",
+          "from_node_id": "dec_data_complete",
+          "to_node_id": "proc_well_design",
+          "by": "planner@example.com",
+          "comment": "Ветка Да"
+        },
+        {
+          "ts": "2026-05-08T18:45:00Z",
+          "node_id": "dec_design_ok",
+          "action": "move",
+          "from_node_id": "proc_well_design",
+          "to_node_id": "dec_design_ok",
+          "by": "geology@example.com",
+          "comment": "Проект на согласовании"
+        }
+      ],
+      "metadata": {
+        "field": "Северный куст",
+        "rig": "БУ-22"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1003",
+      "name": "Скв. 1003",
+      "current_node_id": "proc_spud",
+      "history": [
+        {
+          "ts": "2026-05-07T07:00:00Z",
+          "node_id": "proc_mobilization",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "proc_mobilization",
+          "by": "system",
+          "comment": "Импортирована действующая скважина"
+        },
+        {
+          "ts": "2026-05-08T06:00:00Z",
+          "node_id": "proc_spud",
+          "action": "move",
+          "from_node_id": "proc_mobilization",
+          "to_node_id": "proc_spud",
+          "by": "drilling@example.com",
+          "comment": "Начаты работы"
+        }
+      ],
+      "metadata": {
+        "field": "Южный куст",
+        "rig": "БУ-04"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1004",
+      "name": "Скв. 1004",
+      "current_node_id": "card_data_rework",
+      "history": [
+        {
+          "ts": "2026-05-08T09:00:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T13:00:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "На проверку"
+        },
+        {
+          "ts": "2026-05-08T15:00:00Z",
+          "node_id": "dec_data_complete",
+          "action": "move",
+          "from_node_id": "proc_initial_review",
+          "to_node_id": "dec_data_complete",
+          "by": "planner@example.com",
+          "comment": "Проверка полноты"
+        },
+        {
+          "ts": "2026-05-08T15:30:00Z",
+          "node_id": "card_data_rework",
+          "action": "move",
+          "from_node_id": "dec_data_complete",
+          "to_node_id": "card_data_rework",
+          "by": "planner@example.com",
+          "comment": "Ветка Нет"
+        }
+      ],
+      "metadata": {
+        "field": "Западный куст",
+        "rig": "БУ-11"
+      },
+      "is_archived": false
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from streamlit.testing.v1 import AppTest
+
+from pydiag.models import well_by_id
+from pydiag.storage import load_wells_doc
+
+
+APP_PATH = Path(__file__).resolve().parents[2] / "app.py"
+
+
+def run_app_with_temp_data(
+    data_paths: tuple[Path, Path],
+    monkeypatch,
+) -> AppTest:
+    graph_path, wells_path = data_paths
+    monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
+    monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "test-admin")
+
+    app = AppTest.from_file(str(APP_PATH))
+    app.run(timeout=30)
+    assert not app.exception
+    return app
+
+
+def login_as_admin(app: AppTest) -> AppTest:
+    app.text_input[0].set_value("test-admin").run(timeout=30)
+    app.button[0].click().run(timeout=30)
+    assert not app.exception
+    return app
+
+
+def click_button(app: AppTest, label: str) -> AppTest:
+    for button in app.button:
+        if button.label == label:
+            button.click().run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Button not found: {label}")
+
+
+def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> None:
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+
+    assert any("Карта планирования и бурения" in item.value for item in app.markdown)
+    assert any("Узлы" in item.value and "18" in item.value for item in app.markdown)
+    assert app.info[0].value == "Выберите узел, связь или фишку скважины на схеме."
+
+
+def test_streamlit_admin_login_reveals_management_panel(
+    data_paths,
+    monkeypatch,
+) -> None:
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+
+    login_as_admin(app)
+
+    assert any(item.value == "Режим управления активен" for item in app.success)
+    assert {button.label for button in app.button} >= {
+        "Продвинуть",
+        "Откатить",
+        "Удалить скважину",
+        "Создать",
+    }
+
+
+def test_streamlit_admin_can_move_well_without_touching_real_json(
+    data_paths,
+    monkeypatch,
+) -> None:
+    _, wells_path = data_paths
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    click_button(app, "Продвинуть")
+
+    saved = load_wells_doc(wells_path)
+    well = well_by_id(saved)["well_1001"]
+    assert saved.version == 2
+    assert well.current_node_id == "dec_data_complete"
+    assert well.history[-1].action == "move"
+
+
+def test_streamlit_admin_can_create_well_in_temp_json(
+    data_paths,
+    monkeypatch,
+) -> None:
+    _, wells_path = data_paths
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    app.text_input[0].set_value("well_ui")
+    app.text_input[1].set_value("Скв. UI")
+    app.text_input[2].set_value("Тестовый куст")
+    app.text_input[3].set_value("БУ-ТЕСТ")
+    click_button(app, "Создать")
+
+    saved = load_wells_doc(wells_path)
+    created = well_by_id(saved)["well_ui"]
+    assert created.name == "Скв. UI"
+    assert created.current_node_id == "input_geo_license"
+    assert created.metadata == {"field": "Тестовый куст", "rig": "БУ-ТЕСТ"}

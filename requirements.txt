@@ -1,0 +1,3 @@
+streamlit==1.57.0
+pydantic==2.13.4
+streamlit-flow-component==1.6.1
