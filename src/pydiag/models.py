@@ -5,7 +5,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 MetaValue = str | int | float | bool | None
 
 NodeKind = Literal[
@@ -83,11 +82,7 @@ class InputDataNode(NodeBase):
 
 
 FlowNode = Annotated[
-    ProcessNode
-    | DecisionDiamondNode
-    | DecisionCardNode
-    | DatabaseNode
-    | InputDataNode,
+    ProcessNode | DecisionDiamondNode | DecisionCardNode | DatabaseNode | InputDataNode,
     Field(discriminator="kind"),
 ]
 
@@ -133,7 +128,7 @@ class FlowGraphDocument(StrictModel):
     edges: list[FlowEdge]
 
     @model_validator(mode="after")
-    def validate_graph(self) -> "FlowGraphDocument":
+    def validate_graph(self) -> FlowGraphDocument:
         if not self.responsibles:
             raise ValueError("At least one responsible must be defined")
 
@@ -150,14 +145,10 @@ class FlowGraphDocument(StrictModel):
 
         for node in self.nodes:
             if node.kind == "process" and node.responsible not in responsible_set:
-                raise ValueError(
-                    f"Node {node.id}: unknown responsible {node.responsible}"
-                )
+                raise ValueError(f"Node {node.id}: unknown responsible {node.responsible}")
             for approver in node.approvers:
                 if approver.responsible not in responsible_set:
-                    raise ValueError(
-                        f"Node {node.id}: unknown approver {approver.responsible}"
-                    )
+                    raise ValueError(f"Node {node.id}: unknown approver {approver.responsible}")
 
         for edge in self.edges:
             if edge.source not in node_set:
@@ -192,7 +183,7 @@ class WellsDocument(StrictModel):
     wells: list[Well]
 
     @model_validator(mode="after")
-    def validate_wells(self) -> "WellsDocument":
+    def validate_wells(self) -> WellsDocument:
         ids = [well.id for well in self.wells]
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate well ids are not allowed")
@@ -215,14 +206,12 @@ def validate_wells_against_graph(
     for well in wells_doc.wells:
         if well.current_node_id not in node_ids:
             raise ValueError(
-                f"Well {well.id}: current_node_id={well.current_node_id} "
-                "does not exist in graph"
+                f"Well {well.id}: current_node_id={well.current_node_id} does not exist in graph"
             )
         for item in well.history:
             if item.node_id not in node_ids:
                 raise ValueError(
-                    f"Well {well.id}: history node {item.node_id} "
-                    "does not exist in graph"
+                    f"Well {well.id}: history node {item.node_id} does not exist in graph"
                 )
             if item.from_node_id is not None and item.from_node_id not in node_ids:
                 raise ValueError(
@@ -231,7 +220,5 @@ def validate_wells_against_graph(
                 )
             if item.to_node_id is not None and item.to_node_id not in node_ids:
                 raise ValueError(
-                    f"Well {well.id}: history to_node_id={item.to_node_id} "
-                    "does not exist in graph"
+                    f"Well {well.id}: history to_node_id={item.to_node_id} does not exist in graph"
                 )
-

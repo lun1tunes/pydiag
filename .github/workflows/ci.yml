@@ -6,7 +6,12 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -20,14 +25,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r requirements-dev.txt
+          python scripts/venv_run.py -m pip install --upgrade pip
+          python scripts/venv_run.py -m pip install -r requirements-dev.txt
 
-      - name: Validate bundled JSON
-        run: .venv/bin/python scripts/validate_data.py
-
-      - name: Compile Python
-        run: .venv/bin/python -m py_compile app.py src/pydiag/*.py scripts/validate_data.py
-
-      - name: Run tests with coverage
-        run: .venv/bin/python -m pytest --cov=src/pydiag --cov-report=term-missing --cov-fail-under=85
+      - name: Run quality gate
+        run: python scripts/venv_run.py scripts/quality.py

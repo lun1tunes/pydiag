@@ -50,4 +50,3 @@ def test_cross_document_validation_rejects_unknown_well_node(
 
     with pytest.raises(ValueError, match="does not exist in graph"):
         load_documents(graph_path, wells_path)
-

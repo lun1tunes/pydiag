@@ -6,7 +6,6 @@ from streamlit_flow.elements import StreamlitFlowEdge, StreamlitFlowNode
 
 from .models import FlowEdge, FlowGraphDocument, FlowNode, Well, WellsDocument
 
-
 KIND_LABELS = {
     "process": "Процесс",
     "decision_diamond": "Решение",
@@ -102,9 +101,9 @@ def build_streamlit_nodes(
 
         for index, well in enumerate(wells_here[:4]):
             token_id = f"well::{well.id}"
-            token_active = is_active or search.strip().lower() in (
-                well.id + " " + well.name
-            ).lower()
+            token_active = (
+                is_active or search.strip().lower() in (well.id + " " + well.name).lower()
+            )
             nodes.append(
                 StreamlitFlowNode(
                     id=token_id,
@@ -190,7 +189,7 @@ def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well
     lines.append(f"**{node.title}**")
 
     if node.kind == "process":
-        responsible = graph.responsibles[getattr(node, "responsible")]
+        responsible = graph.responsibles[node.responsible]
         lines.append(responsible.label)
     else:
         lines.append(KIND_LABELS[node.kind])
@@ -243,7 +242,7 @@ def node_style(
     }
 
     if node.kind == "process":
-        responsible = graph.responsibles[getattr(node, "responsible")]
+        responsible = graph.responsibles[node.responsible]
         style.update(
             {
                 "backgroundColor": responsible.fill,
@@ -345,4 +344,3 @@ def edge_color(edge: FlowEdge) -> str:
         "no": "#c2410c",
         "dashed": "#64748b",
     }[edge.kind]
-

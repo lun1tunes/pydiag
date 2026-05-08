@@ -21,7 +21,15 @@ from pydiag.flow_adapter import (  # noqa: E402
     build_streamlit_nodes,
     wells_grouped_by_node,
 )
-from pydiag.models import FlowEdge, FlowGraphDocument, FlowNode, Well, WellsDocument, node_by_id, well_by_id  # noqa: E402
+from pydiag.models import (  # noqa: E402
+    FlowEdge,
+    FlowGraphDocument,
+    FlowNode,
+    Well,
+    WellsDocument,
+    node_by_id,
+    well_by_id,
+)
 from pydiag.services import (  # noqa: E402
     create_well,
     delete_well,
@@ -30,8 +38,12 @@ from pydiag.services import (  # noqa: E402
     rollback_well,
     transition_label,
 )
-from pydiag.storage import load_documents, save_wells_with_version_check, wells_path  # noqa: E402
-
+from pydiag.storage import (  # noqa: E402
+    VersionConflictError,
+    load_documents,
+    save_wells_with_version_check,
+    wells_path,
+)
 
 st.set_page_config(
     page_title="Планирование и бурение скважин",
@@ -182,7 +194,9 @@ def admin_password() -> str:
             return str(secret_value)
     except Exception:
         pass
-    return "admin"
+    if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+        return "admin"
+    return ""
 
 
 def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]:
@@ -194,11 +208,21 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
                 st.session_state.admin_authenticated = False
                 st.rerun()
         else:
-            password = st.text_input("Пароль администратора", type="password")
-            if admin_password() == "admin":
-                st.caption("Локальный пароль прототипа: admin")
-            if st.button("Войти", width="stretch"):
-                if password == admin_password():
+            configured_password = admin_password()
+            password = st.text_input(
+                "Пароль администратора",
+                type="password",
+                disabled=not configured_password,
+            )
+            if not configured_password:
+                st.warning(
+                    "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD "
+                    "или st.secrets['admin_password']."
+                )
+            if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+                st.caption("Включен локальный небезопасный пароль: admin")
+            if st.button("Войти", width="stretch", disabled=not configured_password):
+                if password == configured_password:
                     st.session_state.admin_authenticated = True
                     st.rerun()
                 else:
@@ -350,7 +374,9 @@ def render_node_details(
     wells: WellsDocument,
     node: FlowNode,
 ) -> None:
-    wells_here = [well for well in wells.wells if well.current_node_id == node.id and not well.is_archived]
+    wells_here = [
+        well for well in wells.wells if well.current_node_id == node.id and not well.is_archived
+    ]
     responsible = getattr(node, "responsible", None)
     responsible_label = graph.responsibles[responsible].label if responsible else "нет"
     approvers = [
@@ -359,7 +385,10 @@ def render_node_details(
     ]
 
     st.markdown(f"#### {node.title}")
-    st.markdown(f'<p class="muted-line">{KIND_LABELS[node.kind]} · {node.id}</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="muted-line">{KIND_LABELS[node.kind]} · {node.id}</p>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         f"""
         <div class="mini-kv">
@@ -435,7 +464,9 @@ def render_well_details(graph: FlowGraphDocument, well: Well) -> None:
                     {
                         "ts": item.ts.strftime("%Y-%m-%d %H:%M"),
                         "action": item.action,
-                        "node": nodes[item.node_id].title if item.node_id in nodes else item.node_id,
+                        "node": nodes[item.node_id].title
+                        if item.node_id in nodes
+                        else item.node_id,
                         "by": item.by or "",
                         "comment": item.comment or "",
                     }
@@ -482,14 +513,19 @@ def render_admin_panel(
 ) -> None:
     st.markdown("### Панель управления")
     selected_kind, selected = resolve_selection(selected_id, graph, wells)
-    default_well_id = selected.id if selected_kind == "well" and isinstance(selected, Well) else None
-    default_node_id = selected.id if selected_kind == "node" and selected is not None else graph.nodes[0].id
+    default_well_id = (
+        selected.id if selected_kind == "well" and isinstance(selected, Well) else None
+    )
+    default_node_id = (
+        selected.id if selected_kind == "node" and selected is not None else graph.nodes[0].id
+    )
 
     with st.expander("Переместить или откатить скважину", expanded=True):
-        if not wells.wells:
-            st.caption("Скважин пока нет.")
+        active_wells = [well for well in wells.wells if not well.is_archived]
+        if not active_wells:
+            st.caption("Активных скважин пока нет.")
         else:
-            well_ids = [well.id for well in wells.wells if not well.is_archived]
+            well_ids = [well.id for well in active_wells]
             default_index = well_ids.index(default_well_id) if default_well_id in well_ids else 0
             well_id = st.selectbox(
                 "Скважина",
@@ -533,6 +569,7 @@ def render_admin_panel(
                             actor="local-admin",
                             comment=comment or None,
                         ),
+                        graph=graph,
                         expected_version=wells.version,
                         success_message="Скважина переведена на следующий этап",
                     )
@@ -549,6 +586,7 @@ def render_admin_panel(
                             actor="local-admin",
                             comment=comment or None,
                         ),
+                        graph=graph,
                         expected_version=wells.version,
                         success_message="Скважина откатилась на предыдущий этап",
                     )
@@ -561,6 +599,7 @@ def render_admin_panel(
             ):
                 persist_wells_update(
                     delete_well(wells, well_id),
+                    graph=graph,
                     expected_version=wells.version,
                     success_message="Скважина удалена",
                 )
@@ -584,8 +623,12 @@ def render_admin_panel(
             submitted = st.form_submit_button("Создать", width="stretch")
 
         if submitted:
-            if not re.fullmatch(r"[A-Za-z0-9_.:-]+", well_id):
+            normalized_well_id = well_id.strip()
+            normalized_name = name.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]+", normalized_well_id):
                 st.error("ID должен состоять из латиницы, цифр, _, ., :, -")
+            elif not normalized_name:
+                st.error("Название скважины обязательно.")
             else:
                 metadata = {
                     key: value
@@ -596,13 +639,14 @@ def render_admin_panel(
                     create_well(
                         graph,
                         wells,
-                        well_id=well_id.strip(),
-                        name=name.strip(),
+                        well_id=normalized_well_id,
+                        name=normalized_name,
                         start_node_id=start_node_id,
                         actor="local-admin",
                         metadata=metadata,
                         comment=comment or None,
                     ),
+                    graph=graph,
                     expected_version=wells.version,
                     success_message="Скважина создана",
                 )
@@ -610,6 +654,7 @@ def render_admin_panel(
 
 def persist_wells_update(
     updated: WellsDocument,
+    graph: FlowGraphDocument,
     expected_version: int,
     success_message: str,
 ) -> None:
@@ -618,9 +663,20 @@ def persist_wells_update(
             updated,
             expected_version=expected_version,
             path=wells_path(),
+            graph=graph,
         )
         st.session_state.wells_doc = saved
         flash(success_message)
+        st.rerun()
+    except VersionConflictError as exc:
+        try:
+            load_app_data(force=True)
+        except Exception:
+            pass
+        flash(
+            f"Данные уже изменились другим пользователем. Состояние перечитано: {exc}",
+            "warning",
+        )
         st.rerun()
     except Exception as exc:
         st.error(str(exc))

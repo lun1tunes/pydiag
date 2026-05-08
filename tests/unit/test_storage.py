@@ -5,6 +5,8 @@ import pytest
 from pydiag.models import well_by_id
 from pydiag.services import move_well_to_node
 from pydiag.storage import (
+    VersionConflictError,
+    fsync_parent_dir,
     graph_path,
     load_documents,
     load_wells_doc,
@@ -63,10 +65,38 @@ def test_save_wells_with_version_check_rejects_stale_writer(data_paths) -> None:
     )
     save_wells_with_version_check(updated, expected_version=wells.version, path=wells_file)
 
-    with pytest.raises(RuntimeError, match="Conflict"):
+    with pytest.raises(VersionConflictError, match="Conflict"):
         save_wells_with_version_check(
             updated,
             expected_version=wells.version,
             path=wells_file,
         )
 
+
+def test_save_wells_with_version_check_rejects_graph_integrity_violation(
+    data_paths,
+) -> None:
+    graph_file, wells_file = data_paths
+    graph, wells = load_documents(graph_file, wells_file)
+    updated = wells.model_copy(deep=True)
+    updated.wells[0].current_node_id = "missing_node"
+
+    with pytest.raises(ValueError, match="does not exist in graph"):
+        save_wells_with_version_check(
+            updated,
+            expected_version=wells.version,
+            path=wells_file,
+            graph=graph,
+        )
+
+
+def test_fsync_parent_dir_is_noop_on_non_posix(monkeypatch, tmp_path) -> None:
+    import pydiag.storage as storage
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("os.open should not be called on non-posix platforms")
+
+    monkeypatch.setattr(storage.os, "name", "nt")
+    monkeypatch.setattr(storage.os, "open", fail_if_called)
+
+    fsync_parent_dir(tmp_path / "wells.json")

@@ -7,7 +7,6 @@ import pytest
 
 from pydiag.storage import load_documents
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 APP_PATH = ROOT / "app.py"
@@ -25,4 +24,3 @@ def data_paths(tmp_path: Path) -> tuple[Path, Path]:
 @pytest.fixture
 def documents(data_paths: tuple[Path, Path]):
     return load_documents(*data_paths)
-

@@ -26,4 +26,3 @@ def test_adapter_search_highlights_matching_well_node(documents) -> None:
     assert "proc_spud" in active_ids
     assert token.style["opacity"] == 1.0
     assert other_token.style["opacity"] == 0.24
-

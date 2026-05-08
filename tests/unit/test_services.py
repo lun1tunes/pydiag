@@ -94,4 +94,3 @@ def test_delete_well_removes_it_from_document(documents) -> None:
 
     assert "well_1004" not in well_by_id(updated)
     assert "well_1004" in well_by_id(wells)
-

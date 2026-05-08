@@ -84,13 +84,9 @@ def move_well_to_node(
     if well.current_node_id == target_node_id:
         raise ValueError("Well is already on this node")
 
-    allowed_targets = {
-        edge.target for edge in graph.edges if edge.source == well.current_node_id
-    }
+    allowed_targets = {edge.target for edge in graph.edges if edge.source == well.current_node_id}
     if target_node_id not in allowed_targets:
-        raise ValueError(
-            f"Illegal transition: {well.current_node_id} -> {target_node_id}"
-        )
+        raise ValueError(f"Illegal transition: {well.current_node_id} -> {target_node_id}")
 
     previous = well.current_node_id
     well.current_node_id = target_node_id
@@ -144,11 +140,13 @@ def rollback_well(
 def transition_label(edge: FlowEdge, graph: FlowGraphDocument) -> str:
     nodes = node_by_id(graph)
     target_title = nodes[edge.target].title if edge.target in nodes else edge.target
-    prefix = edge.label or {
-        "default": "Далее",
-        "yes": "Да",
-        "no": "Нет",
-        "dashed": "Возврат",
-    }[edge.kind]
+    prefix = (
+        edge.label
+        or {
+            "default": "Далее",
+            "yes": "Да",
+            "no": "Нет",
+            "dashed": "Возврат",
+        }[edge.kind]
+    )
     return f"{prefix}: {target_title}"
-

@@ -12,13 +12,9 @@ from pydiag.storage import load_documents  # noqa: E402
 
 def main() -> int:
     graph, wells = load_documents()
-    print(
-        f"OK: {len(graph.nodes)} nodes, {len(graph.edges)} edges, "
-        f"{len(wells.wells)} wells"
-    )
+    print(f"OK: {len(graph.nodes)} nodes, {len(graph.edges)} edges, {len(wells.wells)} wells")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
