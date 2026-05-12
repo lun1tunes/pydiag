@@ -1,0 +1,2980 @@
+===BEGIN_FILE===	.github/workflows/ci.yml	677
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          python scripts/venv_run.py -m pip install --upgrade pip
+          python scripts/venv_run.py -m pip install -r requirements-dev.txt
+
+      - name: Run quality gate
+        run: python scripts/venv_run.py scripts/quality.py
+
+===END_FILE===
+===BEGIN_FILE===	app.py	23918
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from streamlit_flow import streamlit_flow
+from streamlit_flow.layouts import ManualLayout
+from streamlit_flow.state import StreamlitFlowState
+
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+
+from pydiag.flow_adapter import (  # noqa: E402
+    KIND_LABELS,
+    build_streamlit_edges,
+    build_streamlit_nodes,
+    wells_grouped_by_node,
+)
+from pydiag.models import (  # noqa: E402
+    FlowEdge,
+    FlowGraphDocument,
+    FlowNode,
+    Well,
+    WellsDocument,
+    node_by_id,
+    well_by_id,
+)
+from pydiag.services import (  # noqa: E402
+    create_well,
+    delete_well,
+    move_well_to_node,
+    outgoing_edges,
+    rollback_well,
+    transition_label,
+)
+from pydiag.storage import (  # noqa: E402
+    VersionConflictError,
+    load_documents,
+    save_wells_with_version_check,
+    wells_path,
+)
+
+st.set_page_config(
+    page_title="Планирование и бурение скважин",
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                linear-gradient(180deg, rgba(246, 247, 249, 0.98), rgba(246, 247, 249, 1));
+        }
+        .block-container {
+            max-width: none;
+            padding: 1.25rem 1.55rem 2rem;
+        }
+        [data-testid="stSidebar"] {
+            background: #eef2f6;
+            border-right: 1px solid rgba(100, 116, 139, 0.18);
+        }
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] p {
+            color: #263244;
+        }
+        .app-title {
+            font-size: 1.65rem;
+            line-height: 1.05;
+            font-weight: 780;
+            letter-spacing: 0;
+            color: #0f172a;
+            margin: 0 0 0.15rem;
+        }
+        .app-subtitle {
+            color: #526173;
+            font-size: 0.94rem;
+            margin: 0 0 0.9rem;
+        }
+        .status-row {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(120px, 1fr));
+            gap: 10px;
+            margin: 0.25rem 0 0.85rem;
+        }
+        .status-cell {
+            border-top: 1px solid rgba(100, 116, 139, 0.22);
+            padding-top: 9px;
+        }
+        .status-cell span {
+            display: block;
+            color: #667085;
+            font-size: 0.74rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .status-cell strong {
+            display: block;
+            color: #111827;
+            font-size: 1.08rem;
+            margin-top: 2px;
+        }
+        .inspector-shell {
+            border-left: 1px solid rgba(100, 116, 139, 0.20);
+            padding-left: 1rem;
+            min-height: 760px;
+        }
+        .muted-line {
+            color: #64748b;
+            font-size: 0.86rem;
+            margin: 0.1rem 0 0.55rem;
+        }
+        .mini-kv {
+            display: grid;
+            grid-template-columns: 112px minmax(0, 1fr);
+            gap: 7px 10px;
+            font-size: 0.88rem;
+            margin: 0.65rem 0 0.9rem;
+        }
+        .mini-kv span:nth-child(odd) {
+            color: #64748b;
+        }
+        .mini-kv span:nth-child(even) {
+            color: #111827;
+            font-weight: 620;
+        }
+        div[data-testid="stButton"] button {
+            border-radius: 7px;
+            min-height: 2.35rem;
+        }
+        div[data-testid="stFormSubmitButton"] button {
+            border-radius: 7px;
+            min-height: 2.35rem;
+        }
+        div[data-testid="stAlert"] {
+            border-radius: 8px;
+        }
+        @media (max-width: 900px) {
+            .status-row {
+                grid-template-columns: repeat(2, minmax(120px, 1fr));
+            }
+            .inspector-shell {
+                border-left: 0;
+                padding-left: 0;
+                min-height: auto;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def load_app_data(force: bool = False) -> tuple[FlowGraphDocument, WellsDocument]:
+    if force or "graph_doc" not in st.session_state or "wells_doc" not in st.session_state:
+        graph, wells = load_documents()
+        st.session_state.graph_doc = graph
+        st.session_state.wells_doc = wells
+    return st.session_state.graph_doc, st.session_state.wells_doc
+
+
+def flash(message: str, level: str = "success") -> None:
+    st.session_state.flash = {"message": message, "level": level}
+
+
+def render_flash() -> None:
+    data = st.session_state.pop("flash", None)
+    if not data:
+        return
+    if data["level"] == "error":
+        st.error(data["message"])
+    elif data["level"] == "warning":
+        st.warning(data["message"])
+    else:
+        st.success(data["message"])
+
+
+def admin_password() -> str:
+    env_value = os.getenv("PYDIAG_ADMIN_PASSWORD")
+    if env_value:
+        return env_value
+    try:
+        secret_value = st.secrets.get("admin_password")
+        if secret_value:
+            return str(secret_value)
+    except Exception:
+        pass
+    if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+        return "admin"
+    return ""
+
+
+def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]:
+    with st.sidebar:
+        st.markdown("### Доступ")
+        if st.session_state.get("admin_authenticated", False):
+            st.success("Режим управления активен")
+            if st.button("Выйти", width="stretch"):
+                st.session_state.admin_authenticated = False
+                st.rerun()
+        else:
+            configured_password = admin_password()
+            password = st.text_input(
+                "Пароль администратора",
+                type="password",
+                disabled=not configured_password,
+            )
+            if not configured_password:
+                st.warning(
+                    "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD "
+                    "или st.secrets['admin_password']."
+                )
+            if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+                st.caption("Включен локальный небезопасный пароль: admin")
+            if st.button("Войти", width="stretch", disabled=not configured_password):
+                if password == configured_password:
+                    st.session_state.admin_authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Неверный пароль")
+
+        st.divider()
+        st.markdown("### Фильтры")
+        search = st.text_input("Поиск", placeholder="узел, скважина, ответственный")
+        responsible_filter = st.multiselect(
+            "Ответственные",
+            options=list(graph.responsibles.keys()),
+            format_func=lambda key: graph.responsibles[key].label,
+        )
+        kind_filter = st.multiselect(
+            "Тип узла",
+            options=list(KIND_LABELS.keys()),
+            format_func=lambda key: KIND_LABELS[key],
+        )
+
+        st.divider()
+        if st.button("Перечитать JSON", width="stretch"):
+            load_app_data(force=True)
+            flash("JSON-файлы перечитаны")
+            st.rerun()
+
+    return search, responsible_filter, kind_filter
+
+
+def render_header(graph: FlowGraphDocument, wells: WellsDocument) -> None:
+    active_wells = [well for well in wells.wells if not well.is_archived]
+    busy_nodes = len({well.current_node_id for well in active_wells})
+    st.markdown(
+        """
+        <div class="app-title">Карта планирования и бурения</div>
+        <div class="app-subtitle">
+        Скважины привязаны к этапам процесса через current_node_id, а переходы разрешаются только по ребрам схемы.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="status-row">
+          <div class="status-cell"><span>Узлы</span><strong>{len(graph.nodes)}</strong></div>
+          <div class="status-cell"><span>Связи</span><strong>{len(graph.edges)}</strong></div>
+          <div class="status-cell"><span>Скважины</span><strong>{len(active_wells)}</strong></div>
+          <div class="status-cell"><span>Занятые этапы</span><strong>{busy_nodes}</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_flow(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    search: str,
+    responsible_filter: list[str],
+    kind_filter: list[str],
+) -> str | None:
+    selected_id = st.session_state.get("selected_id")
+    nodes, active_node_ids = build_streamlit_nodes(
+        graph=graph,
+        wells_doc=wells,
+        search=search,
+        responsible_filter=responsible_filter,
+        kind_filter=kind_filter,
+        selected_id=selected_id,
+    )
+    edges = build_streamlit_edges(graph, active_node_ids=active_node_ids)
+    flow_state = StreamlitFlowState(nodes=nodes, edges=edges, selected_id=selected_id)
+
+    returned = streamlit_flow(
+        "well_drilling_flow",
+        flow_state,
+        layout=ManualLayout(),
+        height=760,
+        fit_view=True,
+        show_controls=True,
+        show_minimap=True,
+        allow_new_edges=False,
+        get_node_on_click=True,
+        get_edge_on_click=True,
+        min_zoom=0.08,
+        hide_watermark=True,
+        style={
+            "backgroundColor": "#f8fafc",
+            "border": "1px solid rgba(100, 116, 139, 0.18)",
+            "borderRadius": "8px",
+        },
+    )
+    st.session_state.selected_id = returned.selected_id
+    return returned.selected_id
+
+
+def resolve_selection(
+    selected_id: str | None,
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+) -> tuple[str, FlowNode | FlowEdge | Well | None]:
+    if not selected_id:
+        return "none", None
+
+    nodes = node_by_id(graph)
+    wells_map = well_by_id(wells)
+    edges = {edge.id: edge for edge in graph.edges}
+
+    if selected_id.startswith("well::"):
+        well_id = selected_id.removeprefix("well::")
+        return ("well", wells_map.get(well_id))
+    if selected_id.startswith("well-extra::"):
+        node_id = selected_id.removeprefix("well-extra::")
+        return ("node", nodes.get(node_id))
+    if selected_id in nodes:
+        return ("node", nodes[selected_id])
+    if selected_id in edges:
+        return ("edge", edges[selected_id])
+    return "none", None
+
+
+def render_inspector(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    selected_id: str | None,
+) -> None:
+    st.markdown('<div class="inspector-shell">', unsafe_allow_html=True)
+    st.markdown("### Инспектор")
+    selection_kind, selected = resolve_selection(selected_id, graph, wells)
+
+    if selection_kind == "node" and selected is not None:
+        render_node_details(graph, wells, selected)
+    elif selection_kind == "well" and selected is not None:
+        render_well_details(graph, selected)
+    elif selection_kind == "edge" and selected is not None:
+        render_edge_details(graph, selected)
+    else:
+        st.info("Выберите узел, связь или фишку скважины на схеме.")
+        render_overview_tables(graph, wells)
+
+    if st.session_state.get("admin_authenticated", False):
+        st.divider()
+        render_admin_panel(graph, wells, selected_id)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_node_details(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    node: FlowNode,
+) -> None:
+    wells_here = [
+        well for well in wells.wells if well.current_node_id == node.id and not well.is_archived
+    ]
+    responsible = getattr(node, "responsible", None)
+    responsible_label = graph.responsibles[responsible].label if responsible else "нет"
+    approvers = [
+        approver.label or graph.responsibles[approver.responsible].label
+        for approver in node.approvers
+    ]
+
+    st.markdown(f"#### {node.title}")
+    st.markdown(
+        f'<p class="muted-line">{KIND_LABELS[node.kind]} · {node.id}</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="mini-kv">
+          <span>Ответственный</span><span>{responsible_label}</span>
+          <span>Время</span><span>{node.duration_hours if node.duration_hours is not None else "не задано"} ч</span>
+          <span>Согласующие</span><span>{", ".join(approvers) if approvers else "нет"}</span>
+          <span>Скважины</span><span>{len(wells_here)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if node.note:
+        st.caption(node.note)
+
+    if wells_here:
+        st.markdown("##### Скважины на этапе")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "id": well.id,
+                        "name": well.name,
+                        "field": well.metadata.get("field", ""),
+                        "rig": well.metadata.get("rig", ""),
+                    }
+                    for well in wells_here
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    transitions = outgoing_edges(graph, node.id)
+    if transitions:
+        st.markdown("##### Доступные переходы")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "тип": edge.kind,
+                        "метка": edge.label or "",
+                        "куда": node_by_id(graph)[edge.target].title,
+                    }
+                    for edge in transitions
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+def render_well_details(graph: FlowGraphDocument, well: Well) -> None:
+    nodes = node_by_id(graph)
+    current_node = nodes[well.current_node_id]
+    st.markdown(f"#### {well.name}")
+    st.markdown(f'<p class="muted-line">{well.id}</p>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="mini-kv">
+          <span>Текущий этап</span><span>{current_node.title}</span>
+          <span>Поле</span><span>{well.metadata.get("field", "не задано")}</span>
+          <span>Буровая</span><span>{well.metadata.get("rig", "не задано")}</span>
+          <span>История</span><span>{len(well.history)} записей</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if well.history:
+        st.markdown("##### Журнал")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "ts": item.ts.strftime("%Y-%m-%d %H:%M"),
+                        "action": item.action,
+                        "node": nodes[item.node_id].title
+                        if item.node_id in nodes
+                        else item.node_id,
+                        "by": item.by or "",
+                        "comment": item.comment or "",
+                    }
+                    for item in reversed(well.history)
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+def render_edge_details(graph: FlowGraphDocument, edge: FlowEdge) -> None:
+    nodes = node_by_id(graph)
+    st.markdown(f"#### {edge.label or edge.kind}")
+    st.markdown(f'<p class="muted-line">{edge.id}</p>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="mini-kv">
+          <span>Тип</span><span>{edge.kind}</span>
+          <span>Откуда</span><span>{nodes[edge.source].title}</span>
+          <span>Куда</span><span>{nodes[edge.target].title}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_overview_tables(graph: FlowGraphDocument, wells: WellsDocument) -> None:
+    grouped = wells_grouped_by_node(wells)
+    top_rows = []
+    for node in graph.nodes:
+        count = len(grouped.get(node.id, []))
+        if count:
+            top_rows.append({"этап": node.title, "скважин": count})
+    if top_rows:
+        st.markdown("##### Распределение")
+        st.dataframe(pd.DataFrame(top_rows), width="stretch", hide_index=True)
+
+
+def render_admin_panel(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    selected_id: str | None,
+) -> None:
+    st.markdown("### Панель управления")
+    selected_kind, selected = resolve_selection(selected_id, graph, wells)
+    default_well_id = (
+        selected.id if selected_kind == "well" and isinstance(selected, Well) else None
+    )
+    default_node_id = (
+        selected.id if selected_kind == "node" and selected is not None else graph.nodes[0].id
+    )
+
+    with st.expander("Переместить или откатить скважину", expanded=True):
+        active_wells = [well for well in wells.wells if not well.is_archived]
+        if not active_wells:
+            st.caption("Активных скважин пока нет.")
+        else:
+            well_ids = [well.id for well in active_wells]
+            default_index = well_ids.index(default_well_id) if default_well_id in well_ids else 0
+            well_id = st.selectbox(
+                "Скважина",
+                options=well_ids,
+                index=default_index,
+                format_func=lambda item: well_by_id(wells)[item].name,
+                key="admin_well_id",
+            )
+            current_well = well_by_id(wells)[well_id]
+            current_node = node_by_id(graph)[current_well.current_node_id]
+            st.caption(f"Сейчас: {current_node.title}")
+
+            transitions = outgoing_edges(graph, current_well.current_node_id)
+            transition_ids = [edge.id for edge in transitions]
+            selected_edge_id = st.selectbox(
+                "Переход",
+                options=transition_ids,
+                format_func=lambda edge_id: transition_label(
+                    next(edge for edge in transitions if edge.id == edge_id),
+                    graph,
+                ),
+                disabled=not transitions,
+                key="admin_transition_id",
+            )
+            comment = st.text_area("Комментарий", height=68, key="admin_comment")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button(
+                    "Продвинуть",
+                    disabled=not transitions,
+                    width="stretch",
+                ):
+                    edge = next(edge for edge in transitions if edge.id == selected_edge_id)
+                    persist_wells_update(
+                        move_well_to_node(
+                            graph,
+                            wells,
+                            well_id=well_id,
+                            target_node_id=edge.target,
+                            actor="local-admin",
+                            comment=comment or None,
+                        ),
+                        graph=graph,
+                        expected_version=wells.version,
+                        success_message="Скважина переведена на следующий этап",
+                    )
+            with col_b:
+                if st.button(
+                    "Откатить",
+                    disabled=len(current_well.history) < 2,
+                    width="stretch",
+                ):
+                    persist_wells_update(
+                        rollback_well(
+                            wells,
+                            well_id=well_id,
+                            actor="local-admin",
+                            comment=comment or None,
+                        ),
+                        graph=graph,
+                        expected_version=wells.version,
+                        success_message="Скважина откатилась на предыдущий этап",
+                    )
+
+            confirm_delete = st.checkbox("Подтвердить удаление", key="confirm_delete")
+            if st.button(
+                "Удалить скважину",
+                disabled=not confirm_delete,
+                width="stretch",
+            ):
+                persist_wells_update(
+                    delete_well(wells, well_id),
+                    graph=graph,
+                    expected_version=wells.version,
+                    success_message="Скважина удалена",
+                )
+
+    with st.expander("Добавить скважину", expanded=False):
+        with st.form("create_well_form", clear_on_submit=False):
+            suggested_id = suggest_well_id(wells)
+            well_id = st.text_input("ID", value=suggested_id)
+            name = st.text_input("Название", value=suggested_id.replace("well_", "Скв. "))
+            start_node_id = st.selectbox(
+                "Начальный этап",
+                options=[node.id for node in graph.nodes],
+                index=[node.id for node in graph.nodes].index(default_node_id)
+                if default_node_id in [node.id for node in graph.nodes]
+                else 0,
+                format_func=lambda node_id: node_by_id(graph)[node_id].title,
+            )
+            field = st.text_input("Месторождение / куст")
+            rig = st.text_input("Буровая")
+            comment = st.text_area("Комментарий", height=68)
+            submitted = st.form_submit_button("Создать", width="stretch")
+
+        if submitted:
+            normalized_well_id = well_id.strip()
+            normalized_name = name.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]+", normalized_well_id):
+                st.error("ID должен состоять из латиницы, цифр, _, ., :, -")
+            elif not normalized_name:
+                st.error("Название скважины обязательно.")
+            else:
+                metadata = {
+                    key: value
+                    for key, value in {"field": field.strip(), "rig": rig.strip()}.items()
+                    if value
+                }
+                persist_wells_update(
+                    create_well(
+                        graph,
+                        wells,
+                        well_id=normalized_well_id,
+                        name=normalized_name,
+                        start_node_id=start_node_id,
+                        actor="local-admin",
+                        metadata=metadata,
+                        comment=comment or None,
+                    ),
+                    graph=graph,
+                    expected_version=wells.version,
+                    success_message="Скважина создана",
+                )
+
+
+def persist_wells_update(
+    updated: WellsDocument,
+    graph: FlowGraphDocument,
+    expected_version: int,
+    success_message: str,
+) -> None:
+    try:
+        saved = save_wells_with_version_check(
+            updated,
+            expected_version=expected_version,
+            path=wells_path(),
+            graph=graph,
+        )
+        st.session_state.wells_doc = saved
+        flash(success_message)
+        st.rerun()
+    except VersionConflictError as exc:
+        try:
+            load_app_data(force=True)
+        except Exception:
+            pass
+        flash(
+            f"Данные уже изменились другим пользователем. Состояние перечитано: {exc}",
+            "warning",
+        )
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def suggest_well_id(wells: WellsDocument) -> str:
+    max_number = 1000
+    for well in wells.wells:
+        match = re.search(r"(\d+)$", well.id)
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+    return f"well_{max_number + 1}"
+
+
+def main() -> None:
+    inject_css()
+    render_flash()
+    try:
+        graph, wells = load_app_data()
+    except Exception as exc:
+        st.error(f"Ошибка загрузки JSON: {exc}")
+        st.stop()
+
+    search, responsible_filter, kind_filter = render_sidebar(graph)
+    render_header(graph, wells)
+
+    canvas_col, inspector_col = st.columns([3.4, 1.25], gap="large")
+    with canvas_col:
+        selected_id = render_flow(
+            graph,
+            wells,
+            search=search,
+            responsible_filter=responsible_filter,
+            kind_filter=kind_filter,
+        )
+
+    with inspector_col:
+        render_inspector(graph, wells, selected_id)
+
+
+if __name__ == "__main__":
+    main()
+
+===END_FILE===
+===BEGIN_FILE===	data/flow_graph.json	11797
+{
+  "schema_version": "1.0",
+  "version": 1,
+  "responsibles": {
+    "planning": {
+      "label": "Планирование",
+      "fill": "#dcecff",
+      "border": "#356ca8",
+      "text": "#17314f"
+    },
+    "geology": {
+      "label": "Геология",
+      "fill": "#e3f7ea",
+      "border": "#3f8a55",
+      "text": "#17311e"
+    },
+    "procurement": {
+      "label": "Закупки",
+      "fill": "#fff2d6",
+      "border": "#b17a23",
+      "text": "#43300d"
+    },
+    "hse": {
+      "label": "ПБОТОС",
+      "fill": "#ffe3e3",
+      "border": "#b84c4c",
+      "text": "#4e1717"
+    },
+    "drilling": {
+      "label": "Бурение",
+      "fill": "#e9e4ff",
+      "border": "#6954b8",
+      "text": "#261b53"
+    },
+    "completion": {
+      "label": "Заканчивание",
+      "fill": "#dff5f2",
+      "border": "#16877d",
+      "text": "#123834"
+    },
+    "logistics": {
+      "label": "Логистика",
+      "fill": "#edf2f7",
+      "border": "#64748b",
+      "text": "#253041"
+    }
+  },
+  "nodes": [
+    {
+      "id": "input_geo_license",
+      "kind": "input_data",
+      "title": "Лицензия и исходные геоданные",
+      "position": { "x": 80.0, "y": 260.0 },
+      "size": { "w": 250, "h": 94 },
+      "note": "Контур участка, ограничения, целевые горизонты",
+      "approvers": [],
+      "duration_hours": 4,
+      "metadata": {}
+    },
+    {
+      "id": "db_offset_wells",
+      "kind": "database",
+      "title": "Архив соседних скважин",
+      "position": { "x": 80.0, "y": 500.0 },
+      "size": { "w": 250, "h": 96 },
+      "note": "Фактические осложнения и НПВ",
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    },
+    {
+      "id": "proc_initial_review",
+      "kind": "process",
+      "title": "Первичный анализ и паспорт скважины",
+      "position": { "x": 420.0, "y": 260.0 },
+      "size": { "w": 300, "h": 116 },
+      "note": "Собрать ограничения, риски, базовый календарь",
+      "approvers": [
+        { "responsible": "geology", "label": "Геология" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 16,
+      "responsible": "planning",
+      "metadata": {}
+    },
+    {
+      "id": "dec_data_complete",
+      "kind": "decision_diamond",
+      "title": "Данные полные?",
+      "position": { "x": 810.0, "y": 270.0 },
+      "size": { "w": 230, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "card_data_rework",
+      "kind": "decision_card",
+      "title": "Запросить недостающие данные",
+      "position": { "x": 810.0, "y": 82.0 },
+      "size": { "w": 250, "h": 98 },
+      "note": "Вернуть пакет в планирование",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 8,
+      "metadata": {}
+    },
+    {
+      "id": "proc_well_design",
+      "kind": "process",
+      "title": "Проект профиля и конструкции",
+      "position": { "x": 1160.0, "y": 260.0 },
+      "size": { "w": 300, "h": 116 },
+      "note": "Траектория, обсадные колонны, ожидаемые давления",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 24,
+      "responsible": "geology",
+      "metadata": {}
+    },
+    {
+      "id": "proc_hse_review",
+      "kind": "process",
+      "title": "Проверка HSE и разрешений",
+      "position": { "x": 1510.0, "y": 82.0 },
+      "size": { "w": 280, "h": 104 },
+      "note": "План реагирования, допуски, матрица рисков",
+      "approvers": [
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 12,
+      "responsible": "hse",
+      "metadata": {}
+    },
+    {
+      "id": "dec_design_ok",
+      "kind": "decision_diamond",
+      "title": "Проект согласован?",
+      "position": { "x": 1510.0, "y": 270.0 },
+      "size": { "w": 240, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    },
+    {
+      "id": "proc_procurement",
+      "kind": "process",
+      "title": "Закупка сервисов и материалов",
+      "position": { "x": 1870.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Долота, растворы, подрядчики, мобилизация",
+      "approvers": [
+        { "responsible": "planning", "label": "Планирование" },
+        { "responsible": "drilling", "label": "Бурение" }
+      ],
+      "duration_hours": 72,
+      "responsible": "procurement",
+      "metadata": {}
+    },
+    {
+      "id": "db_contracts",
+      "kind": "database",
+      "title": "Договоры и заявки",
+      "position": { "x": 1870.0, "y": 500.0 },
+      "size": { "w": 270, "h": 96 },
+      "note": "Единый реестр обеспеченности",
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "proc_mobilization",
+      "kind": "process",
+      "title": "Мобилизация буровой и сервисов",
+      "position": { "x": 2250.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Площадка, логистика, готовность оборудования",
+      "approvers": [
+        { "responsible": "logistics", "label": "Логистика" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 48,
+      "responsible": "logistics",
+      "metadata": {}
+    },
+    {
+      "id": "proc_spud",
+      "kind": "process",
+      "title": "Спуск направления и начало бурения",
+      "position": { "x": 2630.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Старт работ, сводка смены, контроль параметров",
+      "approvers": [],
+      "duration_hours": 18,
+      "responsible": "drilling",
+      "metadata": {}
+    },
+    {
+      "id": "dec_operational_issue",
+      "kind": "decision_diamond",
+      "title": "Есть осложнение?",
+      "position": { "x": 3010.0, "y": 270.0 },
+      "size": { "w": 240, "h": 112 },
+      "note": null,
+      "approvers": [],
+      "duration_hours": 1,
+      "metadata": {}
+    },
+    {
+      "id": "card_mitigation",
+      "kind": "decision_card",
+      "title": "План ликвидации осложнения",
+      "position": { "x": 3010.0, "y": 82.0 },
+      "size": { "w": 270, "h": 102 },
+      "note": "Согласовать действия и вернуться к бурению",
+      "approvers": [
+        { "responsible": "drilling", "label": "Бурение" },
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 6,
+      "metadata": {}
+    },
+    {
+      "id": "proc_drilling_complete",
+      "kind": "process",
+      "title": "Завершение бурения и крепление",
+      "position": { "x": 3370.0, "y": 260.0 },
+      "size": { "w": 310, "h": 116 },
+      "note": "Колонна, цементаж, финальная сводка",
+      "approvers": [
+        { "responsible": "hse", "label": "ПБОТОС" }
+      ],
+      "duration_hours": 36,
+      "responsible": "drilling",
+      "metadata": {}
+    },
+    {
+      "id": "proc_completion",
+      "kind": "process",
+      "title": "Заканчивание и передача в освоение",
+      "position": { "x": 3750.0, "y": 260.0 },
+      "size": { "w": 320, "h": 116 },
+      "note": "Компоновка, испытания, акт передачи",
+      "approvers": [
+        { "responsible": "completion", "label": "Заканчивание" },
+        { "responsible": "planning", "label": "Планирование" }
+      ],
+      "duration_hours": 30,
+      "responsible": "completion",
+      "metadata": {}
+    },
+    {
+      "id": "input_lessons",
+      "kind": "input_data",
+      "title": "Извлеченные уроки",
+      "position": { "x": 3750.0, "y": 500.0 },
+      "size": { "w": 270, "h": 96 },
+      "note": "Фактический опыт для следующих программ",
+      "approvers": [],
+      "duration_hours": 4,
+      "metadata": {}
+    },
+    {
+      "id": "db_final_archive",
+      "kind": "database",
+      "title": "Финальный архив скважины",
+      "position": { "x": 4140.0, "y": 260.0 },
+      "size": { "w": 280, "h": 100 },
+      "note": "Программа, акты, фактические параметры",
+      "approvers": [],
+      "duration_hours": 2,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_input_review",
+      "kind": "default",
+      "source": "input_geo_license",
+      "target": "proc_initial_review",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_offsets_review",
+      "kind": "dashed",
+      "source": "db_offset_wells",
+      "target": "proc_initial_review",
+      "label": "контекст",
+      "metadata": {}
+    },
+    {
+      "id": "e_review_decision",
+      "kind": "default",
+      "source": "proc_initial_review",
+      "target": "dec_data_complete",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_data_yes",
+      "kind": "yes",
+      "source": "dec_data_complete",
+      "target": "proc_well_design",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_data_no",
+      "kind": "no",
+      "source": "dec_data_complete",
+      "target": "card_data_rework",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_rework_back",
+      "kind": "dashed",
+      "source": "card_data_rework",
+      "target": "proc_initial_review",
+      "label": "доработка",
+      "metadata": {}
+    },
+    {
+      "id": "e_design_hse",
+      "kind": "default",
+      "source": "proc_well_design",
+      "target": "proc_hse_review",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_hse_design_ok",
+      "kind": "default",
+      "source": "proc_hse_review",
+      "target": "dec_design_ok",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_design_to_decision",
+      "kind": "default",
+      "source": "proc_well_design",
+      "target": "dec_design_ok",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_design_yes",
+      "kind": "yes",
+      "source": "dec_design_ok",
+      "target": "proc_procurement",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_design_no",
+      "kind": "no",
+      "source": "dec_design_ok",
+      "target": "proc_well_design",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_procurement_contracts",
+      "kind": "dashed",
+      "source": "proc_procurement",
+      "target": "db_contracts",
+      "label": "реестр",
+      "metadata": {}
+    },
+    {
+      "id": "e_procurement_mob",
+      "kind": "default",
+      "source": "proc_procurement",
+      "target": "proc_mobilization",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_mob_spud",
+      "kind": "default",
+      "source": "proc_mobilization",
+      "target": "proc_spud",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_spud_issue",
+      "kind": "default",
+      "source": "proc_spud",
+      "target": "dec_operational_issue",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_issue_yes",
+      "kind": "yes",
+      "source": "dec_operational_issue",
+      "target": "card_mitigation",
+      "label": "Да",
+      "metadata": {}
+    },
+    {
+      "id": "e_mitigation_back",
+      "kind": "dashed",
+      "source": "card_mitigation",
+      "target": "proc_spud",
+      "label": "после мер",
+      "metadata": {}
+    },
+    {
+      "id": "e_issue_no",
+      "kind": "no",
+      "source": "dec_operational_issue",
+      "target": "proc_drilling_complete",
+      "label": "Нет",
+      "metadata": {}
+    },
+    {
+      "id": "e_drill_completion",
+      "kind": "default",
+      "source": "proc_drilling_complete",
+      "target": "proc_completion",
+      "label": null,
+      "metadata": {}
+    },
+    {
+      "id": "e_completion_lessons",
+      "kind": "dashed",
+      "source": "proc_completion",
+      "target": "input_lessons",
+      "label": "факт",
+      "metadata": {}
+    },
+    {
+      "id": "e_completion_archive",
+      "kind": "default",
+      "source": "proc_completion",
+      "target": "db_final_archive",
+      "label": null,
+      "metadata": {}
+    }
+  ]
+}
+
+
+===END_FILE===
+===BEGIN_FILE===	data/wells.json	4901
+{
+  "schema_version": "1.0",
+  "version": 1,
+  "wells": [
+    {
+      "id": "well_1001",
+      "name": "Скв. 1001",
+      "current_node_id": "proc_initial_review",
+      "history": [
+        {
+          "ts": "2026-05-08T08:00:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T10:30:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "Передана в планирование"
+        }
+      ],
+      "metadata": {
+        "field": "Восточный куст",
+        "rig": "БУ-17"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1002",
+      "name": "Скв. 1002",
+      "current_node_id": "dec_design_ok",
+      "history": [
+        {
+          "ts": "2026-05-08T08:15:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T11:10:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "Паспорт готов"
+        },
+        {
+          "ts": "2026-05-08T15:20:00Z",
+          "node_id": "dec_data_complete",
+          "action": "move",
+          "from_node_id": "proc_initial_review",
+          "to_node_id": "dec_data_complete",
+          "by": "planner@example.com",
+          "comment": "Пакет данных проверен"
+        },
+        {
+          "ts": "2026-05-08T16:00:00Z",
+          "node_id": "proc_well_design",
+          "action": "move",
+          "from_node_id": "dec_data_complete",
+          "to_node_id": "proc_well_design",
+          "by": "planner@example.com",
+          "comment": "Ветка Да"
+        },
+        {
+          "ts": "2026-05-08T18:45:00Z",
+          "node_id": "dec_design_ok",
+          "action": "move",
+          "from_node_id": "proc_well_design",
+          "to_node_id": "dec_design_ok",
+          "by": "geology@example.com",
+          "comment": "Проект на согласовании"
+        }
+      ],
+      "metadata": {
+        "field": "Северный куст",
+        "rig": "БУ-22"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1003",
+      "name": "Скв. 1003",
+      "current_node_id": "proc_spud",
+      "history": [
+        {
+          "ts": "2026-05-07T07:00:00Z",
+          "node_id": "proc_mobilization",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "proc_mobilization",
+          "by": "system",
+          "comment": "Импортирована действующая скважина"
+        },
+        {
+          "ts": "2026-05-08T06:00:00Z",
+          "node_id": "proc_spud",
+          "action": "move",
+          "from_node_id": "proc_mobilization",
+          "to_node_id": "proc_spud",
+          "by": "drilling@example.com",
+          "comment": "Начаты работы"
+        }
+      ],
+      "metadata": {
+        "field": "Южный куст",
+        "rig": "БУ-04"
+      },
+      "is_archived": false
+    },
+    {
+      "id": "well_1004",
+      "name": "Скв. 1004",
+      "current_node_id": "card_data_rework",
+      "history": [
+        {
+          "ts": "2026-05-08T09:00:00Z",
+          "node_id": "input_geo_license",
+          "action": "create",
+          "from_node_id": null,
+          "to_node_id": "input_geo_license",
+          "by": "system",
+          "comment": "Создана карточка скважины"
+        },
+        {
+          "ts": "2026-05-08T13:00:00Z",
+          "node_id": "proc_initial_review",
+          "action": "move",
+          "from_node_id": "input_geo_license",
+          "to_node_id": "proc_initial_review",
+          "by": "planner@example.com",
+          "comment": "На проверку"
+        },
+        {
+          "ts": "2026-05-08T15:00:00Z",
+          "node_id": "dec_data_complete",
+          "action": "move",
+          "from_node_id": "proc_initial_review",
+          "to_node_id": "dec_data_complete",
+          "by": "planner@example.com",
+          "comment": "Проверка полноты"
+        },
+        {
+          "ts": "2026-05-08T15:30:00Z",
+          "node_id": "card_data_rework",
+          "action": "move",
+          "from_node_id": "dec_data_complete",
+          "to_node_id": "card_data_rework",
+          "by": "planner@example.com",
+          "comment": "Ветка Нет"
+        }
+      ],
+      "metadata": {
+        "field": "Западный куст",
+        "rig": "БУ-11"
+      },
+      "is_archived": false
+    }
+  ]
+}
+
+===END_FILE===
+===BEGIN_FILE===	pytest.ini	92
+[pytest]
+pythonpath = src
+testpaths = tests
+addopts = -ra --strict-config --strict-markers
+
+
+===END_FILE===
+===BEGIN_FILE===	scripts/project_pack.py	4902
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+
+ARCHIVE_FILE = "all.txt"
+BEGIN = "===BEGIN_FILE==="
+END = "===END_FILE==="
+
+EXCLUDED_DIR_NAMES = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".idea",
+}
+
+EXCLUDED_FILE_PATHS = {
+    ".windsurf/workflows/check_and_pack.yaml",
+}
+
+INCLUDED_FILE_EXTENSIONS = {
+    ".py",
+    # ".txt",
+    # ".md",
+    ".ini",
+    ".cfg",
+    # ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".html",
+    ".js",
+    ".css",
+    # ".inc",
+}
+
+INCLUDED_FILE_NAMES = {}
+
+
+def should_skip_path(path: Path, root: Path) -> bool:
+    rel = path.relative_to(root)
+    parts = set(rel.parts)
+    if parts & EXCLUDED_DIR_NAMES:
+        return True
+    if rel.as_posix() in EXCLUDED_FILE_PATHS:
+        return True
+    return False
+
+
+def should_include_path(path: Path) -> bool:
+    if path.name in INCLUDED_FILE_NAMES:
+        return True
+    return path.suffix.lower() in INCLUDED_FILE_EXTENSIONS
+
+
+def collect_files(root: Path, *, archive_path: Path | None = None) -> list[Path]:
+    files: list[Path] = []
+    archive_resolved = archive_path.resolve() if archive_path is not None else None
+    default_archive_resolved = (root / ARCHIVE_FILE).resolve()
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if should_skip_path(path, root):
+            continue
+        if not should_include_path(path):
+            continue
+        resolved_path = path.resolve()
+        if resolved_path == default_archive_resolved:
+            continue
+        if archive_resolved is not None and resolved_path == archive_resolved:
+            continue
+        files.append(path)
+
+    return sorted(set(files), key=lambda p: str(p.relative_to(root)))
+
+
+def pack(root: Path, output_file: Path) -> None:
+    files = collect_files(root, archive_path=output_file)
+    with output_file.open("w", encoding="utf-8", newline="") as out:
+        for path in files:
+            rel = path.relative_to(root).as_posix()
+            content = path.read_text(encoding="utf-8")
+            out.write(f"{BEGIN}\t{rel}\t{len(content)}\n")
+            out.write(content)
+            out.write("\n")
+            out.write(f"{END}\n")
+
+    print(f"Packed {len(files)} files into {output_file}")
+
+
+def unpack(root: Path, input_file: Path) -> None:
+    if not input_file.exists():
+        raise FileNotFoundError(f"Archive file not found: {input_file}")
+
+    restored = 0
+
+    with input_file.open("r", encoding="utf-8") as src:
+        while True:
+            header = src.readline()
+            if not header:
+                break
+            if not header.startswith(f"{BEGIN}\t"):
+                raise ValueError("Invalid archive format: malformed BEGIN header")
+
+            payload = header.rstrip("\n").split("\t", maxsplit=2)
+            if len(payload) != 3:
+                raise ValueError("Invalid archive format: malformed BEGIN payload")
+            _, rel_path, raw_len = payload
+            content_len = int(raw_len)
+
+            content = src.read(content_len)
+            if len(content) != content_len:
+                raise ValueError("Invalid archive format: truncated file content")
+
+            separator = src.read(1)
+            if separator != "\n":
+                raise ValueError("Invalid archive format: missing content separator")
+
+            end_line = src.readline().rstrip("\n")
+            if end_line != END:
+                raise ValueError("Invalid archive format: missing END marker")
+
+            target = root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            restored += 1
+
+    print(f"Restored {restored} files from {input_file}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Pack project text sources/config/assets (Python, HTML/JS/CSS, JSON/TOML,"
+            " Markdown, WELLTRACK .inc, etc.) to all.txt and unpack back."
+        )
+    )
+    parser.add_argument(
+        "mode",
+        choices=("pack", "unpack"),
+        help="pack: create all.txt, unpack: restore files from all.txt",
+    )
+    parser.add_argument(
+        "--root",
+        default=".",
+        help="Project root directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--archive",
+        default=None,
+        help=f"Archive file path (default: <root>/{ARCHIVE_FILE})",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = Path(args.root).resolve()
+    archive = (
+        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
+    )
+
+    if args.mode == "pack":
+        pack(root, archive)
+    else:
+        unpack(root, archive)
+
+
+if __name__ == "__main__":
+    main()
+
+===END_FILE===
+===BEGIN_FILE===	scripts/quality.py	1031
+from __future__ import annotations
+
+import py_compile
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run(args: list[str]) -> None:
+    subprocess.run([sys.executable, *args], cwd=ROOT, check=True)
+
+
+def compile_python() -> None:
+    files = [
+        ROOT / "app.py",
+        ROOT / "scripts" / "validate_data.py",
+        ROOT / "scripts" / "quality.py",
+        ROOT / "scripts" / "venv_run.py",
+        *sorted((ROOT / "src" / "pydiag").glob("*.py")),
+    ]
+    for path in files:
+        py_compile.compile(str(path), doraise=True)
+
+
+def main() -> int:
+    run([str(ROOT / "scripts" / "validate_data.py")])
+    compile_python()
+    run(["-m", "ruff", "check", "."])
+    run(["-m", "ruff", "format", "--check", "."])
+    run(
+        [
+            "-m",
+            "pytest",
+            "--cov=src/pydiag",
+            "--cov-report=term-missing",
+            "--cov-fail-under=85",
+        ]
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+===END_FILE===
+===BEGIN_FILE===	scripts/validate_data.py	444
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+
+from pydiag.storage import load_documents  # noqa: E402
+
+
+def main() -> int:
+    graph, wells = load_documents()
+    print(f"OK: {len(graph.nodes)} nodes, {len(graph.edges)} edges, {len(wells.wells)} wells")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+===END_FILE===
+===BEGIN_FILE===	scripts/venv_run.py	871
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def venv_python() -> Path:
+    candidates = [
+        ROOT / ".venv" / "Scripts" / "python.exe",
+        ROOT / ".venv" / "Scripts" / "python",
+        ROOT / ".venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "Virtual environment Python was not found. Create it first with "
+        "`python -m venv .venv` or `py -3.13 -m venv .venv`."
+    )
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: python scripts/venv_run.py <python-args>", file=sys.stderr)
+        return 2
+    return subprocess.call([str(venv_python()), *sys.argv[1:]], cwd=ROOT)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/__init__.py	44
+"""Planning and drilling flow prototype."""
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/flow_adapter.py	11252
+from __future__ import annotations
+
+from collections import defaultdict
+
+from streamlit_flow.elements import StreamlitFlowEdge, StreamlitFlowNode
+
+from .models import FlowEdge, FlowGraphDocument, FlowNode, Well, WellsDocument
+
+KIND_LABELS = {
+    "process": "Процесс",
+    "decision_diamond": "Решение",
+    "decision_card": "Решение",
+    "database": "База данных",
+    "input_data": "Входные данные",
+}
+
+
+def wells_grouped_by_node(wells_doc: WellsDocument) -> dict[str, list[Well]]:
+    grouped: dict[str, list[Well]] = defaultdict(list)
+    for well in wells_doc.wells:
+        if not well.is_archived:
+            grouped[well.current_node_id].append(well)
+    for wells in grouped.values():
+        wells.sort(key=lambda item: item.name)
+    return dict(grouped)
+
+
+def node_matches_filters(
+    node: FlowNode,
+    search: str,
+    responsible_filter: list[str],
+    kind_filter: list[str],
+    wells_here: list[Well],
+) -> bool:
+    if kind_filter and node.kind not in kind_filter:
+        return False
+
+    node_responsible = getattr(node, "responsible", None)
+    if responsible_filter and node_responsible not in responsible_filter:
+        return False
+
+    query = search.strip().lower()
+    if not query:
+        return True
+
+    haystack = " ".join(
+        [
+            node.id,
+            node.title,
+            node.note or "",
+            KIND_LABELS[node.kind],
+            node_responsible or "",
+            " ".join(well.id for well in wells_here),
+            " ".join(well.name for well in wells_here),
+        ]
+    ).lower()
+    return query in haystack
+
+
+def build_streamlit_nodes(
+    graph: FlowGraphDocument,
+    wells_doc: WellsDocument,
+    search: str = "",
+    responsible_filter: list[str] | None = None,
+    kind_filter: list[str] | None = None,
+    selected_id: str | None = None,
+) -> tuple[list[StreamlitFlowNode], set[str]]:
+    responsible_filter = responsible_filter or []
+    kind_filter = kind_filter or []
+    wells_by_node = wells_grouped_by_node(wells_doc)
+    nodes: list[StreamlitFlowNode] = []
+    active_node_ids: set[str] = set()
+
+    for node in graph.nodes:
+        wells_here = wells_by_node.get(node.id, [])
+        is_active = node_matches_filters(
+            node,
+            search,
+            responsible_filter,
+            kind_filter,
+            wells_here,
+        )
+        if is_active:
+            active_node_ids.add(node.id)
+
+        nodes.append(
+            StreamlitFlowNode(
+                id=node.id,
+                pos=(node.position.x, node.position.y),
+                data={"content": node_content(node, graph, wells_here)},
+                node_type="default",
+                source_position="right",
+                target_position="left",
+                draggable=False,
+                selectable=True,
+                connectable=False,
+                z_index=10 if node.id == selected_id else 1,
+                style=node_style(node, graph, selected=node.id == selected_id, active=is_active),
+            )
+        )
+
+        for index, well in enumerate(wells_here[:4]):
+            token_id = f"well::{well.id}"
+            token_active = (
+                is_active or search.strip().lower() in (well.id + " " + well.name).lower()
+            )
+            nodes.append(
+                StreamlitFlowNode(
+                    id=token_id,
+                    pos=well_token_position(node, index),
+                    data={"content": f"**{short_well_name(well)}**"},
+                    node_type="default",
+                    draggable=False,
+                    selectable=True,
+                    connectable=False,
+                    z_index=30 if token_id == selected_id else 20,
+                    style=well_token_style(
+                        selected=token_id == selected_id,
+                        active=token_active,
+                    ),
+                )
+            )
+
+        if len(wells_here) > 4:
+            extra_id = f"well-extra::{node.id}"
+            nodes.append(
+                StreamlitFlowNode(
+                    id=extra_id,
+                    pos=well_token_position(node, 4),
+                    data={"content": f"**+{len(wells_here) - 4}**"},
+                    node_type="default",
+                    draggable=False,
+                    selectable=False,
+                    connectable=False,
+                    z_index=19,
+                    style=well_token_style(selected=False, active=is_active),
+                )
+            )
+
+    return nodes, active_node_ids
+
+
+def build_streamlit_edges(
+    graph: FlowGraphDocument,
+    active_node_ids: set[str] | None = None,
+) -> list[StreamlitFlowEdge]:
+    active_node_ids = active_node_ids or {node.id for node in graph.nodes}
+    edges: list[StreamlitFlowEdge] = []
+    for edge in graph.edges:
+        active = edge.source in active_node_ids and edge.target in active_node_ids
+        color = edge_color(edge)
+        opacity = 1.0 if active else 0.16
+        edges.append(
+            StreamlitFlowEdge(
+                id=edge.id,
+                source=edge.source,
+                target=edge.target,
+                edge_type="smoothstep",
+                marker_end={"type": "arrowclosed", "color": color},
+                label=edge.label or "",
+                label_show_bg=bool(edge.label),
+                label_style={
+                    "fill": color,
+                    "fontWeight": 700,
+                    "fontSize": "12px",
+                },
+                label_bg_style={
+                    "fill": "#ffffff",
+                    "fillOpacity": 0.92,
+                    "rx": 6,
+                    "ry": 6,
+                },
+                style={
+                    "stroke": color,
+                    "strokeWidth": 2.2,
+                    "strokeDasharray": "8 6" if edge.kind == "dashed" else "0",
+                    "opacity": opacity,
+                },
+            )
+        )
+    return edges
+
+
+def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well]) -> str:
+    lines: list[str] = []
+    if node.duration_hours is not None:
+        lines.append(f"`TIME {node.duration_hours} ч`")
+
+    lines.append(f"**{node.title}**")
+
+    if node.kind == "process":
+        responsible = graph.responsibles[node.responsible]
+        lines.append(responsible.label)
+    else:
+        lines.append(KIND_LABELS[node.kind])
+
+    if node.note:
+        lines.append(f"_{node.note}_")
+
+    if node.approvers:
+        approvers = []
+        for approver in node.approvers[:3]:
+            style = graph.responsibles[approver.responsible]
+            approvers.append(approver.label or style.label)
+        if len(node.approvers) > 3:
+            approvers.append(f"+{len(node.approvers) - 3}")
+        lines.append("Согласующие: " + " · ".join(approvers))
+
+    if wells_here:
+        visible = ", ".join(short_well_name(well) for well in wells_here[:3])
+        if len(wells_here) > 3:
+            visible += f", +{len(wells_here) - 3}"
+        lines.append("Скважины: " + visible)
+
+    return "  \n".join(lines)
+
+
+def short_well_name(well: Well) -> str:
+    name = well.name.replace("Скв.", "").replace("скв.", "").strip()
+    return name[:16]
+
+
+def node_style(
+    node: FlowNode,
+    graph: FlowGraphDocument,
+    selected: bool,
+    active: bool,
+) -> dict[str, str | float]:
+    style: dict[str, str | float] = {
+        "width": f"{node.size.w}px",
+        "height": f"{node.size.h}px",
+        "boxSizing": "border-box",
+        "padding": "10px 14px",
+        "fontSize": "12px",
+        "lineHeight": "1.22",
+        "fontFamily": "Inter, system-ui, sans-serif",
+        "textAlign": "left",
+        "wordBreak": "break-word",
+        "overflow": "hidden",
+        "opacity": 1.0 if active else 0.28,
+        "transition": "opacity 160ms ease, box-shadow 160ms ease, transform 160ms ease",
+    }
+
+    if node.kind == "process":
+        responsible = graph.responsibles[node.responsible]
+        style.update(
+            {
+                "backgroundColor": responsible.fill,
+                "border": f"2px solid {responsible.border}",
+                "borderRadius": "8px",
+                "color": responsible.text,
+                "boxShadow": "0 12px 26px rgba(15, 23, 42, 0.12)",
+            }
+        )
+    elif node.kind == "decision_diamond":
+        style.update(
+            {
+                "backgroundColor": "#ffffff",
+                "border": "2px solid #334155",
+                "clipPath": "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)",
+                "padding": "22px 34px",
+                "textAlign": "center",
+                "color": "#111827",
+                "boxShadow": "0 14px 26px rgba(51, 65, 85, 0.14)",
+            }
+        )
+    elif node.kind == "decision_card":
+        style.update(
+            {
+                "backgroundColor": "#e7ebf0",
+                "border": "2px solid #8a94a6",
+                "borderRadius": "22px",
+                "color": "#202938",
+                "boxShadow": "0 12px 24px rgba(15, 23, 42, 0.10)",
+            }
+        )
+    elif node.kind == "database":
+        style.update(
+            {
+                "background": "linear-gradient(180deg, #f8fafc 0%, #d8dee8 100%)",
+                "border": "2px solid #6b7280",
+                "borderRadius": "50% / 18%",
+                "textAlign": "center",
+                "color": "#111827",
+                "boxShadow": "inset 0 10px 0 rgba(255,255,255,0.65), 0 12px 24px rgba(15, 23, 42, 0.12)",
+            }
+        )
+    elif node.kind == "input_data":
+        style.update(
+            {
+                "backgroundColor": "#f1f7ff",
+                "border": "2px solid #5477aa",
+                "clipPath": "polygon(13% 0%, 100% 0%, 87% 100%, 0% 100%)",
+                "padding": "12px 24px",
+                "color": "#183557",
+                "boxShadow": "0 12px 24px rgba(30, 64, 175, 0.10)",
+            }
+        )
+
+    if selected:
+        style.update(
+            {
+                "boxShadow": "0 0 0 4px rgba(20, 184, 166, 0.24), 0 18px 36px rgba(15, 23, 42, 0.18)",
+                "transform": "translateY(-1px)",
+            }
+        )
+
+    return style
+
+
+def well_token_position(node: FlowNode, index: int) -> tuple[float, float]:
+    row = index // 2
+    col = index % 2
+    return (
+        node.position.x + 14 + col * 84,
+        node.position.y + node.size.h + 12 + row * 34,
+    )
+
+
+def well_token_style(selected: bool, active: bool) -> dict[str, str | float]:
+    return {
+        "width": "74px",
+        "height": "28px",
+        "boxSizing": "border-box",
+        "padding": "4px 8px",
+        "borderRadius": "999px",
+        "border": "2px solid #ffffff",
+        "backgroundColor": "#0f766e" if selected else "#0f172a",
+        "color": "#ffffff",
+        "fontSize": "11px",
+        "lineHeight": "1.05",
+        "textAlign": "center",
+        "overflow": "hidden",
+        "boxShadow": "0 10px 22px rgba(15, 23, 42, 0.22)",
+        "opacity": 1.0 if active else 0.24,
+        "transition": "opacity 160ms ease, background-color 160ms ease",
+    }
+
+
+def edge_color(edge: FlowEdge) -> str:
+    return {
+        "default": "#475569",
+        "yes": "#16834a",
+        "no": "#c2410c",
+        "dashed": "#64748b",
+    }[edge.kind]
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/models.py	6151
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+MetaValue = str | int | float | bool | None
+
+NodeKind = Literal[
+    "process",
+    "decision_diamond",
+    "decision_card",
+    "database",
+    "input_data",
+]
+
+EdgeKind = Literal["default", "yes", "no", "dashed"]
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+class Position(StrictModel):
+    x: float
+    y: float
+
+
+class Size(StrictModel):
+    w: int = Field(ge=80, le=1200)
+    h: int = Field(ge=40, le=800)
+
+
+class ResponsibleStyle(StrictModel):
+    label: str
+    fill: str
+    border: str
+    text: str = "#172033"
+
+
+class ApproverBadge(StrictModel):
+    responsible: str
+    label: str | None = None
+
+
+class NodeBase(StrictModel):
+    id: str = Field(min_length=1)
+    kind: NodeKind
+    title: str = Field(min_length=1)
+    position: Position
+    size: Size
+    note: str | None = None
+    approvers: list[ApproverBadge] = Field(default_factory=list)
+    duration_hours: int | None = Field(default=None, ge=0)
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+
+class ProcessNode(NodeBase):
+    kind: Literal["process"]
+    responsible: str
+
+
+class DecisionDiamondNode(NodeBase):
+    kind: Literal["decision_diamond"]
+
+
+class DecisionCardNode(NodeBase):
+    kind: Literal["decision_card"]
+
+
+class DatabaseNode(NodeBase):
+    kind: Literal["database"]
+
+
+class InputDataNode(NodeBase):
+    kind: Literal["input_data"]
+
+
+FlowNode = Annotated[
+    ProcessNode | DecisionDiamondNode | DecisionCardNode | DatabaseNode | InputDataNode,
+    Field(discriminator="kind"),
+]
+
+
+class EdgeBase(StrictModel):
+    id: str = Field(min_length=1)
+    kind: EdgeKind
+    source: str
+    target: str
+    label: str | None = None
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+
+class DefaultEdge(EdgeBase):
+    kind: Literal["default"]
+
+
+class YesEdge(EdgeBase):
+    kind: Literal["yes"]
+    label: str = "Да"
+
+
+class NoEdge(EdgeBase):
+    kind: Literal["no"]
+    label: str = "Нет"
+
+
+class DashedEdge(EdgeBase):
+    kind: Literal["dashed"]
+
+
+FlowEdge = Annotated[
+    DefaultEdge | YesEdge | NoEdge | DashedEdge,
+    Field(discriminator="kind"),
+]
+
+
+class FlowGraphDocument(StrictModel):
+    schema_version: Literal["1.0"] = "1.0"
+    version: int = Field(ge=1)
+    responsibles: dict[str, ResponsibleStyle]
+    nodes: list[FlowNode]
+    edges: list[FlowEdge]
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> FlowGraphDocument:
+        if not self.responsibles:
+            raise ValueError("At least one responsible must be defined")
+
+        node_ids = [node.id for node in self.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("Duplicate node ids are not allowed")
+
+        edge_ids = [edge.id for edge in self.edges]
+        if len(edge_ids) != len(set(edge_ids)):
+            raise ValueError("Duplicate edge ids are not allowed")
+
+        node_set = set(node_ids)
+        responsible_set = set(self.responsibles)
+
+        for node in self.nodes:
+            if node.kind == "process" and node.responsible not in responsible_set:
+                raise ValueError(f"Node {node.id}: unknown responsible {node.responsible}")
+            for approver in node.approvers:
+                if approver.responsible not in responsible_set:
+                    raise ValueError(f"Node {node.id}: unknown approver {approver.responsible}")
+
+        for edge in self.edges:
+            if edge.source not in node_set:
+                raise ValueError(f"Edge {edge.id}: unknown source node {edge.source}")
+            if edge.target not in node_set:
+                raise ValueError(f"Edge {edge.id}: unknown target node {edge.target}")
+        return self
+
+
+class WellHistoryEntry(StrictModel):
+    ts: datetime
+    node_id: str
+    action: Literal["create", "move", "rollback"]
+    from_node_id: str | None = None
+    to_node_id: str | None = None
+    by: str | None = None
+    comment: str | None = None
+
+
+class Well(StrictModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    current_node_id: str
+    history: list[WellHistoryEntry] = Field(default_factory=list)
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+    is_archived: bool = False
+
+
+class WellsDocument(StrictModel):
+    schema_version: Literal["1.0"] = "1.0"
+    version: int = Field(ge=1)
+    wells: list[Well]
+
+    @model_validator(mode="after")
+    def validate_wells(self) -> WellsDocument:
+        ids = [well.id for well in self.wells]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate well ids are not allowed")
+        return self
+
+
+def node_by_id(graph: FlowGraphDocument) -> dict[str, FlowNode]:
+    return {node.id: node for node in graph.nodes}
+
+
+def well_by_id(wells_doc: WellsDocument) -> dict[str, Well]:
+    return {well.id: well for well in wells_doc.wells}
+
+
+def validate_wells_against_graph(
+    graph: FlowGraphDocument,
+    wells_doc: WellsDocument,
+) -> None:
+    node_ids = {node.id for node in graph.nodes}
+    for well in wells_doc.wells:
+        if well.current_node_id not in node_ids:
+            raise ValueError(
+                f"Well {well.id}: current_node_id={well.current_node_id} does not exist in graph"
+            )
+        for item in well.history:
+            if item.node_id not in node_ids:
+                raise ValueError(
+                    f"Well {well.id}: history node {item.node_id} does not exist in graph"
+                )
+            if item.from_node_id is not None and item.from_node_id not in node_ids:
+                raise ValueError(
+                    f"Well {well.id}: history from_node_id={item.from_node_id} "
+                    "does not exist in graph"
+                )
+            if item.to_node_id is not None and item.to_node_id not in node_ids:
+                raise ValueError(
+                    f"Well {well.id}: history to_node_id={item.to_node_id} does not exist in graph"
+                )
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/services.py	4445
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from .models import (
+    FlowEdge,
+    FlowGraphDocument,
+    Well,
+    WellHistoryEntry,
+    WellsDocument,
+    node_by_id,
+)
+
+
+def outgoing_edges(graph: FlowGraphDocument, node_id: str) -> list[FlowEdge]:
+    return [edge for edge in graph.edges if edge.source == node_id]
+
+
+def create_well(
+    graph: FlowGraphDocument,
+    wells_doc: WellsDocument,
+    well_id: str,
+    name: str,
+    start_node_id: str,
+    actor: str,
+    metadata: dict[str, str | int | float | bool | None] | None = None,
+    comment: str | None = None,
+) -> WellsDocument:
+    nodes = node_by_id(graph)
+    if start_node_id not in nodes:
+        raise ValueError(f"Unknown start node: {start_node_id}")
+    if any(well.id == well_id for well in wells_doc.wells):
+        raise ValueError(f"Well id already exists: {well_id}")
+
+    created = Well(
+        id=well_id,
+        name=name,
+        current_node_id=start_node_id,
+        metadata=metadata or {},
+        history=[
+            WellHistoryEntry(
+                ts=datetime.now(UTC),
+                node_id=start_node_id,
+                action="create",
+                from_node_id=None,
+                to_node_id=start_node_id,
+                by=actor,
+                comment=comment or "Created from admin panel",
+            )
+        ],
+    )
+
+    updated = wells_doc.model_copy(deep=True)
+    updated.wells.append(created)
+    return updated
+
+
+def delete_well(wells_doc: WellsDocument, well_id: str) -> WellsDocument:
+    updated = wells_doc.model_copy(deep=True)
+    before = len(updated.wells)
+    updated.wells = [well for well in updated.wells if well.id != well_id]
+    if len(updated.wells) == before:
+        raise ValueError(f"Unknown well: {well_id}")
+    return updated
+
+
+def move_well_to_node(
+    graph: FlowGraphDocument,
+    wells_doc: WellsDocument,
+    well_id: str,
+    target_node_id: str,
+    actor: str,
+    comment: str | None = None,
+) -> WellsDocument:
+    nodes = node_by_id(graph)
+    if target_node_id not in nodes:
+        raise ValueError(f"Unknown target node: {target_node_id}")
+
+    updated = wells_doc.model_copy(deep=True)
+    well = next((item for item in updated.wells if item.id == well_id), None)
+    if well is None:
+        raise ValueError(f"Unknown well: {well_id}")
+
+    if well.current_node_id == target_node_id:
+        raise ValueError("Well is already on this node")
+
+    allowed_targets = {edge.target for edge in graph.edges if edge.source == well.current_node_id}
+    if target_node_id not in allowed_targets:
+        raise ValueError(f"Illegal transition: {well.current_node_id} -> {target_node_id}")
+
+    previous = well.current_node_id
+    well.current_node_id = target_node_id
+    well.history.append(
+        WellHistoryEntry(
+            ts=datetime.now(UTC),
+            node_id=target_node_id,
+            action="move",
+            from_node_id=previous,
+            to_node_id=target_node_id,
+            by=actor,
+            comment=comment,
+        )
+    )
+    return updated
+
+
+def rollback_well(
+    wells_doc: WellsDocument,
+    well_id: str,
+    actor: str,
+    comment: str | None = None,
+) -> WellsDocument:
+    updated = wells_doc.model_copy(deep=True)
+    well = next((item for item in updated.wells if item.id == well_id), None)
+    if well is None:
+        raise ValueError(f"Unknown well: {well_id}")
+    if len(well.history) < 2:
+        raise ValueError("No previous node in well history")
+
+    current = well.current_node_id
+    previous_node = well.history[-2].node_id
+    if previous_node == current:
+        raise ValueError("Previous history entry points to the current node")
+
+    well.current_node_id = previous_node
+    well.history.append(
+        WellHistoryEntry(
+            ts=datetime.now(UTC),
+            node_id=previous_node,
+            action="rollback",
+            from_node_id=current,
+            to_node_id=previous_node,
+            by=actor,
+            comment=comment,
+        )
+    )
+    return updated
+
+
+def transition_label(edge: FlowEdge, graph: FlowGraphDocument) -> str:
+    nodes = node_by_id(graph)
+    target_title = nodes[edge.target].title if edge.target in nodes else edge.target
+    prefix = (
+        edge.label
+        or {
+            "default": "Далее",
+            "yes": "Да",
+            "no": "Нет",
+            "dashed": "Возврат",
+        }[edge.kind]
+    )
+    return f"{prefix}: {target_title}"
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/storage.py	3117
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from .models import FlowGraphDocument, WellsDocument, validate_wells_against_graph
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data"
+GRAPH_PATH = DATA_DIR / "flow_graph.json"
+WELLS_PATH = DATA_DIR / "wells.json"
+GRAPH_PATH_ENV = "PYDIAG_GRAPH_PATH"
+WELLS_PATH_ENV = "PYDIAG_WELLS_PATH"
+
+
+class VersionConflictError(RuntimeError):
+    """Raised when a writer tries to save stale JSON state."""
+
+
+def graph_path() -> Path:
+    return Path(os.getenv(GRAPH_PATH_ENV) or GRAPH_PATH)
+
+
+def wells_path() -> Path:
+    return Path(os.getenv(WELLS_PATH_ENV) or WELLS_PATH)
+
+
+def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
+    raw = Path(path or graph_path()).read_bytes()
+    return FlowGraphDocument.model_validate_json(raw, strict=True)
+
+
+def load_wells_doc(path: str | Path | None = None) -> WellsDocument:
+    raw = Path(path or wells_path()).read_bytes()
+    return WellsDocument.model_validate_json(raw, strict=True)
+
+
+def load_documents(
+    graph_doc_path: str | Path | None = None,
+    wells_doc_path: str | Path | None = None,
+) -> tuple[FlowGraphDocument, WellsDocument]:
+    graph = load_graph_doc(graph_doc_path)
+    wells = load_wells_doc(wells_doc_path)
+    validate_wells_against_graph(graph, wells)
+    return graph, wells
+
+
+def save_json_atomic(path: str | Path, payload: dict) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=target.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_name = tmp.name
+            json.dump(payload, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_name, target)
+        fsync_parent_dir(target)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+
+
+def fsync_parent_dir(path: Path) -> None:
+    if os.name != "posix":
+        return
+
+    dir_fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def save_wells_with_version_check(
+    wells_doc: WellsDocument,
+    expected_version: int,
+    path: str | Path | None = None,
+    graph: FlowGraphDocument | None = None,
+) -> WellsDocument:
+    target = Path(path or wells_path())
+    current = load_wells_doc(target)
+    if current.version != expected_version:
+        raise VersionConflictError(
+            f"Conflict: expected wells version {expected_version}, "
+            f"actual version is {current.version}"
+        )
+
+    to_save = wells_doc.model_copy(deep=True)
+    to_save.version = expected_version + 1
+    if graph is not None:
+        validate_wells_against_graph(graph, to_save)
+    save_json_atomic(target, to_save.model_dump(mode="json"))
+    return load_wells_doc(target)
+
+===END_FILE===
+===BEGIN_FILE===	tests/conftest.py	643
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+
+from pydiag.storage import load_documents
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+APP_PATH = ROOT / "app.py"
+
+
+@pytest.fixture
+def data_paths(tmp_path: Path) -> tuple[Path, Path]:
+    graph_path = tmp_path / "flow_graph.json"
+    wells_path = tmp_path / "wells.json"
+    shutil.copyfile(DATA_DIR / "flow_graph.json", graph_path)
+    shutil.copyfile(DATA_DIR / "wells.json", wells_path)
+    return graph_path, wells_path
+
+
+@pytest.fixture
+def documents(data_paths: tuple[Path, Path]):
+    return load_documents(*data_paths)
+
+===END_FILE===
+===BEGIN_FILE===	tests/integration/test_streamlit_app.py	4327
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from streamlit.testing.v1 import AppTest
+
+from pydiag.models import well_by_id
+from pydiag.storage import load_wells_doc
+
+APP_PATH = Path(__file__).resolve().parents[2] / "app.py"
+
+
+def run_app_with_temp_data(
+    data_paths: tuple[Path, Path],
+    monkeypatch,
+    *,
+    configure_admin: bool = True,
+) -> AppTest:
+    graph_path, wells_path = data_paths
+    monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
+    monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
+    if configure_admin:
+        monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "test-admin")
+    else:
+        monkeypatch.delenv("PYDIAG_ADMIN_PASSWORD", raising=False)
+
+    app = AppTest.from_file(str(APP_PATH))
+    app.run(timeout=30)
+    assert not app.exception
+    return app
+
+
+def login_as_admin(app: AppTest) -> AppTest:
+    app.text_input[0].set_value("test-admin").run(timeout=30)
+    app.button[0].click().run(timeout=30)
+    assert not app.exception
+    return app
+
+
+def click_button(app: AppTest, label: str) -> AppTest:
+    for button in app.button:
+        if button.label == label:
+            button.click().run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Button not found: {label}")
+
+
+def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> None:
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+
+    assert any("Карта планирования и бурения" in item.value for item in app.markdown)
+    assert any("Узлы" in item.value and "18" in item.value for item in app.markdown)
+    assert app.info[0].value == "Выберите узел, связь или фишку скважины на схеме."
+
+
+def test_streamlit_app_requires_explicit_admin_password(data_paths, monkeypatch) -> None:
+    app = run_app_with_temp_data(data_paths, monkeypatch, configure_admin=False)
+
+    assert any("Админ-пароль не настроен" in item.value for item in app.warning)
+    labels = {button.label for button in app.button}
+    assert {"Войти", "Перечитать JSON"} <= labels
+    assert "Продвинуть" not in labels
+
+
+def test_streamlit_admin_login_reveals_management_panel(
+    data_paths,
+    monkeypatch,
+) -> None:
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+
+    login_as_admin(app)
+
+    assert any(item.value == "Режим управления активен" for item in app.success)
+    assert {button.label for button in app.button} >= {
+        "Продвинуть",
+        "Откатить",
+        "Удалить скважину",
+        "Создать",
+    }
+
+
+def test_streamlit_admin_can_move_well_without_touching_real_json(
+    data_paths,
+    monkeypatch,
+) -> None:
+    _, wells_path = data_paths
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    click_button(app, "Продвинуть")
+
+    saved = load_wells_doc(wells_path)
+    well = well_by_id(saved)["well_1001"]
+    assert saved.version == 2
+    assert well.current_node_id == "dec_data_complete"
+    assert well.history[-1].action == "move"
+
+
+def test_streamlit_admin_can_create_well_in_temp_json(
+    data_paths,
+    monkeypatch,
+) -> None:
+    _, wells_path = data_paths
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    app.text_input[0].set_value("well_ui")
+    app.text_input[1].set_value("Скв. UI")
+    app.text_input[2].set_value("Тестовый куст")
+    app.text_input[3].set_value("БУ-ТЕСТ")
+    click_button(app, "Создать")
+
+    saved = load_wells_doc(wells_path)
+    created = well_by_id(saved)["well_ui"]
+    assert created.name == "Скв. UI"
+    assert created.current_node_id == "input_geo_license"
+    assert created.metadata == {"field": "Тестовый куст", "rig": "БУ-ТЕСТ"}
+
+
+def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> None:
+    _, wells_path = data_paths
+    payload = json.loads(wells_path.read_text(encoding="utf-8"))
+    for well in payload["wells"]:
+        well["is_archived"] = True
+    wells_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    assert any(item.value == "Активных скважин пока нет." for item in app.caption)
+    assert "Продвинуть" not in {button.label for button in app.button}
+
+===END_FILE===
+===BEGIN_FILE===	tests/unit/test_flow_adapter.py	1073
+from __future__ import annotations
+
+from pydiag.flow_adapter import build_streamlit_edges, build_streamlit_nodes
+
+
+def test_adapter_builds_domain_nodes_and_well_tokens(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells, selected_id="well::well_1001")
+    edges = build_streamlit_edges(graph, active_ids)
+    node_ids = {node.id for node in nodes}
+
+    assert "proc_initial_review" in node_ids
+    assert "well::well_1001" in node_ids
+    assert "e_review_decision" in {edge.id for edge in edges}
+    assert active_ids == {node.id for node in graph.nodes}
+
+
+def test_adapter_search_highlights_matching_well_node(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells, search="1003")
+    token = next(node for node in nodes if node.id == "well::well_1003")
+    other_token = next(node for node in nodes if node.id == "well::well_1001")
+
+    assert "proc_spud" in active_ids
+    assert token.style["opacity"] == 1.0
+    assert other_token.style["opacity"] == 0.24
+
+===END_FILE===
+===BEGIN_FILE===	tests/unit/test_models.py	1570
+from __future__ import annotations
+
+import json
+
+import pytest
+from pydantic import ValidationError
+
+from pydiag.models import FlowGraphDocument
+from pydiag.storage import load_documents
+
+
+def test_sample_documents_are_valid(documents) -> None:
+    graph, wells = documents
+
+    assert len(graph.nodes) == 18
+    assert len(graph.edges) == 21
+    assert len(wells.wells) == 4
+
+
+def test_strict_graph_validation_rejects_wrong_position_type(
+    data_paths,
+) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["nodes"][0]["position"]["x"] = "80"
+
+    with pytest.raises(ValidationError):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_graph_validation_rejects_duplicate_node_ids(data_paths) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["nodes"][1]["id"] = payload["nodes"][0]["id"]
+
+    with pytest.raises(ValidationError, match="Duplicate node ids"):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_cross_document_validation_rejects_unknown_well_node(
+    data_paths,
+) -> None:
+    graph_path, wells_path = data_paths
+    payload = json.loads(wells_path.read_text(encoding="utf-8"))
+    payload["wells"][0]["current_node_id"] = "missing_node"
+    wells_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not exist in graph"):
+        load_documents(graph_path, wells_path)
+
+===END_FILE===
+===BEGIN_FILE===	tests/unit/test_services.py	2759
+from __future__ import annotations
+
+import pytest
+
+from pydiag.models import well_by_id
+from pydiag.services import create_well, delete_well, move_well_to_node, rollback_well
+
+
+def test_move_well_uses_only_allowed_graph_edges(documents) -> None:
+    graph, wells = documents
+
+    updated = move_well_to_node(
+        graph,
+        wells,
+        well_id="well_1001",
+        target_node_id="dec_data_complete",
+        actor="pytest",
+    )
+
+    original = well_by_id(wells)["well_1001"]
+    moved = well_by_id(updated)["well_1001"]
+    assert original.current_node_id == "proc_initial_review"
+    assert moved.current_node_id == "dec_data_complete"
+    assert moved.history[-1].from_node_id == "proc_initial_review"
+    assert moved.history[-1].to_node_id == "dec_data_complete"
+
+
+def test_move_well_rejects_illegal_transition(documents) -> None:
+    graph, wells = documents
+
+    with pytest.raises(ValueError, match="Illegal transition"):
+        move_well_to_node(
+            graph,
+            wells,
+            well_id="well_1001",
+            target_node_id="proc_procurement",
+            actor="pytest",
+        )
+
+
+def test_rollback_returns_to_previous_history_node(documents) -> None:
+    graph, wells = documents
+    moved = move_well_to_node(
+        graph,
+        wells,
+        well_id="well_1001",
+        target_node_id="dec_data_complete",
+        actor="pytest",
+    )
+
+    rolled = rollback_well(moved, well_id="well_1001", actor="pytest")
+
+    assert well_by_id(rolled)["well_1001"].current_node_id == "proc_initial_review"
+    assert well_by_id(rolled)["well_1001"].history[-1].action == "rollback"
+
+
+def test_create_well_adds_initial_history_entry(documents) -> None:
+    graph, wells = documents
+
+    updated = create_well(
+        graph,
+        wells,
+        well_id="well_new",
+        name="Скв. NEW",
+        start_node_id="input_geo_license",
+        actor="pytest",
+        metadata={"field": "Тестовый куст"},
+    )
+
+    created = well_by_id(updated)["well_new"]
+    assert created.current_node_id == "input_geo_license"
+    assert created.history[0].action == "create"
+    assert created.metadata["field"] == "Тестовый куст"
+
+
+def test_create_well_rejects_duplicate_id(documents) -> None:
+    graph, wells = documents
+
+    with pytest.raises(ValueError, match="already exists"):
+        create_well(
+            graph,
+            wells,
+            well_id="well_1001",
+            name="Duplicate",
+            start_node_id="input_geo_license",
+            actor="pytest",
+        )
+
+
+def test_delete_well_removes_it_from_document(documents) -> None:
+    _, wells = documents
+
+    updated = delete_well(wells, "well_1004")
+
+    assert "well_1004" not in well_by_id(updated)
+    assert "well_1004" in well_by_id(wells)
+
+===END_FILE===
+===BEGIN_FILE===	tests/unit/test_storage.py	3042
+from __future__ import annotations
+
+import pytest
+
+from pydiag.models import well_by_id
+from pydiag.services import move_well_to_node
+from pydiag.storage import (
+    VersionConflictError,
+    fsync_parent_dir,
+    graph_path,
+    load_documents,
+    load_wells_doc,
+    save_wells_with_version_check,
+    wells_path,
+)
+
+
+def test_env_paths_are_resolved_at_runtime(data_paths, monkeypatch) -> None:
+    graph_file, wells_file = data_paths
+    monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_file))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_file))
+
+    graph, wells = load_documents()
+
+    assert graph_path() == graph_file
+    assert wells_path() == wells_file
+    assert len(graph.nodes) == 18
+    assert len(wells.wells) == 4
+
+
+def test_save_wells_with_version_check_is_atomic_and_increments_version(
+    data_paths,
+) -> None:
+    graph_file, wells_file = data_paths
+    graph, wells = load_documents(graph_file, wells_file)
+    updated = move_well_to_node(
+        graph,
+        wells,
+        well_id="well_1001",
+        target_node_id="dec_data_complete",
+        actor="pytest",
+    )
+
+    saved = save_wells_with_version_check(
+        updated,
+        expected_version=wells.version,
+        path=wells_file,
+    )
+
+    reloaded = load_wells_doc(wells_file)
+    assert saved.version == wells.version + 1
+    assert reloaded.version == saved.version
+    assert well_by_id(reloaded)["well_1001"].current_node_id == "dec_data_complete"
+
+
+def test_save_wells_with_version_check_rejects_stale_writer(data_paths) -> None:
+    graph_file, wells_file = data_paths
+    graph, wells = load_documents(graph_file, wells_file)
+    updated = move_well_to_node(
+        graph,
+        wells,
+        well_id="well_1001",
+        target_node_id="dec_data_complete",
+        actor="pytest",
+    )
+    save_wells_with_version_check(updated, expected_version=wells.version, path=wells_file)
+
+    with pytest.raises(VersionConflictError, match="Conflict"):
+        save_wells_with_version_check(
+            updated,
+            expected_version=wells.version,
+            path=wells_file,
+        )
+
+
+def test_save_wells_with_version_check_rejects_graph_integrity_violation(
+    data_paths,
+) -> None:
+    graph_file, wells_file = data_paths
+    graph, wells = load_documents(graph_file, wells_file)
+    updated = wells.model_copy(deep=True)
+    updated.wells[0].current_node_id = "missing_node"
+
+    with pytest.raises(ValueError, match="does not exist in graph"):
+        save_wells_with_version_check(
+            updated,
+            expected_version=wells.version,
+            path=wells_file,
+            graph=graph,
+        )
+
+
+def test_fsync_parent_dir_is_noop_on_non_posix(monkeypatch, tmp_path) -> None:
+    import pydiag.storage as storage
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("os.open should not be called on non-posix platforms")
+
+    monkeypatch.setattr(storage.os, "name", "nt")
+    monkeypatch.setattr(storage.os, "open", fail_if_called)
+
+    fsync_parent_dir(tmp_path / "wells.json")
+
+===END_FILE===
