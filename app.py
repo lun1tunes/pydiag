@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,7 @@ from pydiag.flow_adapter import (  # noqa: E402
     KIND_LABELS,
     build_streamlit_edges,
     build_streamlit_nodes,
+    flow_canvas_height,
     wells_grouped_by_node,
 )
 from pydiag.models import (  # noqa: E402
@@ -39,6 +41,7 @@ from pydiag.services import (  # noqa: E402
     transition_label,
 )
 from pydiag.storage import (  # noqa: E402
+    FileLockTimeoutError,
     VersionConflictError,
     load_documents,
     save_wells_with_version_check,
@@ -61,9 +64,16 @@ def inject_css() -> None:
             background:
                 linear-gradient(180deg, rgba(246, 247, 249, 0.98), rgba(246, 247, 249, 1));
         }
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        .stAppHeader,
+        .stDeployButton {
+            display: none !important;
+        }
         .block-container {
             max-width: none;
-            padding: 1.25rem 1.55rem 2rem;
+            padding: 2.25rem 1.55rem 2rem;
         }
         [data-testid="stSidebar"] {
             background: #eef2f6;
@@ -110,9 +120,10 @@ def inject_css() -> None:
             margin-top: 2px;
         }
         .inspector-shell {
-            border-left: 1px solid rgba(100, 116, 139, 0.20);
-            padding-left: 1rem;
-            min-height: 760px;
+            border-top: 1px solid rgba(100, 116, 139, 0.20);
+            padding-top: 1rem;
+            margin-top: 1rem;
+            min-height: auto;
         }
         .muted-line {
             color: #64748b;
@@ -149,8 +160,8 @@ def inject_css() -> None:
                 grid-template-columns: repeat(2, minmax(120px, 1fr));
             }
             .inspector-shell {
-                border-left: 0;
-                padding-left: 0;
+                border-top: 1px solid rgba(100, 116, 139, 0.20);
+                padding-top: 1rem;
                 min-height: auto;
             }
         }
@@ -188,18 +199,19 @@ def admin_password() -> str:
     env_value = os.getenv("PYDIAG_ADMIN_PASSWORD")
     if env_value:
         return env_value
-    try:
-        secret_value = st.secrets.get("admin_password")
-        if secret_value:
-            return str(secret_value)
-    except Exception:
-        pass
+    if os.getenv("PYDIAG_DISABLE_STREAMLIT_SECRETS") != "1":
+        try:
+            secret_value = st.secrets.get("admin_password")
+            if secret_value:
+                return str(secret_value)
+        except Exception:
+            pass
     if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
         return "admin"
     return ""
 
 
-def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]:
+def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str], str]:
     with st.sidebar:
         st.markdown("### Доступ")
         if st.session_state.get("admin_authenticated", False):
@@ -241,6 +253,14 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
             options=list(KIND_LABELS.keys()),
             format_func=lambda key: KIND_LABELS[key],
         )
+        layout_mode = st.selectbox(
+            "Расположение",
+            options=["snake", "manual"],
+            format_func=lambda key: {
+                "snake": "Змейка",
+                "manual": "Координаты из JSON",
+            }[key],
+        )
 
         st.divider()
         if st.button("Перечитать JSON", width="stretch"):
@@ -248,7 +268,7 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
             flash("JSON-файлы перечитаны")
             st.rerun()
 
-    return search, responsible_filter, kind_filter
+    return search, responsible_filter, kind_filter, layout_mode
 
 
 def render_header(graph: FlowGraphDocument, wells: WellsDocument) -> None:
@@ -282,6 +302,7 @@ def render_flow(
     search: str,
     responsible_filter: list[str],
     kind_filter: list[str],
+    layout_mode: str,
 ) -> str | None:
     selected_id = st.session_state.get("selected_id")
     nodes, active_node_ids = build_streamlit_nodes(
@@ -291,15 +312,28 @@ def render_flow(
         responsible_filter=responsible_filter,
         kind_filter=kind_filter,
         selected_id=selected_id,
+        layout_mode=layout_mode,
     )
     edges = build_streamlit_edges(graph, active_node_ids=active_node_ids)
-    flow_state = StreamlitFlowState(nodes=nodes, edges=edges, selected_id=selected_id)
+    flow_state = StreamlitFlowState(
+        nodes=nodes,
+        edges=edges,
+        selected_id=selected_id,
+        timestamp=flow_state_timestamp(
+            graph=graph,
+            wells=wells,
+            search=search,
+            responsible_filter=responsible_filter,
+            kind_filter=kind_filter,
+            layout_mode=layout_mode,
+        ),
+    )
 
     returned = streamlit_flow(
         "well_drilling_flow",
         flow_state,
         layout=ManualLayout(),
-        height=760,
+        height=flow_canvas_height(graph, wells, layout_mode),
         fit_view=True,
         show_controls=True,
         show_minimap=True,
@@ -314,8 +348,42 @@ def render_flow(
             "borderRadius": "8px",
         },
     )
-    st.session_state.selected_id = returned.selected_id
+    st.session_state.flow_component_timestamp = max(
+        int(st.session_state.get("flow_component_timestamp", 0)),
+        int(returned.timestamp or 0),
+    )
+    if returned.selected_id != selected_id:
+        st.session_state.selected_id = returned.selected_id
     return returned.selected_id
+
+
+def flow_state_timestamp(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    search: str,
+    responsible_filter: list[str],
+    kind_filter: list[str],
+    layout_mode: str,
+) -> int:
+    signature = (
+        graph.version,
+        wells.version,
+        tuple((well.id, well.current_node_id, well.is_archived) for well in wells.wells),
+        search.strip().casefold(),
+        tuple(responsible_filter),
+        tuple(kind_filter),
+        layout_mode,
+    )
+    if st.session_state.get("flow_view_signature") != signature:
+        previous = int(st.session_state.get("flow_state_timestamp", 0))
+        component_timestamp = int(st.session_state.get("flow_component_timestamp", 0))
+        st.session_state.flow_view_signature = signature
+        st.session_state.flow_state_timestamp = max(
+            previous + 1,
+            component_timestamp + 1,
+            int(time.time() * 1000),
+        )
+    return int(st.session_state.flow_state_timestamp)
 
 
 def resolve_selection(
@@ -678,6 +746,12 @@ def persist_wells_update(
             "warning",
         )
         st.rerun()
+    except FileLockTimeoutError as exc:
+        flash(
+            f"Файл состояния сейчас занят другой операцией. Повторите действие: {exc}",
+            "warning",
+        )
+        st.rerun()
     except Exception as exc:
         st.error(str(exc))
 
@@ -700,20 +774,21 @@ def main() -> None:
         st.error(f"Ошибка загрузки JSON: {exc}")
         st.stop()
 
-    search, responsible_filter, kind_filter = render_sidebar(graph)
+    search, responsible_filter, kind_filter, layout_mode = render_sidebar(graph)
     render_header(graph, wells)
 
-    canvas_col, inspector_col = st.columns([3.4, 1.25], gap="large")
-    with canvas_col:
-        selected_id = render_flow(
-            graph,
-            wells,
-            search=search,
-            responsible_filter=responsible_filter,
-            kind_filter=kind_filter,
-        )
-
-    with inspector_col:
+    selected_id = render_flow(
+        graph,
+        wells,
+        search=search,
+        responsible_filter=responsible_filter,
+        kind_filter=kind_filter,
+        layout_mode=layout_mode,
+    )
+    with st.expander(
+        "Инспектор и управление",
+        expanded=bool(selected_id) or st.session_state.get("admin_authenticated", False),
+    ):
         render_inspector(graph, wells, selected_id)
 
 

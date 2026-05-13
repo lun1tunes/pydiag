@@ -20,6 +20,7 @@ def run_app_with_temp_data(
     graph_path, wells_path = data_paths
     monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
+    monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
     monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
     if configure_admin:
         monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "test-admin")
@@ -87,6 +88,7 @@ def test_streamlit_admin_can_move_well_without_touching_real_json(
     monkeypatch,
 ) -> None:
     _, wells_path = data_paths
+    initial_version = load_wells_doc(wells_path).version
     app = run_app_with_temp_data(data_paths, monkeypatch)
     login_as_admin(app)
 
@@ -94,7 +96,7 @@ def test_streamlit_admin_can_move_well_without_touching_real_json(
 
     saved = load_wells_doc(wells_path)
     well = well_by_id(saved)["well_1001"]
-    assert saved.version == 2
+    assert saved.version == initial_version + 1
     assert well.current_node_id == "dec_data_complete"
     assert well.history[-1].action == "move"
 

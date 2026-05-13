@@ -5,9 +5,11 @@ import pytest
 from pydiag.models import well_by_id
 from pydiag.services import move_well_to_node
 from pydiag.storage import (
+    FileLockTimeoutError,
     VersionConflictError,
     fsync_parent_dir,
     graph_path,
+    json_file_lock,
     load_documents,
     load_wells_doc,
     save_wells_with_version_check,
@@ -71,6 +73,16 @@ def test_save_wells_with_version_check_rejects_stale_writer(data_paths) -> None:
             expected_version=wells.version,
             path=wells_file,
         )
+
+
+def test_json_file_lock_prevents_nested_writer(tmp_path) -> None:
+    target = tmp_path / "wells.json"
+    target.write_text("{}", encoding="utf-8")
+
+    with json_file_lock(target, timeout=0.2, poll_interval=0.01):
+        with pytest.raises(FileLockTimeoutError):
+            with json_file_lock(target, timeout=0.05, poll_interval=0.01):
+                pass
 
 
 def test_save_wells_with_version_check_rejects_graph_integrity_violation(

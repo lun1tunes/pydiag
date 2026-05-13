@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "version": 1,
+  "version": 2,
   "wells": [
     {
       "id": "well_1001",
@@ -35,7 +35,7 @@
     {
       "id": "well_1002",
       "name": "Скв. 1002",
-      "current_node_id": "dec_design_ok",
+      "current_node_id": "proc_procurement",
       "history": [
         {
           "ts": "2026-05-08T08:15:00Z",
@@ -81,6 +81,15 @@
           "to_node_id": "dec_design_ok",
           "by": "geology@example.com",
           "comment": "Проект на согласовании"
+        },
+        {
+          "ts": "2026-05-13T17:55:08.217800Z",
+          "node_id": "proc_procurement",
+          "action": "move",
+          "from_node_id": "dec_design_ok",
+          "to_node_id": "proc_procurement",
+          "by": "local-admin",
+          "comment": null
         }
       ],
       "metadata": {

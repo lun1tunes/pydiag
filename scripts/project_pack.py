@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
 ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
@@ -162,9 +161,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
-    archive = (
-        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
-    )
+    archive = (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
 
     if args.mode == "pack":
         pack(root, archive)
