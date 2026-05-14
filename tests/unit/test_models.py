@@ -37,6 +37,24 @@ def test_graph_validation_rejects_duplicate_node_ids(data_paths) -> None:
         FlowGraphDocument.model_validate(payload, strict=True)
 
 
+def test_graph_validation_rejects_reserved_ui_node_prefix(data_paths) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["nodes"][0]["id"] = "route-anchor::shadow"
+
+    with pytest.raises(ValidationError, match="reserved for UI internals"):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_graph_validation_rejects_reserved_ui_edge_prefix(data_paths) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["edges"][0]["id"] = "route::shadow"
+
+    with pytest.raises(ValidationError, match="reserved for UI internals"):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
 def test_cross_document_validation_rejects_unknown_well_node(
     data_paths,
 ) -> None:

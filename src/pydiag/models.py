@@ -16,6 +16,13 @@ NodeKind = Literal[
 ]
 
 EdgeKind = Literal["default", "yes", "no", "dashed"]
+RESERVED_UI_ID_PREFIXES = (
+    "well::",
+    "well-extra::",
+    "duration::",
+    "route-anchor::",
+    "route::",
+)
 
 
 class StrictModel(BaseModel):
@@ -135,10 +142,14 @@ class FlowGraphDocument(StrictModel):
         node_ids = [node.id for node in self.nodes]
         if len(node_ids) != len(set(node_ids)):
             raise ValueError("Duplicate node ids are not allowed")
+        for node_id in node_ids:
+            validate_not_reserved_ui_id("Node", node_id)
 
         edge_ids = [edge.id for edge in self.edges]
         if len(edge_ids) != len(set(edge_ids)):
             raise ValueError("Duplicate edge ids are not allowed")
+        for edge_id in edge_ids:
+            validate_not_reserved_ui_id("Edge", edge_id)
 
         node_set = set(node_ids)
         responsible_set = set(self.responsibles)
@@ -156,6 +167,12 @@ class FlowGraphDocument(StrictModel):
             if edge.target not in node_set:
                 raise ValueError(f"Edge {edge.id}: unknown target node {edge.target}")
         return self
+
+
+def validate_not_reserved_ui_id(entity: str, value: str) -> None:
+    for prefix in RESERVED_UI_ID_PREFIXES:
+        if value.startswith(prefix):
+            raise ValueError(f"{entity} id {value}: prefix {prefix} is reserved for UI internals")
 
 
 class WellHistoryEntry(StrictModel):

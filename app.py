@@ -15,6 +15,7 @@ from streamlit_flow.state import StreamlitFlowState
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
+MIN_ADMIN_PASSWORD_LENGTH = 8
 
 from pydiag.flow_adapter import (  # noqa: E402
     KIND_LABELS,
@@ -195,7 +196,7 @@ def render_flash() -> None:
         st.success(data["message"])
 
 
-def admin_password() -> str:
+def configured_admin_password() -> str:
     env_value = os.getenv("PYDIAG_ADMIN_PASSWORD")
     if env_value:
         return env_value
@@ -206,9 +207,34 @@ def admin_password() -> str:
                 return str(secret_value)
         except Exception:
             pass
-    if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+    return ""
+
+
+def insecure_admin_mode_enabled() -> bool:
+    return os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1"
+
+
+def admin_password() -> str:
+    configured_password = configured_admin_password()
+    if configured_password:
+        if insecure_admin_mode_enabled() or len(configured_password) >= MIN_ADMIN_PASSWORD_LENGTH:
+            return configured_password
+        return ""
+    if insecure_admin_mode_enabled():
         return "admin"
     return ""
+
+
+def admin_password_warning() -> str:
+    configured_password = configured_admin_password()
+    if configured_password and len(configured_password) < MIN_ADMIN_PASSWORD_LENGTH:
+        return (
+            f"Админ-пароль должен быть не короче {MIN_ADMIN_PASSWORD_LENGTH} символов. "
+            "Для локальной отладки можно явно включить PYDIAG_ALLOW_INSECURE_ADMIN=1."
+        )
+    return (
+        "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD или st.secrets['admin_password']."
+    )
 
 
 def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str], str]:
@@ -227,11 +253,8 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str],
                 disabled=not configured_password,
             )
             if not configured_password:
-                st.warning(
-                    "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD "
-                    "или st.secrets['admin_password']."
-                )
-            if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+                st.warning(admin_password_warning())
+            if insecure_admin_mode_enabled():
                 st.caption("Включен локальный небезопасный пароль: admin")
             if st.button("Войти", width="stretch", disabled=not configured_password):
                 if password == configured_password:
@@ -314,7 +337,12 @@ def render_flow(
         selected_id=selected_id,
         layout_mode=layout_mode,
     )
-    edges = build_streamlit_edges(graph, active_node_ids=active_node_ids)
+    edges = build_streamlit_edges(
+        graph,
+        active_node_ids=active_node_ids,
+        wells_doc=wells,
+        layout_mode=layout_mode,
+    )
     flow_state = StreamlitFlowState(
         nodes=nodes,
         edges=edges,
@@ -397,6 +425,10 @@ def resolve_selection(
     nodes = node_by_id(graph)
     wells_map = well_by_id(wells)
     edges = {edge.id: edge for edge in graph.edges}
+    if selected_id.startswith("route::"):
+        edge_id, separator, _segment = selected_id.removeprefix("route::").rpartition("::")
+        if separator and edge_id in edges:
+            return ("edge", edges[edge_id])
 
     if selected_id.startswith("well::"):
         well_id = selected_id.removeprefix("well::")

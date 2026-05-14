@@ -13,7 +13,7 @@ def test_adapter_builds_domain_nodes_and_well_tokens(documents) -> None:
     graph, wells = documents
 
     nodes, active_ids = build_streamlit_nodes(graph, wells, selected_id="well::well_1001")
-    edges = build_streamlit_edges(graph, active_ids)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
     node_ids = {node.id for node in nodes}
 
     assert "proc_initial_review" in node_ids
@@ -153,3 +153,72 @@ def test_duration_badge_width_grows_for_long_values(documents) -> None:
     assert (
         "1200 ч" not in next(item for item in nodes if item.id == graph.nodes[0].id).data["content"]
     )
+
+
+def test_smart_routing_splits_skipping_edges_into_helper_lanes(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    node_by_id = {node.id: node for node in nodes}
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "route-anchor::e_input_review::0" in node_by_id
+    assert "route-anchor::e_input_review::1" in node_by_id
+    assert node_by_id["route-anchor::e_input_review::0"].selectable is False
+    assert node_by_id["route-anchor::e_input_review::0"].style["opacity"] == 0.0
+    assert "route::e_input_review::0" in edge_by_id
+    assert "e_input_review" in edge_by_id
+    assert "route::e_input_review::2" in edge_by_id
+    assert edge_by_id["route::e_input_review::2"].marker_end["type"] == "arrowclosed"
+    assert edge_by_id["e_input_review"].asdict()["data"]["domainEdgeId"] == "e_input_review"
+    assert edge_by_id["e_input_review"].asdict()["pathOptions"]["offset"] == 22
+
+
+def test_adjacent_edges_stay_direct_to_reduce_visual_noise(documents) -> None:
+    graph, wells = documents
+
+    _, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "e_review_decision" in edge_by_id
+    assert "route::e_review_decision::0" not in edge_by_id
+    assert edge_by_id["e_review_decision"].source == "proc_initial_review"
+    assert edge_by_id["e_review_decision"].target == "dec_data_complete"
+    assert edge_by_id["e_review_decision"].asdict()["pathOptions"]["offset"] == 14
+
+
+def test_empty_active_node_set_keeps_all_edges_dimmed(documents) -> None:
+    graph, wells = documents
+
+    edges = build_streamlit_edges(graph, active_node_ids=set(), wells_doc=wells)
+
+    assert edges
+    assert {edge.style["opacity"] for edge in edges} == {0.16}
+
+
+def test_self_loop_edges_get_explicit_loop_route(documents) -> None:
+    graph, wells = documents
+    loop_edge = graph.edges[0].model_copy(
+        update={
+            "id": "e_self_loop",
+            "source": graph.nodes[0].id,
+            "target": graph.nodes[0].id,
+            "label": "повтор",
+        }
+    )
+    graph.edges = [loop_edge]
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells)
+    node_ids = {node.id for node in nodes}
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "route-anchor::e_self_loop::0" in node_ids
+    assert "route-anchor::e_self_loop::1" in node_ids
+    assert "route-anchor::e_self_loop::2" in node_ids
+    assert "route::e_self_loop::0" in edge_by_id
+    assert "e_self_loop" in edge_by_id
+    assert "route::e_self_loop::3" in edge_by_id
+    assert edge_by_id["route::e_self_loop::3"].marker_end["type"] == "arrowclosed"

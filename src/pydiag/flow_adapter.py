@@ -15,6 +15,11 @@ DURATION_BADGE_MAX_WIDTH = 128
 DURATION_BADGE_CHAR_WIDTH = 6.6
 DURATION_BADGE_ICON_WIDTH = 14
 DURATION_BADGE_HORIZONTAL_PADDING = 18
+ROUTE_ANCHOR_SIZE = 2
+ROUTE_ROW_LANE_GAP = 46
+ROUTE_ROW_LANE_STEP = 18
+ROUTE_GUTTER_GAP = 52
+ROUTE_GUTTER_STEP = 18
 KIND_LABELS = {
     "process": "Процесс",
     "decision_diamond": "Решение",
@@ -31,6 +36,7 @@ TEXT_LINE_HEIGHT = 16
 TEXT_CHAR_WIDTH = 7.1
 WELL_TOKEN_CSS = """
 <style>
+.route-anchor-node .react-flow__handle,
 .well-token-node .react-flow__handle,
 .duration-badge-node .react-flow__handle {
   display: none !important;
@@ -67,6 +73,52 @@ class NodeRenderSpec:
     content: str
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class NodeGeometry:
+    id: str
+    index: int
+    x: float
+    y: float
+    width: int
+    height: int
+    row: int
+    visual_col: int
+
+    @property
+    def center_x(self) -> float:
+        return self.x + self.width / 2
+
+    @property
+    def center_y(self) -> float:
+        return self.y + self.height / 2
+
+    @property
+    def bottom(self) -> float:
+        return self.y + self.height
+
+
+@dataclass(frozen=True)
+class RowBounds:
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+
+
+@dataclass(frozen=True)
+class RouteAnchor:
+    id: str
+    pos: tuple[float, float]
+    source_position: str
+    target_position: str
+
+
+@dataclass(frozen=True)
+class EdgeRoute:
+    edge: FlowEdge
+    anchors: tuple[RouteAnchor, ...]
 
 
 def wells_grouped_by_node(wells_doc: WellsDocument) -> dict[str, list[Well]]:
@@ -127,6 +179,7 @@ def build_streamlit_nodes(
     active_node_ids: set[str] = set()
     render_specs = build_node_render_specs(graph, wells_by_node)
     positions = layout_positions(graph, layout_mode, render_specs)
+    routes = build_edge_routes(graph, positions, render_specs, layout_mode)
 
     for node_index, node in enumerate(graph.nodes):
         wells_here = wells_by_node.get(node.id, [])
@@ -224,6 +277,10 @@ def build_streamlit_nodes(
                 )
             )
 
+    for route in routes:
+        for anchor in route.anchors:
+            nodes.append(route_anchor_node(anchor))
+
     return nodes, active_node_ids
 
 
@@ -287,45 +344,408 @@ def flow_canvas_height(
     return bottom
 
 
+def build_node_geometries(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+    layout_mode: str,
+) -> dict[str, NodeGeometry]:
+    manual_rows = (
+        manual_row_lookup(graph, positions, render_specs) if layout_mode == "manual" else {}
+    )
+    geometries: dict[str, NodeGeometry] = {}
+    for index, node in enumerate(graph.nodes):
+        position = positions[node.id]
+        render_spec = render_specs[node.id]
+        if layout_mode == "manual":
+            row, visual_col = manual_rows[node.id]
+        else:
+            row = index // SNAKE_COLUMNS
+            row_col = index % SNAKE_COLUMNS
+            visual_col = row_col if row % 2 == 0 else SNAKE_COLUMNS - row_col - 1
+        geometries[node.id] = NodeGeometry(
+            id=node.id,
+            index=index,
+            x=position[0],
+            y=position[1],
+            width=render_spec.width,
+            height=render_spec.height,
+            row=row,
+            visual_col=visual_col,
+        )
+    return geometries
+
+
+def manual_row_lookup(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+) -> dict[str, tuple[int, int]]:
+    rows: list[list[tuple[str, float, float]]] = []
+    for node in graph.nodes:
+        x, y = positions[node.id]
+        center_y = y + render_specs[node.id].height / 2
+        for row in rows:
+            row_center = sum(item[2] for item in row) / len(row)
+            if abs(center_y - row_center) <= SNAKE_CELL_HEIGHT / 2:
+                row.append((node.id, x, center_y))
+                break
+        else:
+            rows.append([(node.id, x, center_y)])
+
+    rows.sort(key=lambda row: sum(item[2] for item in row) / len(row))
+    lookup: dict[str, tuple[int, int]] = {}
+    for row_index, row in enumerate(rows):
+        for visual_col, item in enumerate(sorted(row, key=lambda value: value[1])):
+            lookup[item[0]] = (row_index, visual_col)
+    return lookup
+
+
+def row_bounds(geometries: dict[str, NodeGeometry]) -> dict[int, RowBounds]:
+    grouped: dict[int, list[NodeGeometry]] = defaultdict(list)
+    for geometry in geometries.values():
+        grouped[geometry.row].append(geometry)
+    return {
+        row: RowBounds(
+            x_min=min(item.x for item in row_items),
+            x_max=max(item.x + item.width for item in row_items),
+            y_min=min(item.y for item in row_items),
+            y_max=max(item.bottom for item in row_items),
+        )
+        for row, row_items in grouped.items()
+    }
+
+
+def build_edge_routes(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+    layout_mode: str,
+) -> list[EdgeRoute]:
+    geometries = build_node_geometries(graph, positions, render_specs, layout_mode)
+    bounds = row_bounds(geometries)
+    routes: list[EdgeRoute] = []
+    row_lane_counts: dict[tuple[int, str], int] = defaultdict(int)
+    gutter_lane_counts: dict[tuple[int, str], int] = defaultdict(int)
+
+    for edge in graph.edges:
+        source = geometries[edge.source]
+        target = geometries[edge.target]
+        if can_use_direct_edge(edge, source, target):
+            routes.append(EdgeRoute(edge=edge, anchors=()))
+            continue
+
+        if source.id == target.id:
+            lane_key = (source.row, "self")
+            lane_index = row_lane_counts[lane_key]
+            row_lane_counts[lane_key] += 1
+            anchors = self_loop_route_anchors(edge, source, lane_index)
+        elif source.row == target.row:
+            lane_key = (source.row, "top")
+            lane_index = row_lane_counts[lane_key]
+            row_lane_counts[lane_key] += 1
+            anchors = same_row_route_anchors(edge, source, target, bounds[source.row], lane_index)
+        else:
+            side = outbound_gutter_side(source)
+            lane_key = (min(source.row, target.row), side)
+            lane_index = gutter_lane_counts[lane_key]
+            gutter_lane_counts[lane_key] += 1
+            span_bounds = row_span_bounds(bounds, source.row, target.row)
+            anchors = cross_row_route_anchors(
+                edge,
+                source,
+                target,
+                span_bounds,
+                side,
+                lane_index,
+            )
+        routes.append(EdgeRoute(edge=edge, anchors=anchors))
+    return routes
+
+
+def can_use_direct_edge(edge: FlowEdge, source: NodeGeometry, target: NodeGeometry) -> bool:
+    if edge.kind == "dashed":
+        return False
+    if target.index <= source.index:
+        return False
+    return source.row == target.row and abs(source.visual_col - target.visual_col) == 1
+
+
+def row_span_bounds(
+    bounds: dict[int, RowBounds],
+    source_row: int,
+    target_row: int,
+) -> RowBounds:
+    start = min(source_row, target_row)
+    end = max(source_row, target_row)
+    selected = [bounds[row] for row in range(start, end + 1) if row in bounds]
+    return RowBounds(
+        x_min=min(item.x_min for item in selected),
+        x_max=max(item.x_max for item in selected),
+        y_min=min(item.y_min for item in selected),
+        y_max=max(item.y_max for item in selected),
+    )
+
+
+def self_loop_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    lane_offset = ROUTE_GUTTER_GAP + lane_index * ROUTE_GUTTER_STEP
+    lane_y = source.y - ROUTE_ROW_LANE_GAP - lane_index * ROUTE_ROW_LANE_STEP
+    if outbound_gutter_side(source) == "right":
+        first_x = source.x + source.width + lane_offset
+        second_x = source.x - lane_offset
+        first_target = "left"
+        first_source = "top"
+        middle_source = "left"
+        last_target = "right"
+        last_source = "bottom"
+    else:
+        first_x = source.x - lane_offset
+        second_x = source.x + source.width + lane_offset
+        first_target = "right"
+        first_source = "top"
+        middle_source = "right"
+        last_target = "left"
+        last_source = "bottom"
+
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(first_x, source.center_y),
+            source_position=first_source,
+            target_position=first_target,
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(first_x, lane_y),
+            source_position=middle_source,
+            target_position="bottom",
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 2),
+            pos=(second_x, lane_y),
+            source_position=last_source,
+            target_position=last_target,
+        ),
+    )
+
+
+def same_row_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    target: NodeGeometry,
+    bounds: RowBounds,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    lane_y = bounds.y_min - ROUTE_ROW_LANE_GAP - lane_index * ROUTE_ROW_LANE_STEP
+    direction = 1 if target.center_x >= source.center_x else -1
+    horizontal_source = "right" if direction > 0 else "left"
+    horizontal_target = "left" if direction > 0 else "right"
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(source.center_x, lane_y),
+            source_position=horizontal_source,
+            target_position="bottom",
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(target.center_x, lane_y),
+            source_position="bottom",
+            target_position=horizontal_target,
+        ),
+    )
+
+
+def cross_row_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    target: NodeGeometry,
+    source_bounds: RowBounds,
+    side: str,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    if side == "right":
+        gutter_x = source_bounds.x_max + ROUTE_GUTTER_GAP + lane_index * ROUTE_GUTTER_STEP
+        horizontal_target = "left"
+        horizontal_source = "left"
+    else:
+        gutter_x = source_bounds.x_min - ROUTE_GUTTER_GAP - lane_index * ROUTE_GUTTER_STEP
+        horizontal_target = "right"
+        horizontal_source = "right"
+
+    vertical_down = target.center_y >= source.center_y
+    first_source = "bottom" if vertical_down else "top"
+    second_target = "top" if vertical_down else "bottom"
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(gutter_x, source.center_y),
+            source_position=first_source,
+            target_position=horizontal_target,
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(gutter_x, target.center_y),
+            source_position=horizontal_source,
+            target_position=second_target,
+        ),
+    )
+
+
+def outbound_gutter_side(source: NodeGeometry) -> str:
+    if source.row % 2 == 0:
+        return "right"
+    return "left"
+
+
+def route_anchor_id(edge_id: str, index: int) -> str:
+    return f"route-anchor::{edge_id}::{index}"
+
+
+def route_segment_id(edge_id: str, segment_index: int, label_segment_index: int) -> str:
+    if segment_index == label_segment_index:
+        return edge_id
+    return f"route::{edge_id}::{segment_index}"
+
+
+def route_anchor_node(anchor: RouteAnchor) -> StreamlitFlowNode:
+    return StreamlitFlowNode(
+        id=anchor.id,
+        pos=(
+            anchor.pos[0] - ROUTE_ANCHOR_SIZE / 2,
+            anchor.pos[1] - ROUTE_ANCHOR_SIZE / 2,
+        ),
+        data={"content": WELL_TOKEN_CSS},
+        node_type="default",
+        source_position=anchor.source_position,
+        target_position=anchor.target_position,
+        draggable=False,
+        selectable=False,
+        connectable=False,
+        z_index=0,
+        focusable=False,
+        className="route-anchor-node",
+        style=route_anchor_style(),
+    )
+
+
+def route_anchor_style() -> dict[str, str | float]:
+    return {
+        "width": f"{ROUTE_ANCHOR_SIZE}px",
+        "height": f"{ROUTE_ANCHOR_SIZE}px",
+        "boxSizing": "border-box",
+        "padding": "0",
+        "border": "0",
+        "borderRadius": "0",
+        "backgroundColor": "transparent",
+        "boxShadow": "none",
+        "opacity": 0.0,
+        "pointerEvents": "none",
+    }
+
+
 def build_streamlit_edges(
     graph: FlowGraphDocument,
     active_node_ids: set[str] | None = None,
+    wells_doc: WellsDocument | None = None,
+    layout_mode: str = "snake",
 ) -> list[StreamlitFlowEdge]:
-    active_node_ids = active_node_ids or {node.id for node in graph.nodes}
+    if active_node_ids is None:
+        active_node_ids = {node.id for node in graph.nodes}
+    wells_by_node = wells_grouped_by_node(wells_doc) if wells_doc is not None else {}
+    render_specs = build_node_render_specs(graph, wells_by_node)
+    positions = layout_positions(graph, layout_mode, render_specs)
+    routes = build_edge_routes(graph, positions, render_specs, layout_mode)
     edges: list[StreamlitFlowEdge] = []
-    for edge in graph.edges:
-        active = edge.source in active_node_ids and edge.target in active_node_ids
-        color = edge_color(edge)
-        opacity = 1.0 if active else 0.16
-        edges.append(
+    for route in routes:
+        edges.extend(route_to_streamlit_edges(route, active_node_ids))
+    return edges
+
+
+def route_to_streamlit_edges(
+    route: EdgeRoute,
+    active_node_ids: set[str],
+) -> list[StreamlitFlowEdge]:
+    edge = route.edge
+    active = edge.source in active_node_ids and edge.target in active_node_ids
+    color = edge_color(edge)
+    opacity = 1.0 if active else 0.16
+    points = [edge.source, *(anchor.id for anchor in route.anchors), edge.target]
+    final_segment_index = len(points) - 2
+    label_segment_index = max(0, final_segment_index - 1) if route.anchors else 0
+    segment_edges: list[StreamlitFlowEdge] = []
+
+    for segment_index, (source, target) in enumerate(zip(points[:-1], points[1:], strict=True)):
+        is_final = segment_index == final_segment_index
+        carries_label = segment_index == label_segment_index
+        label = (edge.label or "") if carries_label else ""
+        segment_edges.append(
             StreamlitFlowEdge(
-                id=edge.id,
-                source=edge.source,
-                target=edge.target,
-                edge_type="smoothstep",
-                marker_end={"type": "arrowclosed", "color": color},
-                label=edge.label or "",
-                label_show_bg=bool(edge.label),
+                id=route_segment_id(edge.id, segment_index, label_segment_index),
+                source=source,
+                target=target,
+                edge_type=edge_route_type(route),
+                marker_end={"type": "arrowclosed", "color": color} if is_final else {},
+                label=label,
+                label_show_bg=bool(edge.label) and carries_label,
                 label_style={
                     "fill": color,
-                    "fontWeight": 700,
+                    "fontWeight": 760,
                     "fontSize": "12px",
                 },
                 label_bg_style={
                     "fill": "#ffffff",
-                    "fillOpacity": 0.92,
-                    "rx": 6,
-                    "ry": 6,
-                },
-                style={
+                    "fillOpacity": 0.96,
+                    "rx": 7,
+                    "ry": 7,
                     "stroke": color,
-                    "strokeWidth": 2.2,
-                    "strokeDasharray": "8 6" if edge.kind == "dashed" else "0",
-                    "opacity": opacity,
+                    "strokeOpacity": 0.18,
+                    "strokeWidth": 1,
                 },
+                z_index=edge_z_index(route, segment_index),
+                focusable=False,
+                style=edge_style(edge, opacity, is_route_segment=bool(route.anchors)),
+                pathOptions={
+                    "borderRadius": 18,
+                    "offset": 22 if route.anchors else 14,
+                },
+                data={"domainEdgeId": edge.id},
             )
         )
-    return edges
+    return segment_edges
+
+
+def edge_route_type(route: EdgeRoute) -> str:
+    if not route.anchors:
+        return "smoothstep"
+    return "smoothstep"
+
+
+def edge_z_index(route: EdgeRoute, segment_index: int) -> int:
+    if not route.anchors:
+        return 1
+    if segment_index == len(route.anchors):
+        return 3
+    return 2
+
+
+def edge_style(
+    edge: FlowEdge,
+    opacity: float,
+    is_route_segment: bool,
+) -> dict[str, str | float]:
+    return {
+        "stroke": edge_color(edge),
+        "strokeWidth": 2.4 if is_route_segment else 2.2,
+        "strokeDasharray": "8 6" if edge.kind == "dashed" else "0",
+        "strokeLinecap": "round",
+        "strokeLinejoin": "round",
+        "opacity": opacity,
+    }
 
 
 def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well]) -> str:
