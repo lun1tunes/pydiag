@@ -33,12 +33,13 @@ jobs:
         run: python scripts/venv_run.py scripts/quality.py
 
 ===END_FILE===
-===BEGIN_FILE===	app.py	23918
+===BEGIN_FILE===	app.py	27486
 from __future__ import annotations
 
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -50,11 +51,13 @@ from streamlit_flow.state import StreamlitFlowState
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
+MIN_ADMIN_PASSWORD_LENGTH = 8
 
 from pydiag.flow_adapter import (  # noqa: E402
     KIND_LABELS,
     build_streamlit_edges,
     build_streamlit_nodes,
+    flow_canvas_height,
     wells_grouped_by_node,
 )
 from pydiag.models import (  # noqa: E402
@@ -75,6 +78,7 @@ from pydiag.services import (  # noqa: E402
     transition_label,
 )
 from pydiag.storage import (  # noqa: E402
+    FileLockTimeoutError,
     VersionConflictError,
     load_documents,
     save_wells_with_version_check,
@@ -97,9 +101,16 @@ def inject_css() -> None:
             background:
                 linear-gradient(180deg, rgba(246, 247, 249, 0.98), rgba(246, 247, 249, 1));
         }
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        .stAppHeader,
+        .stDeployButton {
+            display: none !important;
+        }
         .block-container {
             max-width: none;
-            padding: 1.25rem 1.55rem 2rem;
+            padding: 2.25rem 1.55rem 2rem;
         }
         [data-testid="stSidebar"] {
             background: #eef2f6;
@@ -146,9 +157,10 @@ def inject_css() -> None:
             margin-top: 2px;
         }
         .inspector-shell {
-            border-left: 1px solid rgba(100, 116, 139, 0.20);
-            padding-left: 1rem;
-            min-height: 760px;
+            border-top: 1px solid rgba(100, 116, 139, 0.20);
+            padding-top: 1rem;
+            margin-top: 1rem;
+            min-height: auto;
         }
         .muted-line {
             color: #64748b;
@@ -185,8 +197,8 @@ def inject_css() -> None:
                 grid-template-columns: repeat(2, minmax(120px, 1fr));
             }
             .inspector-shell {
-                border-left: 0;
-                padding-left: 0;
+                border-top: 1px solid rgba(100, 116, 139, 0.20);
+                padding-top: 1rem;
                 min-height: auto;
             }
         }
@@ -220,22 +232,48 @@ def render_flash() -> None:
         st.success(data["message"])
 
 
-def admin_password() -> str:
+def configured_admin_password() -> str:
     env_value = os.getenv("PYDIAG_ADMIN_PASSWORD")
     if env_value:
         return env_value
-    try:
-        secret_value = st.secrets.get("admin_password")
-        if secret_value:
-            return str(secret_value)
-    except Exception:
-        pass
-    if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+    if os.getenv("PYDIAG_DISABLE_STREAMLIT_SECRETS") != "1":
+        try:
+            secret_value = st.secrets.get("admin_password")
+            if secret_value:
+                return str(secret_value)
+        except Exception:
+            pass
+    return ""
+
+
+def insecure_admin_mode_enabled() -> bool:
+    return os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1"
+
+
+def admin_password() -> str:
+    configured_password = configured_admin_password()
+    if configured_password:
+        if insecure_admin_mode_enabled() or len(configured_password) >= MIN_ADMIN_PASSWORD_LENGTH:
+            return configured_password
+        return ""
+    if insecure_admin_mode_enabled():
         return "admin"
     return ""
 
 
-def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]:
+def admin_password_warning() -> str:
+    configured_password = configured_admin_password()
+    if configured_password and len(configured_password) < MIN_ADMIN_PASSWORD_LENGTH:
+        return (
+            f"Админ-пароль должен быть не короче {MIN_ADMIN_PASSWORD_LENGTH} символов. "
+            "Для локальной отладки можно явно включить PYDIAG_ALLOW_INSECURE_ADMIN=1."
+        )
+    return (
+        "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD или st.secrets['admin_password']."
+    )
+
+
+def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str], str]:
     with st.sidebar:
         st.markdown("### Доступ")
         if st.session_state.get("admin_authenticated", False):
@@ -251,11 +289,8 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
                 disabled=not configured_password,
             )
             if not configured_password:
-                st.warning(
-                    "Админ-пароль не настроен. Задайте PYDIAG_ADMIN_PASSWORD "
-                    "или st.secrets['admin_password']."
-                )
-            if os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1":
+                st.warning(admin_password_warning())
+            if insecure_admin_mode_enabled():
                 st.caption("Включен локальный небезопасный пароль: admin")
             if st.button("Войти", width="stretch", disabled=not configured_password):
                 if password == configured_password:
@@ -277,6 +312,14 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
             options=list(KIND_LABELS.keys()),
             format_func=lambda key: KIND_LABELS[key],
         )
+        layout_mode = st.selectbox(
+            "Расположение",
+            options=["snake", "manual"],
+            format_func=lambda key: {
+                "snake": "Змейка",
+                "manual": "Координаты из JSON",
+            }[key],
+        )
 
         st.divider()
         if st.button("Перечитать JSON", width="stretch"):
@@ -284,7 +327,7 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str]]
             flash("JSON-файлы перечитаны")
             st.rerun()
 
-    return search, responsible_filter, kind_filter
+    return search, responsible_filter, kind_filter, layout_mode
 
 
 def render_header(graph: FlowGraphDocument, wells: WellsDocument) -> None:
@@ -318,6 +361,7 @@ def render_flow(
     search: str,
     responsible_filter: list[str],
     kind_filter: list[str],
+    layout_mode: str,
 ) -> str | None:
     selected_id = st.session_state.get("selected_id")
     nodes, active_node_ids = build_streamlit_nodes(
@@ -327,15 +371,33 @@ def render_flow(
         responsible_filter=responsible_filter,
         kind_filter=kind_filter,
         selected_id=selected_id,
+        layout_mode=layout_mode,
     )
-    edges = build_streamlit_edges(graph, active_node_ids=active_node_ids)
-    flow_state = StreamlitFlowState(nodes=nodes, edges=edges, selected_id=selected_id)
+    edges = build_streamlit_edges(
+        graph,
+        active_node_ids=active_node_ids,
+        wells_doc=wells,
+        layout_mode=layout_mode,
+    )
+    flow_state = StreamlitFlowState(
+        nodes=nodes,
+        edges=edges,
+        selected_id=selected_id,
+        timestamp=flow_state_timestamp(
+            graph=graph,
+            wells=wells,
+            search=search,
+            responsible_filter=responsible_filter,
+            kind_filter=kind_filter,
+            layout_mode=layout_mode,
+        ),
+    )
 
     returned = streamlit_flow(
         "well_drilling_flow",
         flow_state,
         layout=ManualLayout(),
-        height=760,
+        height=flow_canvas_height(graph, wells, layout_mode),
         fit_view=True,
         show_controls=True,
         show_minimap=True,
@@ -350,8 +412,42 @@ def render_flow(
             "borderRadius": "8px",
         },
     )
-    st.session_state.selected_id = returned.selected_id
+    st.session_state.flow_component_timestamp = max(
+        int(st.session_state.get("flow_component_timestamp", 0)),
+        int(returned.timestamp or 0),
+    )
+    if returned.selected_id != selected_id:
+        st.session_state.selected_id = returned.selected_id
     return returned.selected_id
+
+
+def flow_state_timestamp(
+    graph: FlowGraphDocument,
+    wells: WellsDocument,
+    search: str,
+    responsible_filter: list[str],
+    kind_filter: list[str],
+    layout_mode: str,
+) -> int:
+    signature = (
+        graph.version,
+        wells.version,
+        tuple((well.id, well.current_node_id, well.is_archived) for well in wells.wells),
+        search.strip().casefold(),
+        tuple(responsible_filter),
+        tuple(kind_filter),
+        layout_mode,
+    )
+    if st.session_state.get("flow_view_signature") != signature:
+        previous = int(st.session_state.get("flow_state_timestamp", 0))
+        component_timestamp = int(st.session_state.get("flow_component_timestamp", 0))
+        st.session_state.flow_view_signature = signature
+        st.session_state.flow_state_timestamp = max(
+            previous + 1,
+            component_timestamp + 1,
+            int(time.time() * 1000),
+        )
+    return int(st.session_state.flow_state_timestamp)
 
 
 def resolve_selection(
@@ -365,6 +461,10 @@ def resolve_selection(
     nodes = node_by_id(graph)
     wells_map = well_by_id(wells)
     edges = {edge.id: edge for edge in graph.edges}
+    if selected_id.startswith("route::"):
+        edge_id, separator, _segment = selected_id.removeprefix("route::").rpartition("::")
+        if separator and edge_id in edges:
+            return ("edge", edges[edge_id])
 
     if selected_id.startswith("well::"):
         well_id = selected_id.removeprefix("well::")
@@ -714,6 +814,12 @@ def persist_wells_update(
             "warning",
         )
         st.rerun()
+    except FileLockTimeoutError as exc:
+        flash(
+            f"Файл состояния сейчас занят другой операцией. Повторите действие: {exc}",
+            "warning",
+        )
+        st.rerun()
     except Exception as exc:
         st.error(str(exc))
 
@@ -736,20 +842,21 @@ def main() -> None:
         st.error(f"Ошибка загрузки JSON: {exc}")
         st.stop()
 
-    search, responsible_filter, kind_filter = render_sidebar(graph)
+    search, responsible_filter, kind_filter, layout_mode = render_sidebar(graph)
     render_header(graph, wells)
 
-    canvas_col, inspector_col = st.columns([3.4, 1.25], gap="large")
-    with canvas_col:
-        selected_id = render_flow(
-            graph,
-            wells,
-            search=search,
-            responsible_filter=responsible_filter,
-            kind_filter=kind_filter,
-        )
-
-    with inspector_col:
+    selected_id = render_flow(
+        graph,
+        wells,
+        search=search,
+        responsible_filter=responsible_filter,
+        kind_filter=kind_filter,
+        layout_mode=layout_mode,
+    )
+    with st.expander(
+        "Инспектор и управление",
+        expanded=bool(selected_id) or st.session_state.get("admin_authenticated", False),
+    ):
         render_inspector(graph, wells, selected_id)
 
 
@@ -1210,10 +1317,10 @@ if __name__ == "__main__":
 
 
 ===END_FILE===
-===BEGIN_FILE===	data/wells.json	4901
+===BEGIN_FILE===	data/wells.json	5185
 {
   "schema_version": "1.0",
-  "version": 1,
+  "version": 2,
   "wells": [
     {
       "id": "well_1001",
@@ -1248,7 +1355,7 @@ if __name__ == "__main__":
     {
       "id": "well_1002",
       "name": "Скв. 1002",
-      "current_node_id": "dec_design_ok",
+      "current_node_id": "proc_procurement",
       "history": [
         {
           "ts": "2026-05-08T08:15:00Z",
@@ -1294,6 +1401,15 @@ if __name__ == "__main__":
           "to_node_id": "dec_design_ok",
           "by": "geology@example.com",
           "comment": "Проект на согласовании"
+        },
+        {
+          "ts": "2026-05-13T17:55:08.217800Z",
+          "node_id": "proc_procurement",
+          "action": "move",
+          "from_node_id": "dec_design_ok",
+          "to_node_id": "proc_procurement",
+          "by": "local-admin",
+          "comment": null
         }
       ],
       "metadata": {
@@ -1392,13 +1508,12 @@ addopts = -ra --strict-config --strict-markers
 
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	4902
+===BEGIN_FILE===	scripts/project_pack.py	4885
 #!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
 
 ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
@@ -1557,9 +1672,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
-    archive = (
-        (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
-    )
+    archive = (root / ARCHIVE_FILE) if args.archive is None else Path(args.archive).resolve()
 
     if args.mode == "pack":
         pack(root, archive)
@@ -1682,15 +1795,29 @@ if __name__ == "__main__":
 """Planning and drilling flow prototype."""
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/flow_adapter.py	11252
+===BEGIN_FILE===	src/pydiag/flow_adapter.py	37993
 from __future__ import annotations
 
+import re
 from collections import defaultdict
+from dataclasses import dataclass
+from math import ceil
+from urllib.parse import quote
 
 from streamlit_flow.elements import StreamlitFlowEdge, StreamlitFlowNode
 
 from .models import FlowEdge, FlowGraphDocument, FlowNode, Well, WellsDocument
 
+DURATION_BADGE_MIN_WIDTH = 64
+DURATION_BADGE_MAX_WIDTH = 128
+DURATION_BADGE_CHAR_WIDTH = 6.6
+DURATION_BADGE_ICON_WIDTH = 14
+DURATION_BADGE_HORIZONTAL_PADDING = 18
+ROUTE_ANCHOR_SIZE = 2
+ROUTE_ROW_LANE_GAP = 46
+ROUTE_ROW_LANE_STEP = 18
+ROUTE_GUTTER_GAP = 52
+ROUTE_GUTTER_STEP = 18
 KIND_LABELS = {
     "process": "Процесс",
     "decision_diamond": "Решение",
@@ -1698,6 +1825,98 @@ KIND_LABELS = {
     "database": "База данных",
     "input_data": "Входные данные",
 }
+SNAKE_COLUMNS = 4
+SNAKE_ORIGIN_X = 60
+SNAKE_ORIGIN_Y = 80
+SNAKE_CELL_WIDTH = 350
+SNAKE_CELL_HEIGHT = 220
+TEXT_LINE_HEIGHT = 16
+TEXT_CHAR_WIDTH = 7.1
+WELL_TOKEN_CSS = """
+<style>
+.route-anchor-node .react-flow__handle,
+.well-token-node .react-flow__handle,
+.duration-badge-node .react-flow__handle {
+  display: none !important;
+  pointer-events: none !important;
+}
+.well-token-node .markdown-node,
+.duration-badge-node .markdown-node {
+  pointer-events: auto;
+  height: 100%;
+}
+.duration-badge-node .markdown-node {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.duration-badge-node .duration-badge-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.well-token-node .markdown-node p,
+.duration-badge-node .markdown-node p {
+  margin: 0 !important;
+}
+</style>
+""".strip()
+
+
+@dataclass(frozen=True)
+class NodeRenderSpec:
+    content: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class NodeGeometry:
+    id: str
+    index: int
+    x: float
+    y: float
+    width: int
+    height: int
+    row: int
+    visual_col: int
+
+    @property
+    def center_x(self) -> float:
+        return self.x + self.width / 2
+
+    @property
+    def center_y(self) -> float:
+        return self.y + self.height / 2
+
+    @property
+    def bottom(self) -> float:
+        return self.y + self.height
+
+
+@dataclass(frozen=True)
+class RowBounds:
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+
+
+@dataclass(frozen=True)
+class RouteAnchor:
+    id: str
+    pos: tuple[float, float]
+    source_position: str
+    target_position: str
+
+
+@dataclass(frozen=True)
+class EdgeRoute:
+    edge: FlowEdge
+    anchors: tuple[RouteAnchor, ...]
 
 
 def wells_grouped_by_node(wells_doc: WellsDocument) -> dict[str, list[Well]]:
@@ -1749,14 +1968,18 @@ def build_streamlit_nodes(
     responsible_filter: list[str] | None = None,
     kind_filter: list[str] | None = None,
     selected_id: str | None = None,
+    layout_mode: str = "snake",
 ) -> tuple[list[StreamlitFlowNode], set[str]]:
     responsible_filter = responsible_filter or []
     kind_filter = kind_filter or []
     wells_by_node = wells_grouped_by_node(wells_doc)
     nodes: list[StreamlitFlowNode] = []
     active_node_ids: set[str] = set()
+    render_specs = build_node_render_specs(graph, wells_by_node)
+    positions = layout_positions(graph, layout_mode, render_specs)
+    routes = build_edge_routes(graph, positions, render_specs, layout_mode)
 
-    for node in graph.nodes:
+    for node_index, node in enumerate(graph.nodes):
         wells_here = wells_by_node.get(node.id, [])
         is_active = node_matches_filters(
             node,
@@ -1768,23 +1991,51 @@ def build_streamlit_nodes(
         if is_active:
             active_node_ids.add(node.id)
 
+        position = positions[node.id]
+        render_spec = render_specs[node.id]
+        source_position, target_position = node_ports(node_index, layout_mode)
         nodes.append(
             StreamlitFlowNode(
                 id=node.id,
-                pos=(node.position.x, node.position.y),
-                data={"content": node_content(node, graph, wells_here)},
+                pos=position,
+                data={"content": render_spec.content},
                 node_type="default",
-                source_position="right",
-                target_position="left",
+                source_position=source_position,
+                target_position=target_position,
                 draggable=False,
                 selectable=True,
                 connectable=False,
                 z_index=10 if node.id == selected_id else 1,
-                style=node_style(node, graph, selected=node.id == selected_id, active=is_active),
+                style=node_style(
+                    node,
+                    graph,
+                    render_spec,
+                    selected=node.id == selected_id,
+                    active=is_active,
+                ),
             )
         )
 
-        for index, well in enumerate(wells_here[:4]):
+        if node.duration_hours is not None:
+            nodes.append(
+                StreamlitFlowNode(
+                    id=f"duration::{node.id}",
+                    pos=duration_badge_position(position),
+                    data={"content": duration_badge_content(node.duration_hours)},
+                    node_type="default",
+                    draggable=False,
+                    selectable=False,
+                    connectable=False,
+                    z_index=35,
+                    className="duration-badge-node",
+                    style=duration_badge_style(
+                        active=is_active,
+                        duration_hours=node.duration_hours,
+                    ),
+                )
+            )
+
+        for well_index, well in enumerate(wells_here[:4]):
             token_id = f"well::{well.id}"
             token_active = (
                 is_active or search.strip().lower() in (well.id + " " + well.name).lower()
@@ -1792,13 +2043,14 @@ def build_streamlit_nodes(
             nodes.append(
                 StreamlitFlowNode(
                     id=token_id,
-                    pos=well_token_position(node, index),
-                    data={"content": f"**{short_well_name(well)}**"},
+                    pos=well_token_position(position, render_spec.height, well_index),
+                    data={"content": well_token_content(well)},
                     node_type="default",
                     draggable=False,
                     selectable=True,
                     connectable=False,
                     z_index=30 if token_id == selected_id else 20,
+                    className="well-token-node",
                     style=well_token_style(
                         selected=token_id == selected_id,
                         active=token_active,
@@ -1811,66 +2063,523 @@ def build_streamlit_nodes(
             nodes.append(
                 StreamlitFlowNode(
                     id=extra_id,
-                    pos=well_token_position(node, 4),
-                    data={"content": f"**+{len(wells_here) - 4}**"},
+                    pos=well_token_position(position, render_spec.height, 4),
+                    data={"content": f"{WELL_TOKEN_CSS}\nСкв. **+{len(wells_here) - 4}**"},
                     node_type="default",
                     draggable=False,
                     selectable=False,
                     connectable=False,
                     z_index=19,
+                    className="well-token-node",
                     style=well_token_style(selected=False, active=is_active),
                 )
             )
 
+    for route in routes:
+        for anchor in route.anchors:
+            nodes.append(route_anchor_node(anchor))
+
     return nodes, active_node_ids
+
+
+def layout_positions(
+    graph: FlowGraphDocument,
+    layout_mode: str = "snake",
+    render_specs: dict[str, NodeRenderSpec] | None = None,
+) -> dict[str, tuple[float, float]]:
+    if layout_mode == "manual":
+        return {node.id: (node.position.x, node.position.y) for node in graph.nodes}
+    return snake_layout_positions(graph, render_specs or build_node_render_specs(graph, {}))
+
+
+def snake_layout_positions(
+    graph: FlowGraphDocument,
+    render_specs: dict[str, NodeRenderSpec],
+) -> dict[str, tuple[float, float]]:
+    positions: dict[str, tuple[float, float]] = {}
+    y = SNAKE_ORIGIN_Y
+    row_index = 0
+    for row_start in range(0, len(graph.nodes), SNAKE_COLUMNS):
+        row_nodes = graph.nodes[row_start : row_start + SNAKE_COLUMNS]
+        row_height = max((render_specs[node.id].height for node in row_nodes), default=0)
+        for row_col, node in enumerate(row_nodes):
+            visual_col = row_col if row_index % 2 == 0 else SNAKE_COLUMNS - row_col - 1
+            render_spec = render_specs[node.id]
+            x = SNAKE_ORIGIN_X + visual_col * SNAKE_CELL_WIDTH
+            x += max(0, (SNAKE_CELL_WIDTH - render_spec.width) / 2)
+            positions[node.id] = (x, y)
+        y += max(SNAKE_CELL_HEIGHT, row_height + 104)
+        row_index += 1
+    return positions
+
+
+def node_ports(index: int, layout_mode: str) -> tuple[str, str]:
+    if layout_mode != "snake":
+        return "right", "left"
+    row = index // SNAKE_COLUMNS
+    if row % 2 == 0:
+        return "right", "left"
+    return "left", "right"
+
+
+def flow_canvas_height(
+    graph: FlowGraphDocument,
+    wells_doc: WellsDocument | None = None,
+    layout_mode: str = "snake",
+) -> int:
+    wells_by_node = wells_grouped_by_node(wells_doc) if wells_doc is not None else {}
+    render_specs = build_node_render_specs(graph, wells_by_node)
+    positions = layout_positions(graph, layout_mode, render_specs)
+
+    bottom = 760
+    for node in graph.nodes:
+        wells_here = wells_by_node.get(node.id, [])
+        token_space = well_token_stack_height(len(wells_here))
+        bottom = max(
+            bottom,
+            int(positions[node.id][1] + render_specs[node.id].height + token_space + 150),
+        )
+    return bottom
+
+
+def build_node_geometries(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+    layout_mode: str,
+) -> dict[str, NodeGeometry]:
+    manual_rows = (
+        manual_row_lookup(graph, positions, render_specs) if layout_mode == "manual" else {}
+    )
+    geometries: dict[str, NodeGeometry] = {}
+    for index, node in enumerate(graph.nodes):
+        position = positions[node.id]
+        render_spec = render_specs[node.id]
+        if layout_mode == "manual":
+            row, visual_col = manual_rows[node.id]
+        else:
+            row = index // SNAKE_COLUMNS
+            row_col = index % SNAKE_COLUMNS
+            visual_col = row_col if row % 2 == 0 else SNAKE_COLUMNS - row_col - 1
+        geometries[node.id] = NodeGeometry(
+            id=node.id,
+            index=index,
+            x=position[0],
+            y=position[1],
+            width=render_spec.width,
+            height=render_spec.height,
+            row=row,
+            visual_col=visual_col,
+        )
+    return geometries
+
+
+def manual_row_lookup(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+) -> dict[str, tuple[int, int]]:
+    rows: list[list[tuple[str, float, float]]] = []
+    for node in graph.nodes:
+        x, y = positions[node.id]
+        center_y = y + render_specs[node.id].height / 2
+        for row in rows:
+            row_center = sum(item[2] for item in row) / len(row)
+            if abs(center_y - row_center) <= SNAKE_CELL_HEIGHT / 2:
+                row.append((node.id, x, center_y))
+                break
+        else:
+            rows.append([(node.id, x, center_y)])
+
+    rows.sort(key=lambda row: sum(item[2] for item in row) / len(row))
+    lookup: dict[str, tuple[int, int]] = {}
+    for row_index, row in enumerate(rows):
+        for visual_col, item in enumerate(sorted(row, key=lambda value: value[1])):
+            lookup[item[0]] = (row_index, visual_col)
+    return lookup
+
+
+def row_bounds(geometries: dict[str, NodeGeometry]) -> dict[int, RowBounds]:
+    grouped: dict[int, list[NodeGeometry]] = defaultdict(list)
+    for geometry in geometries.values():
+        grouped[geometry.row].append(geometry)
+    return {
+        row: RowBounds(
+            x_min=min(item.x for item in row_items),
+            x_max=max(item.x + item.width for item in row_items),
+            y_min=min(item.y for item in row_items),
+            y_max=max(item.bottom for item in row_items),
+        )
+        for row, row_items in grouped.items()
+    }
+
+
+def build_edge_routes(
+    graph: FlowGraphDocument,
+    positions: dict[str, tuple[float, float]],
+    render_specs: dict[str, NodeRenderSpec],
+    layout_mode: str,
+) -> list[EdgeRoute]:
+    geometries = build_node_geometries(graph, positions, render_specs, layout_mode)
+    bounds = row_bounds(geometries)
+    routes: list[EdgeRoute] = []
+    row_lane_counts: dict[tuple[int, str], int] = defaultdict(int)
+    gutter_lane_counts: dict[tuple[int, str], int] = defaultdict(int)
+
+    for edge in graph.edges:
+        source = geometries[edge.source]
+        target = geometries[edge.target]
+        if can_use_direct_edge(edge, source, target):
+            routes.append(EdgeRoute(edge=edge, anchors=()))
+            continue
+
+        if source.id == target.id:
+            lane_key = (source.row, "self")
+            lane_index = row_lane_counts[lane_key]
+            row_lane_counts[lane_key] += 1
+            anchors = self_loop_route_anchors(edge, source, lane_index)
+        elif source.row == target.row:
+            lane_key = (source.row, "top")
+            lane_index = row_lane_counts[lane_key]
+            row_lane_counts[lane_key] += 1
+            anchors = same_row_route_anchors(edge, source, target, bounds[source.row], lane_index)
+        else:
+            side = outbound_gutter_side(source)
+            lane_key = (min(source.row, target.row), side)
+            lane_index = gutter_lane_counts[lane_key]
+            gutter_lane_counts[lane_key] += 1
+            span_bounds = row_span_bounds(bounds, source.row, target.row)
+            anchors = cross_row_route_anchors(
+                edge,
+                source,
+                target,
+                span_bounds,
+                side,
+                lane_index,
+            )
+        routes.append(EdgeRoute(edge=edge, anchors=anchors))
+    return routes
+
+
+def can_use_direct_edge(edge: FlowEdge, source: NodeGeometry, target: NodeGeometry) -> bool:
+    if edge.kind == "dashed":
+        return False
+    if target.index <= source.index:
+        return False
+    return source.row == target.row and abs(source.visual_col - target.visual_col) == 1
+
+
+def row_span_bounds(
+    bounds: dict[int, RowBounds],
+    source_row: int,
+    target_row: int,
+) -> RowBounds:
+    start = min(source_row, target_row)
+    end = max(source_row, target_row)
+    selected = [bounds[row] for row in range(start, end + 1) if row in bounds]
+    return RowBounds(
+        x_min=min(item.x_min for item in selected),
+        x_max=max(item.x_max for item in selected),
+        y_min=min(item.y_min for item in selected),
+        y_max=max(item.y_max for item in selected),
+    )
+
+
+def self_loop_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    lane_offset = ROUTE_GUTTER_GAP + lane_index * ROUTE_GUTTER_STEP
+    lane_y = source.y - ROUTE_ROW_LANE_GAP - lane_index * ROUTE_ROW_LANE_STEP
+    if outbound_gutter_side(source) == "right":
+        first_x = source.x + source.width + lane_offset
+        second_x = source.x - lane_offset
+        first_target = "left"
+        first_source = "top"
+        middle_source = "left"
+        last_target = "right"
+        last_source = "bottom"
+    else:
+        first_x = source.x - lane_offset
+        second_x = source.x + source.width + lane_offset
+        first_target = "right"
+        first_source = "top"
+        middle_source = "right"
+        last_target = "left"
+        last_source = "bottom"
+
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(first_x, source.center_y),
+            source_position=first_source,
+            target_position=first_target,
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(first_x, lane_y),
+            source_position=middle_source,
+            target_position="bottom",
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 2),
+            pos=(second_x, lane_y),
+            source_position=last_source,
+            target_position=last_target,
+        ),
+    )
+
+
+def same_row_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    target: NodeGeometry,
+    bounds: RowBounds,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    lane_y = bounds.y_min - ROUTE_ROW_LANE_GAP - lane_index * ROUTE_ROW_LANE_STEP
+    direction = 1 if target.center_x >= source.center_x else -1
+    horizontal_source = "right" if direction > 0 else "left"
+    horizontal_target = "left" if direction > 0 else "right"
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(source.center_x, lane_y),
+            source_position=horizontal_source,
+            target_position="bottom",
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(target.center_x, lane_y),
+            source_position="bottom",
+            target_position=horizontal_target,
+        ),
+    )
+
+
+def cross_row_route_anchors(
+    edge: FlowEdge,
+    source: NodeGeometry,
+    target: NodeGeometry,
+    source_bounds: RowBounds,
+    side: str,
+    lane_index: int,
+) -> tuple[RouteAnchor, ...]:
+    if side == "right":
+        gutter_x = source_bounds.x_max + ROUTE_GUTTER_GAP + lane_index * ROUTE_GUTTER_STEP
+        horizontal_target = "left"
+        horizontal_source = "left"
+    else:
+        gutter_x = source_bounds.x_min - ROUTE_GUTTER_GAP - lane_index * ROUTE_GUTTER_STEP
+        horizontal_target = "right"
+        horizontal_source = "right"
+
+    vertical_down = target.center_y >= source.center_y
+    first_source = "bottom" if vertical_down else "top"
+    second_target = "top" if vertical_down else "bottom"
+    return (
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 0),
+            pos=(gutter_x, source.center_y),
+            source_position=first_source,
+            target_position=horizontal_target,
+        ),
+        RouteAnchor(
+            id=route_anchor_id(edge.id, 1),
+            pos=(gutter_x, target.center_y),
+            source_position=horizontal_source,
+            target_position=second_target,
+        ),
+    )
+
+
+def outbound_gutter_side(source: NodeGeometry) -> str:
+    if source.row % 2 == 0:
+        return "right"
+    return "left"
+
+
+def route_anchor_id(edge_id: str, index: int) -> str:
+    return f"route-anchor::{edge_id}::{index}"
+
+
+def route_segment_id(edge_id: str, segment_index: int, label_segment_index: int) -> str:
+    if segment_index == label_segment_index:
+        return edge_id
+    return f"route::{edge_id}::{segment_index}"
+
+
+def route_anchor_node(anchor: RouteAnchor) -> StreamlitFlowNode:
+    return StreamlitFlowNode(
+        id=anchor.id,
+        pos=(
+            anchor.pos[0] - ROUTE_ANCHOR_SIZE / 2,
+            anchor.pos[1] - ROUTE_ANCHOR_SIZE / 2,
+        ),
+        data={"content": WELL_TOKEN_CSS},
+        node_type="default",
+        source_position=anchor.source_position,
+        target_position=anchor.target_position,
+        draggable=False,
+        selectable=False,
+        connectable=False,
+        z_index=0,
+        focusable=False,
+        className="route-anchor-node",
+        style=route_anchor_style(),
+    )
+
+
+def route_anchor_style() -> dict[str, str | float]:
+    return {
+        "width": f"{ROUTE_ANCHOR_SIZE}px",
+        "height": f"{ROUTE_ANCHOR_SIZE}px",
+        "boxSizing": "border-box",
+        "padding": "0",
+        "border": "0",
+        "borderRadius": "0",
+        "backgroundColor": "transparent",
+        "boxShadow": "none",
+        "opacity": 0.0,
+        "pointerEvents": "none",
+    }
 
 
 def build_streamlit_edges(
     graph: FlowGraphDocument,
     active_node_ids: set[str] | None = None,
+    wells_doc: WellsDocument | None = None,
+    layout_mode: str = "snake",
 ) -> list[StreamlitFlowEdge]:
-    active_node_ids = active_node_ids or {node.id for node in graph.nodes}
+    if active_node_ids is None:
+        active_node_ids = {node.id for node in graph.nodes}
+    wells_by_node = wells_grouped_by_node(wells_doc) if wells_doc is not None else {}
+    render_specs = build_node_render_specs(graph, wells_by_node)
+    positions = layout_positions(graph, layout_mode, render_specs)
+    routes = build_edge_routes(graph, positions, render_specs, layout_mode)
     edges: list[StreamlitFlowEdge] = []
-    for edge in graph.edges:
-        active = edge.source in active_node_ids and edge.target in active_node_ids
-        color = edge_color(edge)
-        opacity = 1.0 if active else 0.16
-        edges.append(
+    for route in routes:
+        edges.extend(route_to_streamlit_edges(route, active_node_ids))
+    return edges
+
+
+def route_to_streamlit_edges(
+    route: EdgeRoute,
+    active_node_ids: set[str],
+) -> list[StreamlitFlowEdge]:
+    edge = route.edge
+    active = edge.source in active_node_ids and edge.target in active_node_ids
+    color = edge_color(edge)
+    opacity = 1.0 if active else 0.16
+    points = [edge.source, *(anchor.id for anchor in route.anchors), edge.target]
+    final_segment_index = len(points) - 2
+    label_segment_index = max(0, final_segment_index - 1) if route.anchors else 0
+    segment_edges: list[StreamlitFlowEdge] = []
+
+    for segment_index, (source, target) in enumerate(zip(points[:-1], points[1:], strict=True)):
+        is_final = segment_index == final_segment_index
+        carries_label = segment_index == label_segment_index
+        label = (edge.label or "") if carries_label else ""
+        segment_edges.append(
             StreamlitFlowEdge(
-                id=edge.id,
-                source=edge.source,
-                target=edge.target,
-                edge_type="smoothstep",
-                marker_end={"type": "arrowclosed", "color": color},
-                label=edge.label or "",
-                label_show_bg=bool(edge.label),
+                id=route_segment_id(edge.id, segment_index, label_segment_index),
+                source=source,
+                target=target,
+                edge_type=edge_route_type(route),
+                marker_end={"type": "arrowclosed", "color": color} if is_final else {},
+                label=label,
+                label_show_bg=bool(edge.label) and carries_label,
                 label_style={
                     "fill": color,
-                    "fontWeight": 700,
+                    "fontWeight": 760,
                     "fontSize": "12px",
                 },
                 label_bg_style={
                     "fill": "#ffffff",
-                    "fillOpacity": 0.92,
-                    "rx": 6,
-                    "ry": 6,
-                },
-                style={
+                    "fillOpacity": 0.96,
+                    "rx": 7,
+                    "ry": 7,
                     "stroke": color,
-                    "strokeWidth": 2.2,
-                    "strokeDasharray": "8 6" if edge.kind == "dashed" else "0",
-                    "opacity": opacity,
+                    "strokeOpacity": 0.18,
+                    "strokeWidth": 1,
                 },
+                z_index=edge_z_index(route, segment_index),
+                focusable=False,
+                style=edge_style(edge, opacity, is_route_segment=bool(route.anchors)),
+                pathOptions={
+                    "borderRadius": 18,
+                    "offset": 22 if route.anchors else 14,
+                },
+                data={"domainEdgeId": edge.id},
             )
         )
-    return edges
+    return segment_edges
+
+
+def edge_route_type(route: EdgeRoute) -> str:
+    if not route.anchors:
+        return "smoothstep"
+    return "smoothstep"
+
+
+def edge_z_index(route: EdgeRoute, segment_index: int) -> int:
+    if not route.anchors:
+        return 1
+    if segment_index == len(route.anchors):
+        return 3
+    return 2
+
+
+def edge_style(
+    edge: FlowEdge,
+    opacity: float,
+    is_route_segment: bool,
+) -> dict[str, str | float]:
+    return {
+        "stroke": edge_color(edge),
+        "strokeWidth": 2.4 if is_route_segment else 2.2,
+        "strokeDasharray": "8 6" if edge.kind == "dashed" else "0",
+        "strokeLinecap": "round",
+        "strokeLinejoin": "round",
+        "opacity": opacity,
+    }
 
 
 def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well]) -> str:
-    lines: list[str] = []
-    if node.duration_hours is not None:
-        lines.append(f"`TIME {node.duration_hours} ч`")
+    return content_from_lines(node_content_lines(node, graph, wells_here))
 
+
+def build_node_render_specs(
+    graph: FlowGraphDocument,
+    wells_by_node: dict[str, list[Well]],
+) -> dict[str, NodeRenderSpec]:
+    return {
+        node.id: node_render_spec(node, graph, wells_by_node.get(node.id, []))
+        for node in graph.nodes
+    }
+
+
+def node_render_spec(
+    node: FlowNode,
+    graph: FlowGraphDocument,
+    wells_here: list[Well],
+) -> NodeRenderSpec:
+    lines = node_content_lines(node, graph, wells_here)
+    width, height = fit_node_size(node, lines)
+    return NodeRenderSpec(
+        content=content_from_lines(lines),
+        width=width,
+        height=height,
+    )
+
+
+def node_content_lines(
+    node: FlowNode,
+    graph: FlowGraphDocument,
+    wells_here: list[Well],
+) -> list[str]:
+    lines: list[str] = []
     lines.append(f"**{node.title}**")
 
     if node.kind == "process":
@@ -1879,8 +2588,7 @@ def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well
     else:
         lines.append(KIND_LABELS[node.kind])
 
-    if node.note:
-        lines.append(f"_{node.note}_")
+    extra_lines: list[str] = []
 
     if node.approvers:
         approvers = []
@@ -1889,15 +2597,132 @@ def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well
             approvers.append(approver.label or style.label)
         if len(node.approvers) > 3:
             approvers.append(f"+{len(node.approvers) - 3}")
-        lines.append("Согласующие: " + " · ".join(approvers))
+        extra_lines.append("Согласующие: " + " · ".join(approvers))
 
     if wells_here:
         visible = ", ".join(short_well_name(well) for well in wells_here[:3])
         if len(wells_here) > 3:
             visible += f", +{len(wells_here) - 3}"
-        lines.append("Скважины: " + visible)
+        extra_lines.insert(0, "Скважины: " + visible)
 
+    if should_show_note_on_canvas(node):
+        extra_lines.append(f"_{node.note or ''}_")
+
+    lines.extend(extra_lines)
+    return lines
+
+
+def content_from_lines(lines: list[str]) -> str:
     return "  \n".join(lines)
+
+
+def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
+    width = preferred_node_width(node, lines)
+    wrapped_lines = sum(
+        estimated_wrapped_lines(line, width, horizontal_text_padding(node)) for line in lines
+    )
+    height = ceil(
+        vertical_text_padding(node)
+        + wrapped_lines * TEXT_LINE_HEIGHT
+        + markdown_vertical_buffer(node)
+    )
+    return width, max(node.size.h, minimum_node_height(node), height)
+
+
+def preferred_node_width(node: FlowNode, lines: list[str]) -> int:
+    longest_line = max((len(plain_canvas_text(line)) for line in lines), default=0)
+    desired = (
+        horizontal_text_padding(node)
+        + min(longest_line, max_unwrapped_chars(node)) * TEXT_CHAR_WIDTH
+    )
+    width = ceil_to_step(int(ceil(desired)), 10)
+    return max(node.size.w, minimum_node_width(node), min(width, maximum_node_width(node)))
+
+
+def minimum_node_width(node: FlowNode) -> int:
+    return {
+        "process": 280,
+        "decision_diamond": 230,
+        "decision_card": 250,
+        "database": 270,
+        "input_data": 260,
+    }[node.kind]
+
+
+def maximum_node_width(node: FlowNode) -> int:
+    return {
+        "process": 330,
+        "decision_diamond": 300,
+        "decision_card": 320,
+        "database": 330,
+        "input_data": 320,
+    }[node.kind]
+
+
+def minimum_node_height(node: FlowNode) -> int:
+    return {
+        "process": 104,
+        "decision_diamond": 112,
+        "decision_card": 98,
+        "database": 124,
+        "input_data": 94,
+    }[node.kind]
+
+
+def horizontal_text_padding(node: FlowNode) -> int:
+    return {
+        "decision_diamond": 104,
+        "input_data": 96,
+        "database": 72,
+    }.get(node.kind, 28)
+
+
+def vertical_text_padding(node: FlowNode) -> int:
+    return {
+        "process": 28,
+        "decision_diamond": 52,
+        "decision_card": 34,
+        "database": 58,
+        "input_data": 36,
+    }[node.kind]
+
+
+def markdown_vertical_buffer(node: FlowNode) -> int:
+    return {
+        "database": 12,
+        "decision_diamond": 10,
+        "input_data": 8,
+    }.get(node.kind, 8)
+
+
+def max_unwrapped_chars(node: FlowNode) -> int:
+    return {
+        "decision_diamond": 22,
+        "input_data": 28,
+        "database": 30,
+    }.get(node.kind, 32)
+
+
+def estimated_wrapped_lines(text: str, width: int, horizontal_padding: int) -> int:
+    available_width = max(96, width - horizontal_padding)
+    chars_per_line = max(12, int(available_width / TEXT_CHAR_WIDTH))
+    normalized = plain_canvas_text(text)
+    return max(1, (len(normalized) + chars_per_line - 1) // chars_per_line)
+
+
+def plain_canvas_text(text: str) -> str:
+    without_html = re.sub(r"<[^>]+>", "", text)
+    return (
+        without_html.replace("*", "").replace("`", "").replace("_", "").replace("TIME ", "").strip()
+    )
+
+
+def should_show_note_on_canvas(node: FlowNode) -> bool:
+    return bool(node.note) and node.kind not in {"decision_diamond", "input_data"}
+
+
+def ceil_to_step(value: int, step: int) -> int:
+    return int(ceil(value / step) * step)
 
 
 def short_well_name(well: Well) -> str:
@@ -1905,15 +2730,42 @@ def short_well_name(well: Well) -> str:
     return name[:16]
 
 
+def well_token_content(well: Well) -> str:
+    return f"{WELL_TOKEN_CSS}\nСкв. **{short_well_name(well)}**"
+
+
+def duration_label(duration_hours: int) -> str:
+    return f"{duration_hours} ч"
+
+
+def duration_badge_content(duration_hours: int) -> str:
+    return (
+        f"{WELL_TOKEN_CSS}\n"
+        '<span class="duration-badge-content">'
+        f"&#9719; <strong>{duration_label(duration_hours)}</strong>"
+        "</span>"
+    )
+
+
+def duration_badge_width(duration_hours: int) -> int:
+    text_width = len(duration_label(duration_hours)) * DURATION_BADGE_CHAR_WIDTH
+    width = ceil_to_step(
+        int(ceil(DURATION_BADGE_HORIZONTAL_PADDING + DURATION_BADGE_ICON_WIDTH + text_width)),
+        2,
+    )
+    return max(DURATION_BADGE_MIN_WIDTH, min(width, DURATION_BADGE_MAX_WIDTH))
+
+
 def node_style(
     node: FlowNode,
     graph: FlowGraphDocument,
+    render_spec: NodeRenderSpec,
     selected: bool,
     active: bool,
 ) -> dict[str, str | float]:
     style: dict[str, str | float] = {
-        "width": f"{node.size.w}px",
-        "height": f"{node.size.h}px",
+        "width": f"{render_spec.width}px",
+        "height": f"{render_spec.height}px",
         "boxSizing": "border-box",
         "padding": "10px 14px",
         "fontSize": "12px",
@@ -1921,6 +2773,8 @@ def node_style(
         "fontFamily": "Inter, system-ui, sans-serif",
         "textAlign": "left",
         "wordBreak": "break-word",
+        "overflowWrap": "anywhere",
+        "whiteSpace": "normal",
         "overflow": "hidden",
         "opacity": 1.0 if active else 0.28,
         "transition": "opacity 160ms ease, box-shadow 160ms ease, transform 160ms ease",
@@ -1940,13 +2794,20 @@ def node_style(
     elif node.kind == "decision_diamond":
         style.update(
             {
-                "backgroundColor": "#ffffff",
-                "border": "2px solid #334155",
-                "clipPath": "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)",
-                "padding": "22px 34px",
+                "backgroundColor": "transparent",
+                "backgroundImage": polygon_background(
+                    points="50,2 98,50 50,98 2,50",
+                    fill="#ffffff",
+                    stroke="#334155",
+                ),
+                "backgroundPosition": "center",
+                "backgroundRepeat": "no-repeat",
+                "backgroundSize": "100% 100%",
+                "border": "0",
+                "padding": "22px 52px 20px",
                 "textAlign": "center",
                 "color": "#111827",
-                "boxShadow": "0 14px 26px rgba(51, 65, 85, 0.14)",
+                "filter": "drop-shadow(0 12px 18px rgba(51, 65, 85, 0.12))",
             }
         )
     elif node.kind == "decision_card":
@@ -1962,23 +2823,35 @@ def node_style(
     elif node.kind == "database":
         style.update(
             {
-                "background": "linear-gradient(180deg, #f8fafc 0%, #d8dee8 100%)",
-                "border": "2px solid #6b7280",
-                "borderRadius": "50% / 18%",
+                "background": "transparent",
+                "backgroundImage": cylinder_background(),
+                "backgroundPosition": "center",
+                "backgroundRepeat": "no-repeat",
+                "backgroundSize": "100% 100%",
+                "border": "0",
+                "borderRadius": "0",
+                "padding": "32px 36px 22px",
                 "textAlign": "center",
                 "color": "#111827",
-                "boxShadow": "inset 0 10px 0 rgba(255,255,255,0.65), 0 12px 24px rgba(15, 23, 42, 0.12)",
+                "filter": "drop-shadow(0 12px 18px rgba(15, 23, 42, 0.13))",
             }
         )
     elif node.kind == "input_data":
         style.update(
             {
-                "backgroundColor": "#f1f7ff",
-                "border": "2px solid #5477aa",
-                "clipPath": "polygon(13% 0%, 100% 0%, 87% 100%, 0% 100%)",
-                "padding": "12px 24px",
+                "backgroundColor": "transparent",
+                "backgroundImage": polygon_background(
+                    points="13,2 98,2 87,98 2,98",
+                    fill="#f1f7ff",
+                    stroke="#5477aa",
+                ),
+                "backgroundPosition": "center",
+                "backgroundRepeat": "no-repeat",
+                "backgroundSize": "100% 100%",
+                "border": "0",
+                "padding": "14px 48px 18px 44px",
                 "color": "#183557",
-                "boxShadow": "0 12px 24px rgba(30, 64, 175, 0.10)",
+                "filter": "drop-shadow(0 12px 18px rgba(30, 64, 175, 0.10))",
             }
         )
 
@@ -1993,32 +2866,117 @@ def node_style(
     return style
 
 
-def well_token_position(node: FlowNode, index: int) -> tuple[float, float]:
+def polygon_background(points: str, fill: str, stroke: str) -> str:
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' "
+        "preserveAspectRatio='none'>"
+        f"<polygon points='{points}' fill='{fill}' stroke='{stroke}' "
+        "stroke-width='2.4' stroke-linejoin='round'/>"
+        "</svg>"
+    )
+    return f'url("data:image/svg+xml,{quote(svg, safe="")}")'
+
+
+def cylinder_background() -> str:
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' "
+        "preserveAspectRatio='none'>"
+        "<defs>"
+        "<linearGradient id='body' x1='0' y1='0' x2='0' y2='1'>"
+        "<stop offset='0' stop-color='#f8fafc'/>"
+        "<stop offset='0.48' stop-color='#e3e8ef'/>"
+        "<stop offset='1' stop-color='#cfd6e1'/>"
+        "</linearGradient>"
+        "<linearGradient id='top' x1='0' y1='0' x2='0' y2='1'>"
+        "<stop offset='0' stop-color='#ffffff'/>"
+        "<stop offset='1' stop-color='#e4e9f1'/>"
+        "</linearGradient>"
+        "</defs>"
+        "<path d='M8 24 C8 9 92 9 92 24 L92 76 "
+        "C92 91 8 91 8 76 Z' fill='url(#body)' stroke='#5f6877' "
+        "stroke-width='2.4'/>"
+        "<ellipse cx='50' cy='24' rx='42' ry='14' fill='url(#top)' "
+        "stroke='#5f6877' stroke-width='2.4'/>"
+        "<path d='M8 76 C8 91 92 91 92 76' fill='none' "
+        "stroke='#5f6877' stroke-width='2.4'/>"
+        "<path d='M14 27 C28 36 72 36 86 27' fill='none' "
+        "stroke='#9aa4b2' stroke-width='1.2' opacity='0.7'/>"
+        "</svg>"
+    )
+    return f'url("data:image/svg+xml,{quote(svg, safe="")}")'
+
+
+def well_token_position(
+    node_position: tuple[float, float],
+    node_height: int,
+    index: int,
+) -> tuple[float, float]:
     row = index // 2
     col = index % 2
     return (
-        node.position.x + 14 + col * 84,
-        node.position.y + node.size.h + 12 + row * 34,
+        node_position[0] + 14 + col * 128,
+        node_position[1] + node_height + 12 + row * 44,
     )
 
 
+def duration_badge_position(node_position: tuple[float, float]) -> tuple[float, float]:
+    return (node_position[0] + 10, node_position[1] - 30)
+
+
+def well_token_stack_height(well_count: int) -> int:
+    if well_count <= 0:
+        return 0
+    visible_tokens = min(well_count, 5)
+    rows = (visible_tokens + 1) // 2
+    return 12 + rows * 44
+
+
 def well_token_style(selected: bool, active: bool) -> dict[str, str | float]:
+    accent = "#0f766e" if selected else "#14b8a6"
+    fill = "#ccfbf1" if selected else "#f0fdfa"
     return {
-        "width": "74px",
-        "height": "28px",
+        "width": "118px",
+        "height": "36px",
         "boxSizing": "border-box",
-        "padding": "4px 8px",
+        "padding": "7px 12px 7px 18px",
         "borderRadius": "999px",
-        "border": "2px solid #ffffff",
-        "backgroundColor": "#0f766e" if selected else "#0f172a",
-        "color": "#ffffff",
-        "fontSize": "11px",
-        "lineHeight": "1.05",
+        "border": f"1px solid {accent}",
+        "background": f"linear-gradient(90deg, {accent} 0 7px, {fill} 7px 100%)",
+        "color": "#064e3b",
+        "fontSize": "12px",
+        "fontWeight": 650,
+        "lineHeight": "1.1",
         "textAlign": "center",
         "overflow": "hidden",
-        "boxShadow": "0 10px 22px rgba(15, 23, 42, 0.22)",
+        "boxShadow": "0 10px 22px rgba(15, 118, 110, 0.16)",
         "opacity": 1.0 if active else 0.24,
-        "transition": "opacity 160ms ease, background-color 160ms ease",
+        "pointerEvents": "none",
+        "transition": "opacity 160ms ease, background 160ms ease, border-color 160ms ease",
+    }
+
+
+def duration_badge_style(
+    active: bool,
+    duration_hours: int,
+) -> dict[str, str | float]:
+    return {
+        "width": f"{duration_badge_width(duration_hours)}px",
+        "height": "24px",
+        "boxSizing": "border-box",
+        "padding": "4px 9px",
+        "borderRadius": "999px",
+        "border": "1px solid #fda4af",
+        "backgroundColor": "#fff1f2",
+        "color": "#9f1239",
+        "fontSize": "11px",
+        "fontWeight": 700,
+        "lineHeight": "1",
+        "textAlign": "center",
+        "overflow": "hidden",
+        "boxShadow": "0 8px 18px rgba(190, 18, 60, 0.12)",
+        "opacity": 1.0 if active else 0.24,
+        "pointerEvents": "none",
+        "transition": "opacity 160ms ease",
     }
 
 
@@ -2031,7 +2989,7 @@ def edge_color(edge: FlowEdge) -> str:
     }[edge.kind]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/models.py	6151
+===BEGIN_FILE===	src/pydiag/models.py	6697
 from __future__ import annotations
 
 from datetime import datetime
@@ -2050,6 +3008,13 @@ NodeKind = Literal[
 ]
 
 EdgeKind = Literal["default", "yes", "no", "dashed"]
+RESERVED_UI_ID_PREFIXES = (
+    "well::",
+    "well-extra::",
+    "duration::",
+    "route-anchor::",
+    "route::",
+)
 
 
 class StrictModel(BaseModel):
@@ -2169,10 +3134,14 @@ class FlowGraphDocument(StrictModel):
         node_ids = [node.id for node in self.nodes]
         if len(node_ids) != len(set(node_ids)):
             raise ValueError("Duplicate node ids are not allowed")
+        for node_id in node_ids:
+            validate_not_reserved_ui_id("Node", node_id)
 
         edge_ids = [edge.id for edge in self.edges]
         if len(edge_ids) != len(set(edge_ids)):
             raise ValueError("Duplicate edge ids are not allowed")
+        for edge_id in edge_ids:
+            validate_not_reserved_ui_id("Edge", edge_id)
 
         node_set = set(node_ids)
         responsible_set = set(self.responsibles)
@@ -2190,6 +3159,12 @@ class FlowGraphDocument(StrictModel):
             if edge.target not in node_set:
                 raise ValueError(f"Edge {edge.id}: unknown target node {edge.target}")
         return self
+
+
+def validate_not_reserved_ui_id(entity: str, value: str) -> None:
+    for prefix in RESERVED_UI_ID_PREFIXES:
+        if value.startswith(prefix):
+            raise ValueError(f"{entity} id {value}: prefix {prefix} is reserved for UI internals")
 
 
 class WellHistoryEntry(StrictModel):
@@ -2413,13 +3388,18 @@ def transition_label(edge: FlowEdge, graph: FlowGraphDocument) -> str:
     return f"{prefix}: {target_title}"
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/storage.py	3117
+===BEGIN_FILE===	src/pydiag/storage.py	5474
 from __future__ import annotations
 
 import json
 import os
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from errno import EACCES, EAGAIN
 from pathlib import Path
+from typing import BinaryIO
 
 from .models import FlowGraphDocument, WellsDocument, validate_wells_against_graph
 
@@ -2433,6 +3413,10 @@ WELLS_PATH_ENV = "PYDIAG_WELLS_PATH"
 
 class VersionConflictError(RuntimeError):
     """Raised when a writer tries to save stale JSON state."""
+
+
+class FileLockTimeoutError(TimeoutError):
+    """Raised when an exclusive state-file lock cannot be acquired in time."""
 
 
 def graph_path() -> Path:
@@ -2500,6 +3484,82 @@ def fsync_parent_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
+@contextmanager
+def json_file_lock(
+    path: str | Path,
+    timeout: float = 10.0,
+    poll_interval: float = 0.05,
+) -> Iterator[None]:
+    """Cross-platform advisory lock for JSON state writes."""
+    target = Path(path)
+    lock_path = target.with_name(target.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("a+b") as lock_file:
+        ensure_lock_file_region(lock_file)
+        acquire_file_lock(lock_file, lock_path, timeout, poll_interval)
+        try:
+            yield
+        finally:
+            release_file_lock(lock_file)
+
+
+def ensure_lock_file_region(lock_file: BinaryIO) -> None:
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+        os.fsync(lock_file.fileno())
+    lock_file.seek(0)
+
+
+def acquire_file_lock(
+    lock_file: BinaryIO,
+    lock_path: Path,
+    timeout: float,
+    poll_interval: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            try_acquire_file_lock(lock_file)
+            return
+        except OSError as exc:
+            if exc.errno not in {EACCES, EAGAIN} and os.name != "nt":
+                raise
+            if time.monotonic() >= deadline:
+                raise FileLockTimeoutError(
+                    f"Timed out waiting for exclusive lock: {lock_path}"
+                ) from exc
+            time.sleep(poll_interval)
+
+
+def try_acquire_file_lock(lock_file: BinaryIO) -> None:
+    lock_file.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def release_file_lock(lock_file: BinaryIO) -> None:
+    lock_file.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def save_wells_with_version_check(
     wells_doc: WellsDocument,
     expected_version: int,
@@ -2507,19 +3567,20 @@ def save_wells_with_version_check(
     graph: FlowGraphDocument | None = None,
 ) -> WellsDocument:
     target = Path(path or wells_path())
-    current = load_wells_doc(target)
-    if current.version != expected_version:
-        raise VersionConflictError(
-            f"Conflict: expected wells version {expected_version}, "
-            f"actual version is {current.version}"
-        )
+    with json_file_lock(target):
+        current = load_wells_doc(target)
+        if current.version != expected_version:
+            raise VersionConflictError(
+                f"Conflict: expected wells version {expected_version}, "
+                f"actual version is {current.version}"
+            )
 
-    to_save = wells_doc.model_copy(deep=True)
-    to_save.version = expected_version + 1
-    if graph is not None:
-        validate_wells_against_graph(graph, to_save)
-    save_json_atomic(target, to_save.model_dump(mode="json"))
-    return load_wells_doc(target)
+        to_save = wells_doc.model_copy(deep=True)
+        to_save.version = expected_version + 1
+        if graph is not None:
+            validate_wells_against_graph(graph, to_save)
+        save_json_atomic(target, to_save.model_dump(mode="json"))
+        return load_wells_doc(target)
 
 ===END_FILE===
 ===BEGIN_FILE===	tests/conftest.py	643
@@ -2551,7 +3612,7 @@ def documents(data_paths: tuple[Path, Path]):
     return load_documents(*data_paths)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/integration/test_streamlit_app.py	4327
+===BEGIN_FILE===	tests/integration/test_streamlit_app.py	4466
 from __future__ import annotations
 
 import json
@@ -2574,6 +3635,7 @@ def run_app_with_temp_data(
     graph_path, wells_path = data_paths
     monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
+    monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
     monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
     if configure_admin:
         monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "test-admin")
@@ -2641,6 +3703,7 @@ def test_streamlit_admin_can_move_well_without_touching_real_json(
     monkeypatch,
 ) -> None:
     _, wells_path = data_paths
+    initial_version = load_wells_doc(wells_path).version
     app = run_app_with_temp_data(data_paths, monkeypatch)
     login_as_admin(app)
 
@@ -2648,7 +3711,7 @@ def test_streamlit_admin_can_move_well_without_touching_real_json(
 
     saved = load_wells_doc(wells_path)
     well = well_by_id(saved)["well_1001"]
-    assert saved.version == 2
+    assert saved.version == initial_version + 1
     assert well.current_node_id == "dec_data_complete"
     assert well.history[-1].action == "move"
 
@@ -2688,17 +3751,143 @@ def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> Non
     assert "Продвинуть" not in {button.label for button in app.button}
 
 ===END_FILE===
-===BEGIN_FILE===	tests/unit/test_flow_adapter.py	1073
+===BEGIN_FILE===	tests/unit/test_app_state.py	3229
 from __future__ import annotations
 
-from pydiag.flow_adapter import build_streamlit_edges, build_streamlit_nodes
+import app as streamlit_app
+
+
+class FakeSessionState(dict):
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value):
+        self[name] = value
+
+
+def test_flow_state_timestamp_is_stable_for_same_view(documents, monkeypatch) -> None:
+    graph, wells = documents
+    session_state = FakeSessionState()
+    monkeypatch.setattr(streamlit_app.st, "session_state", session_state)
+
+    first = streamlit_app.flow_state_timestamp(
+        graph=graph,
+        wells=wells,
+        search="",
+        responsible_filter=[],
+        kind_filter=[],
+        layout_mode="snake",
+    )
+    session_state["flow_component_timestamp"] = first + 1000
+
+    second = streamlit_app.flow_state_timestamp(
+        graph=graph,
+        wells=wells,
+        search="",
+        responsible_filter=[],
+        kind_filter=[],
+        layout_mode="snake",
+    )
+
+    assert second == first
+
+
+def test_flow_state_timestamp_changes_only_when_view_signature_changes(
+    documents,
+    monkeypatch,
+) -> None:
+    graph, wells = documents
+    session_state = FakeSessionState()
+    monkeypatch.setattr(streamlit_app.st, "session_state", session_state)
+
+    first = streamlit_app.flow_state_timestamp(
+        graph=graph,
+        wells=wells,
+        search="",
+        responsible_filter=[],
+        kind_filter=[],
+        layout_mode="snake",
+    )
+    second = streamlit_app.flow_state_timestamp(
+        graph=graph,
+        wells=wells,
+        search="1001",
+        responsible_filter=[],
+        kind_filter=[],
+        layout_mode="snake",
+    )
+
+    assert second > first
+
+
+def test_route_segment_selection_resolves_to_domain_edge(documents) -> None:
+    graph, wells = documents
+
+    selection_kind, selected = streamlit_app.resolve_selection(
+        "route::e_input_review::2",
+        graph,
+        wells,
+    )
+
+    assert selection_kind == "edge"
+    assert selected is not None
+    assert selected.id == "e_input_review"
+
+
+def test_route_segment_selection_allows_colons_in_domain_edge_id(documents) -> None:
+    graph, wells = documents
+    graph.edges[0].id = "edge::with::colon"
+
+    selection_kind, selected = streamlit_app.resolve_selection(
+        "route::edge::with::colon::2",
+        graph,
+        wells,
+    )
+
+    assert selection_kind == "edge"
+    assert selected is not None
+    assert selected.id == "edge::with::colon"
+
+
+def test_admin_password_rejects_short_configured_value(monkeypatch) -> None:
+    monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "123")
+    monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
+    monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
+
+    assert streamlit_app.admin_password() == ""
+    assert "не короче" in streamlit_app.admin_password_warning()
+
+
+def test_admin_password_allows_short_value_only_in_explicit_insecure_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "123")
+    monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
+    monkeypatch.setenv("PYDIAG_ALLOW_INSECURE_ADMIN", "1")
+
+    assert streamlit_app.admin_password() == "123"
+
+===END_FILE===
+===BEGIN_FILE===	tests/unit/test_flow_adapter.py	9193
+from __future__ import annotations
+
+from pydiag.flow_adapter import (
+    SNAKE_CELL_HEIGHT,
+    SNAKE_COLUMNS,
+    build_streamlit_edges,
+    build_streamlit_nodes,
+    flow_canvas_height,
+)
 
 
 def test_adapter_builds_domain_nodes_and_well_tokens(documents) -> None:
     graph, wells = documents
 
     nodes, active_ids = build_streamlit_nodes(graph, wells, selected_id="well::well_1001")
-    edges = build_streamlit_edges(graph, active_ids)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
     node_ids = {node.id for node in nodes}
 
     assert "proc_initial_review" in node_ids
@@ -2718,8 +3907,198 @@ def test_adapter_search_highlights_matching_well_node(documents) -> None:
     assert token.style["opacity"] == 1.0
     assert other_token.style["opacity"] == 0.24
 
+
+def test_well_tokens_are_light_badges_without_connection_handles(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    token = next(node for node in nodes if node.id == "well::well_1004")
+    token_dict = token.asdict()
+
+    assert token_dict["className"] == "well-token-node"
+    assert token.connectable is False
+    assert token.style["pointerEvents"] == "none"
+    assert token.style["width"] == "118px"
+    assert token.style["height"] == "36px"
+    assert "#f0fdfa" in str(token.style["background"])
+    assert "react-flow__handle" in token.data["content"]
+    assert "Скв." in token.data["content"]
+
+
+def test_shaped_nodes_use_svg_background_instead_of_clipping(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    input_node = next(node for node in nodes if node.id == "input_geo_license")
+    diamond_node = next(node for node in nodes if node.id == "dec_data_complete")
+    database_node = next(node for node in nodes if node.id == "db_offset_wells")
+
+    assert input_node.style["border"] == "0"
+    assert diamond_node.style["border"] == "0"
+    assert database_node.style["border"] == "0"
+    assert "clipPath" not in input_node.style
+    assert "clipPath" not in diamond_node.style
+    assert "clipPath" not in database_node.style
+    assert str(input_node.style["backgroundImage"]).startswith('url("data:image/svg+xml,')
+    assert str(diamond_node.style["backgroundImage"]).startswith('url("data:image/svg+xml,')
+    assert str(database_node.style["backgroundImage"]).startswith('url("data:image/svg+xml,')
+    assert "%3Cellipse" in str(database_node.style["backgroundImage"])
+
+
+def test_compact_input_node_keeps_note_out_of_canvas_content(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    input_node = next(node for node in nodes if node.id == "input_geo_license")
+
+    assert "Контур участка" not in input_node.data["content"]
+    assert "Лицензия и исходные геоданные" in input_node.data["content"]
+
+
+def test_default_snake_layout_wraps_domain_nodes_into_rows(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    domain_nodes = [next(item for item in nodes if item.id == node.id) for node in graph.nodes]
+    first_row = domain_nodes[:SNAKE_COLUMNS]
+    second_row = domain_nodes[SNAKE_COLUMNS : SNAKE_COLUMNS * 2]
+
+    assert first_row[0].position["x"] < first_row[-1].position["x"]
+    assert second_row[0].position["x"] > second_row[-1].position["x"]
+    assert second_row[0].position["y"] - first_row[0].position["y"] >= SNAKE_CELL_HEIGHT
+    assert max(node.position["x"] for node in domain_nodes) < 1300
+    assert flow_canvas_height(graph, wells, "snake") > 1000
+
+
+def test_manual_layout_preserves_json_coordinates(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells, layout_mode="manual")
+    input_node = next(node for node in nodes if node.id == "input_geo_license")
+
+    assert input_node.position == {
+        "x": graph.nodes[0].position.x,
+        "y": graph.nodes[0].position.y,
+    }
+
+
+def test_database_node_grows_to_fit_canvas_text(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    database_node = next(node for node in nodes if node.id == "db_contracts")
+
+    assert database_node.style["height"] != "96px"
+    assert int(str(database_node.style["height"]).removesuffix("px")) >= 124
+    assert "Единый реестр обеспеченности" in database_node.data["content"]
+
+
+def test_duration_is_compact_and_does_not_use_code_badge(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    node = next(item for item in nodes if item.id == "db_contracts")
+    duration = next(item for item in nodes if item.id == "duration::db_contracts")
+    duration_dict = duration.asdict()
+
+    assert "TIME" not in node.data["content"]
+    assert "`" not in node.data["content"]
+    assert "1 ч" not in node.data["content"]
+    assert duration_dict["className"] == "duration-badge-node"
+    assert duration.connectable is False
+    assert duration.selectable is False
+    assert duration.style["pointerEvents"] == "none"
+    assert duration.style["width"] == "64px"
+    assert duration.style["height"] == "24px"
+    assert "1 ч" in duration.data["content"]
+    assert "duration-badge-content" in duration.data["content"]
+    assert "react-flow__handle" in duration.data["content"]
+
+
+def test_duration_badge_width_grows_for_long_values(documents) -> None:
+    graph, wells = documents
+    graph.nodes[0].duration_hours = 1200
+
+    nodes, _ = build_streamlit_nodes(graph, wells)
+    duration = next(item for item in nodes if item.id == f"duration::{graph.nodes[0].id}")
+
+    assert int(str(duration.style["width"]).removesuffix("px")) > 64
+    assert "1200 ч" in duration.data["content"]
+    assert (
+        "1200 ч" not in next(item for item in nodes if item.id == graph.nodes[0].id).data["content"]
+    )
+
+
+def test_smart_routing_splits_skipping_edges_into_helper_lanes(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    node_by_id = {node.id: node for node in nodes}
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "route-anchor::e_input_review::0" in node_by_id
+    assert "route-anchor::e_input_review::1" in node_by_id
+    assert node_by_id["route-anchor::e_input_review::0"].selectable is False
+    assert node_by_id["route-anchor::e_input_review::0"].style["opacity"] == 0.0
+    assert "route::e_input_review::0" in edge_by_id
+    assert "e_input_review" in edge_by_id
+    assert "route::e_input_review::2" in edge_by_id
+    assert edge_by_id["route::e_input_review::2"].marker_end["type"] == "arrowclosed"
+    assert edge_by_id["e_input_review"].asdict()["data"]["domainEdgeId"] == "e_input_review"
+    assert edge_by_id["e_input_review"].asdict()["pathOptions"]["offset"] == 22
+
+
+def test_adjacent_edges_stay_direct_to_reduce_visual_noise(documents) -> None:
+    graph, wells = documents
+
+    _, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "e_review_decision" in edge_by_id
+    assert "route::e_review_decision::0" not in edge_by_id
+    assert edge_by_id["e_review_decision"].source == "proc_initial_review"
+    assert edge_by_id["e_review_decision"].target == "dec_data_complete"
+    assert edge_by_id["e_review_decision"].asdict()["pathOptions"]["offset"] == 14
+
+
+def test_empty_active_node_set_keeps_all_edges_dimmed(documents) -> None:
+    graph, wells = documents
+
+    edges = build_streamlit_edges(graph, active_node_ids=set(), wells_doc=wells)
+
+    assert edges
+    assert {edge.style["opacity"] for edge in edges} == {0.16}
+
+
+def test_self_loop_edges_get_explicit_loop_route(documents) -> None:
+    graph, wells = documents
+    loop_edge = graph.edges[0].model_copy(
+        update={
+            "id": "e_self_loop",
+            "source": graph.nodes[0].id,
+            "target": graph.nodes[0].id,
+            "label": "повтор",
+        }
+    )
+    graph.edges = [loop_edge]
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells)
+    node_ids = {node.id for node in nodes}
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    assert "route-anchor::e_self_loop::0" in node_ids
+    assert "route-anchor::e_self_loop::1" in node_ids
+    assert "route-anchor::e_self_loop::2" in node_ids
+    assert "route::e_self_loop::0" in edge_by_id
+    assert "e_self_loop" in edge_by_id
+    assert "route::e_self_loop::3" in edge_by_id
+    assert edge_by_id["route::e_self_loop::3"].marker_end["type"] == "arrowclosed"
+
 ===END_FILE===
-===BEGIN_FILE===	tests/unit/test_models.py	1570
+===BEGIN_FILE===	tests/unit/test_models.py	2307
 from __future__ import annotations
 
 import json
@@ -2756,6 +4135,24 @@ def test_graph_validation_rejects_duplicate_node_ids(data_paths) -> None:
     payload["nodes"][1]["id"] = payload["nodes"][0]["id"]
 
     with pytest.raises(ValidationError, match="Duplicate node ids"):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_graph_validation_rejects_reserved_ui_node_prefix(data_paths) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["nodes"][0]["id"] = "route-anchor::shadow"
+
+    with pytest.raises(ValidationError, match="reserved for UI internals"):
+        FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_graph_validation_rejects_reserved_ui_edge_prefix(data_paths) -> None:
+    graph_path, _ = data_paths
+    payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    payload["edges"][0]["id"] = "route::shadow"
+
+    with pytest.raises(ValidationError, match="reserved for UI internals"):
         FlowGraphDocument.model_validate(payload, strict=True)
 
 
@@ -2873,7 +4270,7 @@ def test_delete_well_removes_it_from_document(documents) -> None:
     assert "well_1004" in well_by_id(wells)
 
 ===END_FILE===
-===BEGIN_FILE===	tests/unit/test_storage.py	3042
+===BEGIN_FILE===	tests/unit/test_storage.py	3452
 from __future__ import annotations
 
 import pytest
@@ -2881,9 +4278,11 @@ import pytest
 from pydiag.models import well_by_id
 from pydiag.services import move_well_to_node
 from pydiag.storage import (
+    FileLockTimeoutError,
     VersionConflictError,
     fsync_parent_dir,
     graph_path,
+    json_file_lock,
     load_documents,
     load_wells_doc,
     save_wells_with_version_check,
@@ -2947,6 +4346,16 @@ def test_save_wells_with_version_check_rejects_stale_writer(data_paths) -> None:
             expected_version=wells.version,
             path=wells_file,
         )
+
+
+def test_json_file_lock_prevents_nested_writer(tmp_path) -> None:
+    target = tmp_path / "wells.json"
+    target.write_text("{}", encoding="utf-8")
+
+    with json_file_lock(target, timeout=0.2, poll_interval=0.01):
+        with pytest.raises(FileLockTimeoutError):
+            with json_file_lock(target, timeout=0.05, poll_interval=0.01):
+                pass
 
 
 def test_save_wells_with_version_check_rejects_graph_integrity_violation(
