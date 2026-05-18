@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from pydiag.models import well_by_id
-from pydiag.services import create_well, delete_well, move_well_to_node, rollback_well
+from pydiag.services import (
+    create_well,
+    delete_well,
+    move_well_to_node,
+    rollback_well,
+    transition_label,
+)
 
 
 def test_move_well_uses_only_allowed_graph_edges(documents) -> None:
@@ -94,3 +100,10 @@ def test_delete_well_removes_it_from_document(documents) -> None:
 
     assert "well_1004" not in well_by_id(updated)
     assert "well_1004" in well_by_id(wells)
+
+
+def test_transition_label_uses_node_text(documents) -> None:
+    graph, _ = documents
+    edge = next(item for item in graph.edges if item.id == "e_data_yes")
+
+    assert transition_label(edge, graph) == "Да: Проект профиля и конструкции"

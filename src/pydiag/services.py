@@ -139,14 +139,14 @@ def rollback_well(
 
 def transition_label(edge: FlowEdge, graph: FlowGraphDocument) -> str:
     nodes = node_by_id(graph)
-    target_title = nodes[edge.target].title if edge.target in nodes else edge.target
+    target_text = nodes[edge.target].text if edge.target in nodes else edge.target
     prefix = (
         edge.label
         or {
-            "default": "Далее",
+            "usual": "Далее",
             "yes": "Да",
             "no": "Нет",
             "dashed": "Возврат",
         }[edge.kind]
     )
-    return f"{prefix}: {target_title}"
+    return f"{prefix}: {target_text}"

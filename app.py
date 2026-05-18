@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hmac
+import json
 import os
 import re
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from html import escape as html_escape
 from pathlib import Path
 
 import pandas as pd
@@ -16,11 +21,31 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 MIN_ADMIN_PASSWORD_LENGTH = 8
+AUTH_USERS_ENV = "PYDIAG_AUTH_USERS_JSON"
+LEGACY_ADMIN_USERNAME = "admin"
+KIND_FILTER_LABELS = {
+    "process": "Процесс",
+    "decision_diamond": "Решение (ромб)",
+    "decision_card": "Решение (карточка)",
+    "database": "База данных",
+    "input_data": "Входные данные",
+    "event": "Событие",
+}
+
+
+@dataclass(frozen=True)
+class AuthUser:
+    username: str
+    display_name: str
+    password: str
+    is_admin: bool = True
+
 
 from pydiag.flow_adapter import (  # noqa: E402
     KIND_LABELS,
     build_streamlit_edges,
     build_streamlit_nodes,
+    duration_label,
     flow_canvas_height,
     wells_grouped_by_node,
 )
@@ -66,9 +91,41 @@ def inject_css() -> None:
                 linear-gradient(180deg, rgba(246, 247, 249, 0.98), rgba(246, 247, 249, 1));
         }
         [data-testid="stHeader"],
-        [data-testid="stToolbar"],
+        .stAppHeader {
+            background: transparent !important;
+            box-shadow: none !important;
+            height: 2.25rem !important;
+            min-height: 2.25rem !important;
+            pointer-events: none;
+        }
+        [data-testid="stHeader"] button,
+        [data-testid="stHeader"] [role="button"],
+        [data-testid="collapsedControl"],
+        .stAppHeader button,
+        .stAppHeader [role="button"] {
+            pointer-events: auto !important;
+            visibility: visible !important;
+        }
+        [data-testid="collapsedControl"] {
+            z-index: 1000000 !important;
+        }
+        [data-testid="stToolbar"] {
+            background: transparent !important;
+            box-shadow: none !important;
+            pointer-events: none;
+        }
+        [data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarCollapseButton"] {
+            display: inline-flex !important;
+            pointer-events: auto !important;
+            visibility: visible !important;
+        }
+        [data-testid="stHeaderActionElements"],
+        [data-testid="stToolbarActions"],
+        [data-testid="stMainMenu"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stAppDeployButton"],
         [data-testid="stDecoration"],
-        .stAppHeader,
         .stDeployButton {
             display: none !important;
         }
@@ -145,6 +202,69 @@ def inject_css() -> None:
             color: #111827;
             font-weight: 620;
         }
+        .legend-shell {
+            display: grid;
+            gap: 12px;
+            margin: 0.2rem 0 0.8rem;
+        }
+        .legend-title {
+            color: #526173;
+            font-size: 0.74rem;
+            font-weight: 760;
+            letter-spacing: 0.04em;
+            margin: 0.1rem 0 0.25rem;
+            text-transform: uppercase;
+        }
+        .legend-list,
+        .legend-dept-list {
+            display: grid;
+            gap: 7px;
+        }
+        .legend-item,
+        .legend-dept {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            min-width: 0;
+            color: #263244;
+            font-size: 0.84rem;
+            line-height: 1.2;
+        }
+        .legend-item span:last-child,
+        .legend-dept-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .legend-symbol {
+            flex: 0 0 auto;
+            width: 38px;
+            height: 30px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .legend-symbol-svg {
+            width: 38px;
+            height: 30px;
+            display: block;
+            overflow: visible;
+        }
+        .legend-swatch {
+            flex: 0 0 auto;
+            width: 20px;
+            height: 20px;
+            border: 1.6px solid;
+            border-radius: 5px;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+        }
+        .legend-dept-code {
+            margin-left: auto;
+            color: #64748b;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.68rem;
+        }
         div[data-testid="stButton"] button {
             border-radius: 7px;
             min-height: 2.35rem;
@@ -196,11 +316,101 @@ def render_flash() -> None:
         st.success(data["message"])
 
 
+def streamlit_secrets_enabled() -> bool:
+    return os.getenv("PYDIAG_DISABLE_STREAMLIT_SECRETS") != "1"
+
+
+def configured_auth_users() -> dict[str, AuthUser]:
+    users: dict[str, AuthUser] = {}
+    users.update(auth_users_from_env_json())
+    if streamlit_secrets_enabled():
+        users.update(auth_users_from_streamlit_secrets())
+
+    legacy_password = configured_admin_password()
+    if legacy_password:
+        users.setdefault(
+            LEGACY_ADMIN_USERNAME,
+            AuthUser(
+                username=LEGACY_ADMIN_USERNAME,
+                display_name=LEGACY_ADMIN_USERNAME,
+                password=legacy_password,
+            ),
+        )
+    if insecure_admin_mode_enabled() and not users:
+        users[LEGACY_ADMIN_USERNAME] = AuthUser(
+            username=LEGACY_ADMIN_USERNAME,
+            display_name=LEGACY_ADMIN_USERNAME,
+            password="admin",
+        )
+    return {
+        username: user for username, user in users.items() if password_is_allowed(user.password)
+    }
+
+
+def auth_users_from_env_json() -> dict[str, AuthUser]:
+    raw = os.getenv(AUTH_USERS_ENV)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return auth_users_from_mapping(payload)
+
+
+def auth_users_from_streamlit_secrets() -> dict[str, AuthUser]:
+    try:
+        secrets = st.secrets
+        users: dict[str, AuthUser] = {}
+        users.update(auth_users_from_mapping(secrets.get("users", {})))
+        auth_section = secrets.get("auth", {})
+        if isinstance(auth_section, Mapping):
+            users.update(auth_users_from_mapping(auth_section.get("users", {})))
+        return users
+    except Exception:
+        return {}
+
+
+def auth_users_from_mapping(value: object) -> dict[str, AuthUser]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    users: dict[str, AuthUser] = {}
+    for raw_username, raw_config in value.items():
+        username = str(raw_username).strip()
+        if not username:
+            continue
+
+        password: str | None = None
+        display_name = username
+        is_admin = True
+        if isinstance(raw_config, str):
+            password = raw_config
+        elif isinstance(raw_config, Mapping):
+            raw_password = raw_config.get("password")
+            if raw_password is not None:
+                password = str(raw_password)
+            display_name = str(
+                raw_config.get("name") or raw_config.get("display_name") or username
+            ).strip()
+            is_admin = bool(raw_config.get("is_admin", True))
+
+        if not password:
+            continue
+        users[username] = AuthUser(
+            username=username,
+            display_name=display_name or username,
+            password=password,
+            is_admin=is_admin,
+        )
+    return users
+
+
 def configured_admin_password() -> str:
     env_value = os.getenv("PYDIAG_ADMIN_PASSWORD")
     if env_value:
         return env_value
-    if os.getenv("PYDIAG_DISABLE_STREAMLIT_SECRETS") != "1":
+    if streamlit_secrets_enabled():
         try:
             secret_value = st.secrets.get("admin_password")
             if secret_value:
@@ -214,10 +424,14 @@ def insecure_admin_mode_enabled() -> bool:
     return os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1"
 
 
+def password_is_allowed(password: str) -> bool:
+    return insecure_admin_mode_enabled() or len(password) >= MIN_ADMIN_PASSWORD_LENGTH
+
+
 def admin_password() -> str:
     configured_password = configured_admin_password()
     if configured_password:
-        if insecure_admin_mode_enabled() or len(configured_password) >= MIN_ADMIN_PASSWORD_LENGTH:
+        if password_is_allowed(configured_password):
             return configured_password
         return ""
     if insecure_admin_mode_enabled():
@@ -227,7 +441,7 @@ def admin_password() -> str:
 
 def admin_password_warning() -> str:
     configured_password = configured_admin_password()
-    if configured_password and len(configured_password) < MIN_ADMIN_PASSWORD_LENGTH:
+    if configured_password and not password_is_allowed(configured_password):
         return (
             f"Админ-пароль должен быть не короче {MIN_ADMIN_PASSWORD_LENGTH} символов. "
             "Для локальной отладки можно явно включить PYDIAG_ALLOW_INSECURE_ADMIN=1."
@@ -237,31 +451,94 @@ def admin_password_warning() -> str:
     )
 
 
+def auth_config_warning() -> str:
+    if configured_admin_password():
+        return admin_password_warning()
+    if auth_users_from_env_json() or (
+        streamlit_secrets_enabled() and auth_users_from_streamlit_secrets()
+    ):
+        return (
+            f"Пароли пользователей должны быть не короче {MIN_ADMIN_PASSWORD_LENGTH} символов. "
+            "Для локальной отладки можно явно включить PYDIAG_ALLOW_INSECURE_ADMIN=1."
+        )
+    return (
+        "Пользователи не настроены. Добавьте их в .streamlit/secrets.toml "
+        "в формате [users.<login>] password = '...'."
+    )
+
+
+def authenticate_user(username: str, password: str) -> AuthUser | None:
+    user = configured_auth_users().get(username.strip())
+    if user is None:
+        return None
+    if hmac.compare_digest(password, user.password):
+        return user
+    return None
+
+
+def current_auth_user() -> dict[str, str | bool] | None:
+    user = st.session_state.get("authenticated_user")
+    return user if isinstance(user, dict) else None
+
+
+def current_user_is_admin() -> bool:
+    user = current_auth_user()
+    if user is not None:
+        return bool(user.get("is_admin", False))
+    return bool(st.session_state.get("admin_authenticated", False))
+
+
+def login_user(user: AuthUser) -> None:
+    st.session_state.authenticated_user = {
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_admin": user.is_admin,
+    }
+    st.session_state.admin_authenticated = user.is_admin
+
+
+def logout_user() -> None:
+    st.session_state.pop("authenticated_user", None)
+    st.session_state.admin_authenticated = False
+
+
 def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str], str]:
     with st.sidebar:
         st.markdown("### Доступ")
-        if st.session_state.get("admin_authenticated", False):
-            st.success("Режим управления активен")
+        authenticated_user = current_auth_user()
+        if authenticated_user is not None:
+            display_name = str(authenticated_user.get("display_name") or "Пользователь")
+            username = str(authenticated_user.get("username") or "")
+            st.success(f"Пользователь: {display_name}")
+            if username and username != display_name:
+                st.caption(f"Логин: {username}")
+            if current_user_is_admin():
+                st.caption("Режим управления активен")
             if st.button("Выйти", width="stretch"):
-                st.session_state.admin_authenticated = False
+                logout_user()
                 st.rerun()
         else:
-            configured_password = admin_password()
-            password = st.text_input(
-                "Пароль администратора",
-                type="password",
-                disabled=not configured_password,
+            users = configured_auth_users()
+            username = st.text_input(
+                "Пользователь",
+                disabled=not users,
             )
-            if not configured_password:
-                st.warning(admin_password_warning())
+            password = st.text_input(
+                "Пароль",
+                type="password",
+                disabled=not users,
+            )
+            if not users:
+                st.warning(auth_config_warning())
             if insecure_admin_mode_enabled():
                 st.caption("Включен локальный небезопасный пароль: admin")
-            if st.button("Войти", width="stretch", disabled=not configured_password):
-                if password == configured_password:
-                    st.session_state.admin_authenticated = True
+            if st.button("Войти", width="stretch", disabled=not users):
+                user = authenticate_user(username, password)
+                if user is not None:
+                    login_user(user)
                     st.rerun()
                 else:
-                    st.error("Неверный пароль")
+                    st.error("Неверный пользователь или пароль")
 
         st.divider()
         st.markdown("### Фильтры")
@@ -274,7 +551,7 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str],
         kind_filter = st.multiselect(
             "Тип узла",
             options=list(KIND_LABELS.keys()),
-            format_func=lambda key: KIND_LABELS[key],
+            format_func=lambda key: KIND_FILTER_LABELS[key],
         )
         layout_mode = st.selectbox(
             "Расположение",
@@ -286,12 +563,103 @@ def render_sidebar(graph: FlowGraphDocument) -> tuple[str, list[str], list[str],
         )
 
         st.divider()
+        render_legend(graph)
+
+        st.divider()
         if st.button("Перечитать JSON", width="stretch"):
             load_app_data(force=True)
             flash("JSON-файлы перечитаны")
             st.rerun()
 
     return search, responsible_filter, kind_filter, layout_mode
+
+
+def render_legend(graph: FlowGraphDocument) -> None:
+    st.markdown("### Легенда")
+    st.markdown(legend_html(graph), unsafe_allow_html=True)
+
+
+def legend_html(graph: FlowGraphDocument) -> str:
+    type_rows = [
+        ("process", "Процесс"),
+        ("decision", "Решение"),
+        ("database", "База данных"),
+        ("input", "Входные данные"),
+        ("event", "Событие"),
+    ]
+    type_items = "\n".join(
+        (f'<div class="legend-item">{legend_type_icon(kind)}<span>{safe_text(label)}</span></div>')
+        for kind, label in type_rows
+    )
+    department_items = "\n".join(
+        (
+            '<div class="legend-dept">'
+            f'<span class="legend-swatch" style="background-color: {style.fill}; '
+            f'border-color: {style.border};"></span>'
+            f'<span class="legend-dept-label">{safe_text(style.label)}</span>'
+            f'<span class="legend-dept-code">{safe_text(key)}</span>'
+            "</div>"
+        )
+        for key, style in graph.responsibles.items()
+    )
+    return f"""
+    <div class="legend-shell">
+      <div>
+        <div class="legend-title">Типы блоков</div>
+        <div class="legend-list">{type_items}</div>
+      </div>
+      <div>
+        <div class="legend-title">Цвета ответственных</div>
+        <div class="legend-dept-list">{department_items}</div>
+      </div>
+    </div>
+    """
+
+
+def legend_type_icon(kind: str) -> str:
+    stroke = "#111827"
+    fill = "#ffffff"
+    icon_by_kind = {
+        "process": (
+            '<rect x="5" y="6" width="34" height="18" rx="3" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.7" '
+            'vector-effect="non-scaling-stroke"/>'
+        ),
+        "decision": (
+            '<polygon points="22,3 40,15 22,27 4,15" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.7" '
+            'stroke-linejoin="round" vector-effect="non-scaling-stroke"/>'
+        ),
+        "database": (
+            f'<path d="M8 8 V22 C8 27 36 27 36 22 V8" fill="{fill}" '
+            f'stroke="{stroke}" stroke-width="1.7" '
+            'vector-effect="non-scaling-stroke"/>'
+            f'<ellipse cx="22" cy="8" rx="14" ry="4.8" fill="{fill}" '
+            f'stroke="{stroke}" stroke-width="1.7" '
+            'vector-effect="non-scaling-stroke"/>'
+            f'<path d="M8 22 C8 27 36 27 36 22" fill="none" stroke="{stroke}" '
+            'stroke-width="1.2" vector-effect="non-scaling-stroke"/>'
+        ),
+        "input": (
+            '<polygon points="9,6 40,6 35,24 4,24" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.7" '
+            'stroke-linejoin="round" vector-effect="non-scaling-stroke"/>'
+        ),
+        "event": (
+            '<rect x="6" y="5" width="32" height="20" rx="10" '
+            f'fill="{fill}" '
+            f'stroke="{stroke}" stroke-width="1.7" '
+            'vector-effect="non-scaling-stroke"/>'
+        ),
+    }
+    return (
+        '<span class="legend-symbol">'
+        '<svg class="legend-symbol-svg" viewBox="0 0 44 30" '
+        'xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+        f"{icon_by_kind[kind]}"
+        "</svg>"
+        "</span>"
+    )
 
 
 def render_header(graph: FlowGraphDocument, wells: WellsDocument) -> None:
@@ -462,7 +830,7 @@ def render_inspector(
         st.info("Выберите узел, связь или фишку скважины на схеме.")
         render_overview_tables(graph, wells)
 
-    if st.session_state.get("admin_authenticated", False):
+    if current_user_is_admin():
         st.divider()
         render_admin_panel(graph, wells, selected_id)
 
@@ -477,31 +845,25 @@ def render_node_details(
     wells_here = [
         well for well in wells.wells if well.current_node_id == node.id and not well.is_archived
     ]
-    responsible = getattr(node, "responsible", None)
-    responsible_label = graph.responsibles[responsible].label if responsible else "нет"
-    approvers = [
-        approver.label or graph.responsibles[approver.responsible].label
-        for approver in node.approvers
-    ]
+    responsible_label = node_responsible_labels(graph, node)
+    time_label = duration_label(node.time) if node.time is not None else "не задано"
 
-    st.markdown(f"#### {node.title}")
+    st.markdown(f"#### {node.text}")
     st.markdown(
-        f'<p class="muted-line">{KIND_LABELS[node.kind]} · {node.id}</p>',
+        f'<p class="muted-line">{safe_text(KIND_LABELS[node.kind])} · {safe_text(node.id)}</p>',
         unsafe_allow_html=True,
     )
     st.markdown(
         f"""
         <div class="mini-kv">
-          <span>Ответственный</span><span>{responsible_label}</span>
-          <span>Время</span><span>{node.duration_hours if node.duration_hours is not None else "не задано"} ч</span>
-          <span>Согласующие</span><span>{", ".join(approvers) if approvers else "нет"}</span>
+          <span>Тип</span><span>{safe_text(node.kind)}</span>
+          <span>Ответственные</span><span>{responsible_label}</span>
+          <span>Время</span><span>{safe_text(time_label)}</span>
           <span>Скважины</span><span>{len(wells_here)}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    if node.note:
-        st.caption(node.note)
 
     if wells_here:
         st.markdown("##### Скважины на этапе")
@@ -530,7 +892,7 @@ def render_node_details(
                     {
                         "тип": edge.kind,
                         "метка": edge.label or "",
-                        "куда": node_by_id(graph)[edge.target].title,
+                        "куда": node_by_id(graph)[edge.target].text,
                     }
                     for edge in transitions
                 ]
@@ -540,17 +902,27 @@ def render_node_details(
         )
 
 
+def node_responsible_labels(graph: FlowGraphDocument, node: FlowNode) -> str:
+    if not node.responsible:
+        return "нет"
+    labels = [
+        graph.responsibles[responsible].label if responsible in graph.responsibles else responsible
+        for responsible in node.responsible
+    ]
+    return safe_text(", ".join(labels))
+
+
 def render_well_details(graph: FlowGraphDocument, well: Well) -> None:
     nodes = node_by_id(graph)
     current_node = nodes[well.current_node_id]
     st.markdown(f"#### {well.name}")
-    st.markdown(f'<p class="muted-line">{well.id}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="muted-line">{safe_text(well.id)}</p>', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="mini-kv">
-          <span>Текущий этап</span><span>{current_node.title}</span>
-          <span>Поле</span><span>{well.metadata.get("field", "не задано")}</span>
-          <span>Буровая</span><span>{well.metadata.get("rig", "не задано")}</span>
+          <span>Текущий этап</span><span>{safe_text(current_node.text)}</span>
+          <span>Поле</span><span>{safe_text(well.metadata.get("field", "не задано"))}</span>
+          <span>Буровая</span><span>{safe_text(well.metadata.get("rig", "не задано"))}</span>
           <span>История</span><span>{len(well.history)} записей</span>
         </div>
         """,
@@ -564,9 +936,7 @@ def render_well_details(graph: FlowGraphDocument, well: Well) -> None:
                     {
                         "ts": item.ts.strftime("%Y-%m-%d %H:%M"),
                         "action": item.action,
-                        "node": nodes[item.node_id].title
-                        if item.node_id in nodes
-                        else item.node_id,
+                        "node": nodes[item.node_id].text if item.node_id in nodes else item.node_id,
                         "by": item.by or "",
                         "comment": item.comment or "",
                     }
@@ -581,13 +951,13 @@ def render_well_details(graph: FlowGraphDocument, well: Well) -> None:
 def render_edge_details(graph: FlowGraphDocument, edge: FlowEdge) -> None:
     nodes = node_by_id(graph)
     st.markdown(f"#### {edge.label or edge.kind}")
-    st.markdown(f'<p class="muted-line">{edge.id}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="muted-line">{safe_text(edge.id)}</p>', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="mini-kv">
-          <span>Тип</span><span>{edge.kind}</span>
-          <span>Откуда</span><span>{nodes[edge.source].title}</span>
-          <span>Куда</span><span>{nodes[edge.target].title}</span>
+          <span>Тип</span><span>{safe_text(edge.kind)}</span>
+          <span>Откуда</span><span>{safe_text(nodes[edge.source].text)}</span>
+          <span>Куда</span><span>{safe_text(nodes[edge.target].text)}</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -600,10 +970,14 @@ def render_overview_tables(graph: FlowGraphDocument, wells: WellsDocument) -> No
     for node in graph.nodes:
         count = len(grouped.get(node.id, []))
         if count:
-            top_rows.append({"этап": node.title, "скважин": count})
+            top_rows.append({"этап": node.text, "скважин": count})
     if top_rows:
         st.markdown("##### Распределение")
         st.dataframe(pd.DataFrame(top_rows), width="stretch", hide_index=True)
+
+
+def safe_text(value: object) -> str:
+    return html_escape(str(value))
 
 
 def render_admin_panel(
@@ -636,7 +1010,7 @@ def render_admin_panel(
             )
             current_well = well_by_id(wells)[well_id]
             current_node = node_by_id(graph)[current_well.current_node_id]
-            st.caption(f"Сейчас: {current_node.title}")
+            st.caption(f"Сейчас: {current_node.text}")
 
             transitions = outgoing_edges(graph, current_well.current_node_id)
             transition_ids = [edge.id for edge in transitions]
@@ -715,7 +1089,7 @@ def render_admin_panel(
                 index=[node.id for node in graph.nodes].index(default_node_id)
                 if default_node_id in [node.id for node in graph.nodes]
                 else 0,
-                format_func=lambda node_id: node_by_id(graph)[node_id].title,
+                format_func=lambda node_id: node_by_id(graph)[node_id].text,
             )
             field = st.text_input("Месторождение / куст")
             rig = st.text_input("Буровая")
@@ -819,7 +1193,7 @@ def main() -> None:
     )
     with st.expander(
         "Инспектор и управление",
-        expanded=bool(selected_id) or st.session_state.get("admin_authenticated", False),
+        expanded=bool(selected_id) or current_user_is_admin(),
     ):
         render_inspector(graph, wells, selected_id)
 

@@ -22,10 +22,22 @@ def run_app_with_temp_data(
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
     monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
     monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
+    monkeypatch.delenv("PYDIAG_ADMIN_PASSWORD", raising=False)
     if configure_admin:
-        monkeypatch.setenv("PYDIAG_ADMIN_PASSWORD", "test-admin")
+        monkeypatch.setenv(
+            "PYDIAG_AUTH_USERS_JSON",
+            json.dumps(
+                {
+                    "planner": {
+                        "password": "test-admin",
+                        "name": "Иван Планировщик",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        )
     else:
-        monkeypatch.delenv("PYDIAG_ADMIN_PASSWORD", raising=False)
+        monkeypatch.delenv("PYDIAG_AUTH_USERS_JSON", raising=False)
 
     app = AppTest.from_file(str(APP_PATH))
     app.run(timeout=30)
@@ -34,10 +46,20 @@ def run_app_with_temp_data(
 
 
 def login_as_admin(app: AppTest) -> AppTest:
-    app.text_input[0].set_value("test-admin").run(timeout=30)
+    set_text_input(app, "Пользователь", "planner")
+    set_text_input(app, "Пароль", "test-admin")
     app.button[0].click().run(timeout=30)
     assert not app.exception
     return app
+
+
+def set_text_input(app: AppTest, label: str, value: str) -> AppTest:
+    for item in app.text_input:
+        if item.label == label:
+            item.set_value(value).run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Text input not found: {label}")
 
 
 def click_button(app: AppTest, label: str) -> AppTest:
@@ -53,14 +75,17 @@ def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> Non
     app = run_app_with_temp_data(data_paths, monkeypatch)
 
     assert any("Карта планирования и бурения" in item.value for item in app.markdown)
-    assert any("Узлы" in item.value and "18" in item.value for item in app.markdown)
+    assert any("Узлы" in item.value and "19" in item.value for item in app.markdown)
+    assert any("Легенда" in item.value for item in app.markdown)
+    assert any("Типы блоков" in item.value for item in app.markdown)
+    assert any("Цвета ответственных" in item.value for item in app.markdown)
     assert app.info[0].value == "Выберите узел, связь или фишку скважины на схеме."
 
 
-def test_streamlit_app_requires_explicit_admin_password(data_paths, monkeypatch) -> None:
+def test_streamlit_app_requires_explicit_users(data_paths, monkeypatch) -> None:
     app = run_app_with_temp_data(data_paths, monkeypatch, configure_admin=False)
 
-    assert any("Админ-пароль не настроен" in item.value for item in app.warning)
+    assert any("Пользователи не настроены" in item.value for item in app.warning)
     labels = {button.label for button in app.button}
     assert {"Войти", "Перечитать JSON"} <= labels
     assert "Продвинуть" not in labels
@@ -74,7 +99,8 @@ def test_streamlit_admin_login_reveals_management_panel(
 
     login_as_admin(app)
 
-    assert any(item.value == "Режим управления активен" for item in app.success)
+    assert any("Пользователь: Иван Планировщик" in item.value for item in app.success)
+    assert any(item.value == "Режим управления активен" for item in app.caption)
     assert {button.label for button in app.button} >= {
         "Продвинуть",
         "Откатить",
@@ -109,10 +135,10 @@ def test_streamlit_admin_can_create_well_in_temp_json(
     app = run_app_with_temp_data(data_paths, monkeypatch)
     login_as_admin(app)
 
-    app.text_input[0].set_value("well_ui")
-    app.text_input[1].set_value("Скв. UI")
-    app.text_input[2].set_value("Тестовый куст")
-    app.text_input[3].set_value("БУ-ТЕСТ")
+    set_text_input(app, "ID", "well_ui")
+    set_text_input(app, "Название", "Скв. UI")
+    set_text_input(app, "Месторождение / куст", "Тестовый куст")
+    set_text_input(app, "Буровая", "БУ-ТЕСТ")
     click_button(app, "Создать")
 
     saved = load_wells_doc(wells_path)

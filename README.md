@@ -9,7 +9,6 @@ PowerShell:
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:PYDIAG_ADMIN_PASSWORD = "replace-me"
 .\.venv\Scripts\streamlit.exe run app.py
 ```
 
@@ -18,7 +17,6 @@ CMD:
 ```bat
 py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-set PYDIAG_ADMIN_PASSWORD=replace-me
 .venv\Scripts\streamlit.exe run app.py
 ```
 
@@ -27,7 +25,6 @@ set PYDIAG_ADMIN_PASSWORD=replace-me
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-export PYDIAG_ADMIN_PASSWORD="replace-me"
 .venv/bin/streamlit run app.py
 ```
 
@@ -40,8 +37,35 @@ export PYDIAG_ADMIN_PASSWORD="replace-me"
 - `data/flow_graph.json` содержит узлы, связи, координаты и ответственных.
 - `data/wells.json` содержит скважины, их `current_node_id` и историю переходов.
 
-Админ-панель включается паролем из `PYDIAG_ADMIN_PASSWORD` или `st.secrets["admin_password"]`.
-В production пароль должен быть задан явно.
+Узлы схемы используют компактный контракт: `type`, `text`, `position`, `size`,
+опционально `responsible`, `time`, `metadata`. Поддерживаемые типы:
+`process`, `decision_diamond`, `decision_card`, `database`, `input_data`, `event`.
+Для процессов и решений `responsible` обязателен и задается списком: первый
+элемент задает основной цвет блока, остальные отображаются короткими боковыми
+бейджами. `time` задается строкой в формате `40 minutes`, `10 hours` или
+`2 days`.
+
+Связи используют четыре типа `kind`: `usual` — обычная черная стрелка,
+`dashed` — серая пунктирная, `yes` — стрелка «Да», `no` — стрелка «Нет».
+
+Авторизация настраивается в `.streamlit/secrets.toml`:
+
+```toml
+[users.admin]
+name = "Администратор"
+password = "replace-me-strong"
+```
+
+Можно добавить несколько пользователей:
+
+```toml
+[users.planner]
+name = "Иван Планировщик"
+password = "another-strong-password"
+```
+
+После входа имя пользователя показывается сверху в боковой панели. В production
+пароли должны быть заданы явно и быть не короче 8 символов.
 Для локальной разработки можно временно включить небезопасный fallback:
 
 PowerShell:

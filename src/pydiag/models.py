@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MetaValue = str | int | float | bool | None
 
@@ -13,13 +14,27 @@ NodeKind = Literal[
     "decision_card",
     "database",
     "input_data",
+    "event",
 ]
 
-EdgeKind = Literal["default", "yes", "no", "dashed"]
+EdgeKind = Literal["usual", "yes", "no", "dashed"]
+TimeUnit = Literal["minute", "hour", "day"]
+TIME_VALUE_RE = re.compile(r"^(?P<amount>\d+)\s+(?P<unit>minutes?|hours?|days?)$")
+TIME_UNIT_ALIASES: dict[str, TimeUnit] = {
+    "minute": "minute",
+    "minutes": "minute",
+    "hour": "hour",
+    "hours": "hour",
+    "day": "day",
+    "days": "day",
+}
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 RESERVED_UI_ID_PREFIXES = (
     "well::",
     "well-extra::",
     "duration::",
+    "responsible::",
+    "edge-label::",
     "route-anchor::",
     "route::",
 )
@@ -49,48 +64,81 @@ class ResponsibleStyle(StrictModel):
     border: str
     text: str = "#172033"
 
-
-class ApproverBadge(StrictModel):
-    responsible: str
-    label: str | None = None
+    @field_validator("fill", "border", "text")
+    @classmethod
+    def validate_color(cls, value: str) -> str:
+        if not HEX_COLOR_RE.fullmatch(value):
+            raise ValueError("color values must use 6-digit hex format, for example '#dcecff'")
+        return value
 
 
 class NodeBase(StrictModel):
     id: str = Field(min_length=1)
-    kind: NodeKind
-    title: str = Field(min_length=1)
+    type: NodeKind
+    text: str = Field(min_length=1)
     position: Position
     size: Size
-    note: str | None = None
-    approvers: list[ApproverBadge] = Field(default_factory=list)
-    duration_hours: int | None = Field(default=None, ge=0)
+    responsible: list[str] = Field(default_factory=list)
+    time: str | None = None
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+    @field_validator("time")
+    @classmethod
+    def validate_time(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.strip().lower().split())
+        if not TIME_VALUE_RE.fullmatch(normalized):
+            raise ValueError(
+                "time must use '<number> minutes|hours|days', "
+                "for example '40 minutes', '10 hours' or '2 days'"
+            )
+        return normalized
+
+    @property
+    def kind(self) -> NodeKind:
+        """Compatibility name used by the rendering layer."""
+        return self.type
+
+    @property
+    def primary_responsible(self) -> str | None:
+        return self.responsible[0] if self.responsible else None
+
+    @property
+    def secondary_responsibles(self) -> list[str]:
+        return self.responsible[1:]
 
 
 class ProcessNode(NodeBase):
-    kind: Literal["process"]
-    responsible: str
+    type: Literal["process"]
+    responsible: list[str] = Field(min_length=1)
 
 
 class DecisionDiamondNode(NodeBase):
-    kind: Literal["decision_diamond"]
+    type: Literal["decision_diamond"]
+    responsible: list[str] = Field(min_length=1)
 
 
 class DecisionCardNode(NodeBase):
-    kind: Literal["decision_card"]
+    type: Literal["decision_card"]
+    responsible: list[str] = Field(min_length=1)
 
 
 class DatabaseNode(NodeBase):
-    kind: Literal["database"]
+    type: Literal["database"]
 
 
 class InputDataNode(NodeBase):
-    kind: Literal["input_data"]
+    type: Literal["input_data"]
+
+
+class EventNode(NodeBase):
+    type: Literal["event"]
 
 
 FlowNode = Annotated[
-    ProcessNode | DecisionDiamondNode | DecisionCardNode | DatabaseNode | InputDataNode,
-    Field(discriminator="kind"),
+    ProcessNode | DecisionDiamondNode | DecisionCardNode | DatabaseNode | InputDataNode | EventNode,
+    Field(discriminator="type"),
 ]
 
 
@@ -103,8 +151,8 @@ class EdgeBase(StrictModel):
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
 
 
-class DefaultEdge(EdgeBase):
-    kind: Literal["default"]
+class UsualEdge(EdgeBase):
+    kind: Literal["usual"]
 
 
 class YesEdge(EdgeBase):
@@ -122,7 +170,7 @@ class DashedEdge(EdgeBase):
 
 
 FlowEdge = Annotated[
-    DefaultEdge | YesEdge | NoEdge | DashedEdge,
+    UsualEdge | YesEdge | NoEdge | DashedEdge,
     Field(discriminator="kind"),
 ]
 
@@ -155,11 +203,16 @@ class FlowGraphDocument(StrictModel):
         responsible_set = set(self.responsibles)
 
         for node in self.nodes:
-            if node.kind == "process" and node.responsible not in responsible_set:
-                raise ValueError(f"Node {node.id}: unknown responsible {node.responsible}")
-            for approver in node.approvers:
-                if approver.responsible not in responsible_set:
-                    raise ValueError(f"Node {node.id}: unknown approver {approver.responsible}")
+            if len(node.responsible) != len(set(node.responsible)):
+                raise ValueError(f"Node {node.id}: duplicate responsible values are not allowed")
+            if (
+                node.kind in {"process", "decision_diamond", "decision_card"}
+                and not node.responsible
+            ):
+                raise ValueError(f"Node {node.id}: {node.kind} node must define responsible")
+            for responsible in node.responsible:
+                if responsible not in responsible_set:
+                    raise ValueError(f"Node {node.id}: unknown responsible {responsible}")
 
         for edge in self.edges:
             if edge.source not in node_set:
@@ -173,6 +226,17 @@ def validate_not_reserved_ui_id(entity: str, value: str) -> None:
     for prefix in RESERVED_UI_ID_PREFIXES:
         if value.startswith(prefix):
             raise ValueError(f"{entity} id {value}: prefix {prefix} is reserved for UI internals")
+
+
+def parse_node_time(value: str) -> tuple[int, TimeUnit]:
+    normalized = " ".join(value.strip().lower().split())
+    match = TIME_VALUE_RE.fullmatch(normalized)
+    if not match:
+        raise ValueError(
+            "time must use '<number> minutes|hours|days', "
+            "for example '40 minutes', '10 hours' or '2 days'"
+        )
+    return int(match.group("amount")), TIME_UNIT_ALIASES[match.group("unit")]
 
 
 class WellHistoryEntry(StrictModel):

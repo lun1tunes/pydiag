@@ -26,7 +26,7 @@ def test_env_paths_are_resolved_at_runtime(data_paths, monkeypatch) -> None:
 
     assert graph_path() == graph_file
     assert wells_path() == wells_file
-    assert len(graph.nodes) == 18
+    assert len(graph.nodes) == 19
     assert len(wells.wells) == 4
 
 
