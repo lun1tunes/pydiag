@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from textwrap import dedent
 
 from pydantic import ValidationError
 
@@ -21,6 +22,7 @@ from .flow_source_graph import (
     is_flow_source_payload,
     load_structured_payload,
 )
+from .storage_io import save_text_atomic
 from .storage_materialization import materialize_flow_graph_from_source
 from .storage_paths import (
     GRAPH_PATH,
@@ -35,6 +37,28 @@ __all__ = [
     "load_graph_doc",
     "load_wells_doc",
 ]
+
+EMPTY_WELLS_YAML_TEMPLATE = dedent(
+    """
+    schema_version: "1.0"
+    version: 1
+    wells: []
+    # Replace the empty list above with entries like:
+    # wells:
+    #   - id: well_1
+    #     name: Скв. 1
+    #     current_node_id: intake_data
+    #     history:
+    #       - ts: "2026-05-08T08:00:00Z"
+    #         node_id: intake_data
+    #         action: create
+    #         to_node_id: intake_data
+    #         by: system
+    #         comment: initial placement
+    #     metadata: {}
+    #     is_archived: false
+    """
+).strip() + "\n"
 
 
 def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
@@ -60,7 +84,9 @@ def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
 
 
 def load_wells_doc(path: str | Path | None = None) -> WellsDocument:
-    raw = Path(path or wells_path()).read_bytes()
+    target = Path(path or wells_path())
+    ensure_wells_doc_exists(target)
+    raw = target.read_bytes()
     try:
         return WellsDocument.model_validate_json(raw, strict=True)
     except ValidationError:
@@ -79,6 +105,12 @@ def load_documents(
     wells = load_wells_doc(wells_doc_path)
     validate_wells_against_graph(graph, wells)
     return graph, wells
+
+
+def ensure_wells_doc_exists(path: Path) -> None:
+    if path.exists():
+        return
+    save_text_atomic(path, EMPTY_WELLS_YAML_TEMPLATE)
 
 
 def resolve_graph_read_path(path: str | Path | None) -> Path:

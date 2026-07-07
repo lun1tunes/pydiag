@@ -313,6 +313,36 @@ def test_env_paths_are_resolved_at_runtime(data_paths, monkeypatch) -> None:
     assert len(wells.wells) == 1
 
 
+def test_load_documents_bootstraps_empty_wells_yaml_from_raw_export(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    raw_file = tmp_path / "real_true_data.json"
+    graph_file = tmp_path / "flow_graph.json"
+    wells_file = tmp_path / "wells.yaml"
+    raw_file.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", tmp_path / "flow_source.yaml")
+    monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_file))
+    monkeypatch.setenv("PYDIAG_RAW_GRAPH_PATH", str(raw_file))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_file))
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+
+    graph, wells = load_documents()
+    template = wells_file.read_text(encoding="utf-8")
+
+    assert graph.version == 3
+    assert [node.id for node in graph.nodes] == ["start", "end"]
+    assert wells.version == 1
+    assert wells.wells == []
+    assert wells_file.exists() is True
+    assert 'schema_version: "1.0"' in template
+    assert "wells: []" in template
+    assert "#   - id: well_1" in template
+    assert "#     current_node_id: intake_data" in template
+
+
 def test_graph_version_path_helpers_track_latest_and_next_version(
     monkeypatch,
     tmp_path,

@@ -282,6 +282,8 @@ python scripts/project_pack.py pack
 ```
 
 По умолчанию архив сохраняется в корень проекта в `all.txt`.
+Файл намеренно не находится в `.gitignore`, чтобы его можно было переносить
+или коммитить как self-contained runtime archive.
 
 Распаковка:
 

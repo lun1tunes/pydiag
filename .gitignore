@@ -200,5 +200,4 @@ data/
 real_true_data.json
 
 # project_pack artifacts
-all.txt
 dist/

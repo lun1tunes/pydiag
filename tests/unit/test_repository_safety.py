@@ -48,3 +48,15 @@ def test_forbidden_archive_paths_rejects_all_runtime_data_roots() -> None:
         "data/flow_sources/flow_source.v0001.yaml",
         "data/real_true_data.json",
     ]
+
+
+def test_forbidden_tracked_paths_allows_test_fixtures() -> None:
+    forbidden = verify_repository_safety.forbidden_tracked_paths(
+        [
+            "tests/fixtures/wells.yaml",
+            "tests/fixtures/real_true_data.json",
+            "tests/fixtures/service_account.json",
+        ]
+    )
+
+    assert forbidden == []

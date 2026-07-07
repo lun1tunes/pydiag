@@ -9,6 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_PACK_PATH = ROOT / "scripts" / "project_pack.py"
+ALLOWED_CONFIDENTIAL_TRACKED_PREFIXES = (
+    "tests/fixtures/",
+)
 
 REQUIRED_ARCHIVE_PATHS = {
     ".streamlit/config.toml",
@@ -36,6 +39,8 @@ def archive_header_paths(archive_text: str) -> set[str]:
 def forbidden_tracked_paths(paths: Iterable[str]) -> list[str]:
     forbidden: list[str] = []
     for rel_path in sorted(set(paths)):
+        if rel_path.startswith(ALLOWED_CONFIDENTIAL_TRACKED_PREFIXES):
+            continue
         if project_pack.is_confidential_rel_path(rel_path):
             forbidden.append(rel_path)
     return forbidden
