@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pydiag.models import well_by_id
-from pydiag.services import (
+from pydiag.domain import (
     create_well,
     delete_well,
     move_well_to_node,
     rollback_well,
     transition_label,
+    well_by_id,
 )
 
 

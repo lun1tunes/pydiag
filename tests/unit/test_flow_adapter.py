@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from math import hypot
 
-from pydiag.flow_adapter import (
-    EDGE_LABEL_GAP,
-    EDGE_LABEL_HEIGHT,
-    SNAKE_CELL_HEIGHT,
-    SNAKE_COLUMNS,
+from pydiag.rendering import (
     build_streamlit_edges,
     build_streamlit_nodes,
     flow_canvas_height,
+)
+from pydiag.rendering.flow_edge_labels import (
+    EDGE_LABEL_GAP,
+    EDGE_LABEL_HEIGHT,
+)
+from pydiag.rendering.flow_edge_routing import ROUTE_ANCHOR_SIZE
+from pydiag.rendering.flow_layout_positions import (
+    SNAKE_CELL_HEIGHT,
+    SNAKE_COLUMNS,
 )
 
 
@@ -24,6 +29,18 @@ def test_adapter_builds_domain_nodes_and_well_tokens(documents) -> None:
     assert "well::well_1001" in node_ids
     assert "e_review_decision" in {edge.id for edge in edges}
     assert active_ids == {node.id for node in graph.nodes}
+
+
+def test_domain_nodes_can_be_made_draggable_for_position_edit_mode(documents) -> None:
+    graph, wells = documents
+
+    nodes, _ = build_streamlit_nodes(graph, wells, domain_nodes_draggable=True)
+    node_by_id = {node.id: node for node in nodes}
+
+    assert node_by_id["proc_initial_review"].draggable is True
+    assert node_by_id["duration::proc_initial_review"].draggable is False
+    assert node_by_id["responsible::proc_initial_review::geology"].draggable is False
+    assert node_by_id["well::well_1001"].draggable is False
 
 
 def test_edges_use_four_domain_kinds_with_usual_black_arrow(documents) -> None:
@@ -266,9 +283,11 @@ def test_database_node_grows_to_fit_canvas_text(documents) -> None:
 
     nodes, _ = build_streamlit_nodes(graph, wells)
     database_node = next(node for node in nodes if node.id == "db_contracts")
+    source_node = next(node for node in graph.nodes if node.id == "db_contracts")
+    rendered_height = int(database_node.style["height"].removesuffix("px"))
 
-    assert database_node.style["height"] != "96px"
-    assert int(str(database_node.style["height"]).removesuffix("px")) >= 158
+    assert rendered_height >= 158
+    assert rendered_height > source_node.size.h
     assert database_node.style["padding"] == "38px 40px"
     assert "Договоры и заявки" in database_node.data["content"]
 
@@ -309,6 +328,42 @@ def test_duration_badge_width_grows_for_long_values(documents) -> None:
     )
 
 
+def test_figma_text_nodes_keep_imported_size_and_typography(documents) -> None:
+    graph, wells = documents
+    payload = graph.model_dump(mode="json")
+    payload["nodes"][0]["type"] = "figma_text"
+    payload["nodes"][0]["responsible"] = []
+    payload["nodes"][0]["metadata"] = {
+        "figma_fixed_size": True,
+        "figma_font_size": 21,
+        "figma_font_family": "IBM Plex Sans",
+        "figma_font_style": "Bold Italic",
+        "figma_text_align_horizontal": "LEFT",
+        "figma_text_align_vertical": "TOP",
+        "figma_letter_spacing_value": 1.5,
+        "figma_line_height_value": 28,
+        "figma_opacity": 0.85,
+    }
+    figma_graph = type(graph).model_validate(payload, strict=True)
+
+    nodes, _ = build_streamlit_nodes(figma_graph, wells, layout_mode="manual")
+    text_node = next(node for node in nodes if node.id == figma_graph.nodes[0].id)
+
+    assert text_node.style["width"] == f"{figma_graph.nodes[0].size.w}px"
+    assert text_node.style["height"] == f"{figma_graph.nodes[0].size.h}px"
+    assert text_node.style["backgroundColor"] == "transparent"
+    assert text_node.style["border"] == "0"
+    assert text_node.style["padding"] == "0"
+    assert text_node.style["fontSize"] == "21.0px"
+    assert "IBM Plex Sans" in str(text_node.style["fontFamily"])
+    assert text_node.style["fontStyle"] == "italic"
+    assert text_node.style["fontWeight"] == 700
+    assert text_node.style["textAlign"] == "left"
+    assert text_node.style["lineHeight"] == "28.0px"
+    assert text_node.style["letterSpacing"] == "1.5px"
+    assert text_node.style["opacity"] == 0.85
+
+
 def test_cycle_routing_splits_backward_edges_into_helper_lanes(documents) -> None:
     graph, wells = documents
 
@@ -320,17 +375,23 @@ def test_cycle_routing_splits_backward_edges_into_helper_lanes(documents) -> Non
     assert "route-anchor::e_rework_back::0" in node_by_id
     assert "route-anchor::e_rework_back::1" in node_by_id
     assert node_by_id["route-anchor::e_rework_back::0"].selectable is False
-    assert node_by_id["route-anchor::e_rework_back::0"].style["width"] == "0px"
-    assert node_by_id["route-anchor::e_rework_back::0"].style["height"] == "0px"
-    assert node_by_id["route-anchor::e_rework_back::0"].style["opacity"] == 0.0
-    assert node_by_id["route-anchor::e_rework_back::0"].style["visibility"] == "hidden"
+    assert node_by_id["route-anchor::e_rework_back::0"].style["width"] == "8px"
+    assert node_by_id["route-anchor::e_rework_back::0"].style["height"] == "8px"
+    assert node_by_id["route-anchor::e_rework_back::0"].style["opacity"] == 1.0
+    assert node_by_id["route-anchor::e_rework_back::0"].style.get("visibility") != "hidden"
     assert node_by_id["route-anchor::e_rework_back::0"].style["fontSize"] == "0"
     assert (
         "react-flow__node-route-anchor-node"
         in node_by_id["route-anchor::e_rework_back::0"].data["content"]
     )
     assert "left: 50%" in node_by_id["route-anchor::e_rework_back::0"].data["content"]
-    assert "width: 1px" in node_by_id["route-anchor::e_rework_back::0"].data["content"]
+    route_css = css_rule_block(
+        node_by_id["route-anchor::e_rework_back::0"].data["content"],
+        ".route-anchor-node .react-flow__handle",
+    )
+    assert "width: 6px" in route_css
+    assert "visibility: visible" in route_css
+    assert "visibility: hidden" not in route_css
     assert "route::e_rework_back::0" in edge_by_id
     assert "e_rework_back" in edge_by_id
     assert "route::e_rework_back::4" in edge_by_id
@@ -338,7 +399,7 @@ def test_cycle_routing_splits_backward_edges_into_helper_lanes(documents) -> Non
     assert edge_by_id["e_rework_back"].asdict()["data"]["domainEdgeId"] == "e_rework_back"
     assert edge_by_id["e_rework_back"].asdict()["pathOptions"]["offset"] == 22
     assert node_by_id["route-anchor::e_rework_back::0"].position["x"] > 1000
-    assert node_by_id["route-anchor::e_rework_back::1"].position["y"] > 240
+    assert node_by_id["route-anchor::e_rework_back::1"].position["y"] > 200
 
 
 def test_forward_edges_route_around_intermediate_nodes_without_routing_adjacent_links(
@@ -397,27 +458,124 @@ def test_direct_yes_no_labels_use_source_near_anchor(documents) -> None:
         ),
     )
 
-    assert edge_by_id["e_design_yes"].source == "dec_design_ok"
+    assert edge_by_id["e_design_yes"].source == "route-anchor::e_design_yes::source"
     assert edge_by_id["e_design_yes"].target == "proc_procurement"
     assert edge_by_id["e_design_yes"].label == ""
     assert edge_by_id["e_design_yes"].marker_end["type"] == "arrowclosed"
-    assert edge_by_id["e_design_yes"].style["stroke"] == "#16834a"
+    assert edge_by_id["e_design_yes"].style["stroke"] == "#16a34a"
+    assert edge_by_id["e_design_yes"].marker_end["color"] == "#16a34a"
     assert label_node.connectable is False
     assert label_node.selectable is False
     assert "Да" in label_node.data["content"]
     assert distance_to_source <= label_width + EDGE_LABEL_GAP + 1
 
     no_label_node = node_by_id["edge-label::e_design_no"]
+    no_label_width = int(str(no_label_node.style["width"]).removesuffix("px"))
+    no_label_center = (
+        no_label_node.position["x"] + no_label_width / 2,
+        no_label_node.position["y"] + EDGE_LABEL_HEIGHT / 2,
+    )
+    no_distance_to_source = distance_to_rect(
+        no_label_center,
+        (
+            source.position["x"],
+            source.position["y"],
+            source.position["x"] + source_width,
+            source.position["y"] + source_height,
+        ),
+    )
     no_segments = [edge for edge in edges if edge.asdict()["data"]["domainEdgeId"] == "e_design_no"]
     assert "Нет" in no_label_node.data["content"]
     assert abs(no_label_node.position["y"] - label_node.position["y"]) > EDGE_LABEL_HEIGHT
-    assert no_label_node.position["x"] > source.position["x"] + source_width
+    assert source.position["x"] < no_label_node.position["x"] < source.position["x"] + source_width
     assert no_label_node.position["y"] < source.position["y"]
-    assert {segment.style["stroke"] for segment in no_segments} == {"#c2410c"}
+    assert no_distance_to_source <= no_label_width + EDGE_LABEL_GAP + 1
+    assert {segment.style["stroke"] for segment in no_segments} == {"#dc2626"}
     assert all(
-        not segment.marker_end or segment.marker_end["color"] == "#c2410c"
+        not segment.marker_end or segment.marker_end["color"] == "#dc2626"
         for segment in no_segments
     )
+
+
+def test_routed_yes_label_stays_attached_to_parent_decision(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    node_by_id = {node.id: node for node in nodes}
+    edge_by_id = {edge.id: edge for edge in edges}
+
+    label_node = node_by_id["edge-label::e_data_yes"]
+    source = node_by_id["dec_data_complete"]
+    source_width = int(str(source.style["width"]).removesuffix("px"))
+    source_height = int(str(source.style["height"]).removesuffix("px"))
+    label_width = int(str(label_node.style["width"]).removesuffix("px"))
+    label_center = (
+        label_node.position["x"] + label_width / 2,
+        label_node.position["y"] + EDGE_LABEL_HEIGHT / 2,
+    )
+    distance_to_source = distance_to_rect(
+        label_center,
+        (
+            source.position["x"],
+            source.position["y"],
+            source.position["x"] + source_width,
+            source.position["y"] + source_height,
+        ),
+    )
+
+    assert edge_by_id["e_data_yes"].source == "route-anchor::e_data_yes::source"
+    assert edge_by_id["e_data_yes"].target == "route-anchor::e_data_yes::0"
+    assert "Да" in label_node.data["content"]
+    assert source.position["x"] < label_node.position["x"] < source.position["x"] + source_width
+    assert label_node.position["y"] > source.position["y"] + source_height
+    assert distance_to_source <= label_width + EDGE_LABEL_GAP + 1
+
+
+def test_decision_yes_no_branches_use_distinct_ports_and_domain_colors(documents) -> None:
+    graph, wells = documents
+
+    nodes, active_ids = build_streamlit_nodes(graph, wells)
+    edges = build_streamlit_edges(graph, active_ids, wells_doc=wells, layout_mode="snake")
+    node_by_id = {node.id: node for node in nodes}
+    segments_by_domain: dict[str, list] = {}
+    for edge in edges:
+        domain_edge_id = edge.asdict()["data"]["domainEdgeId"]
+        segments_by_domain.setdefault(domain_edge_id, []).append(edge)
+
+    for node in graph.nodes:
+        if node.type != "decision_diamond":
+            continue
+
+        yes_edge = next(
+            edge for edge in graph.edges if edge.source == node.id and edge.kind == "yes"
+        )
+        no_edge = next(edge for edge in graph.edges if edge.source == node.id and edge.kind == "no")
+        yes_segments = segments_by_domain[yes_edge.id]
+        no_segments = segments_by_domain[no_edge.id]
+
+        yes_anchor = node_by_id[f"route-anchor::{yes_edge.id}::source"]
+        no_anchor = node_by_id[f"route-anchor::{no_edge.id}::source"]
+
+        assert yes_segments[0].source == yes_anchor.id
+        assert no_segments[0].source == no_anchor.id
+        assert yes_anchor.asdict()["className"] == "branch-anchor-node"
+        assert no_anchor.asdict()["className"] == "branch-anchor-node"
+        assert yes_anchor.style.get("visibility") != "hidden"
+        assert no_anchor.style.get("visibility") != "hidden"
+        assert yes_anchor.style["width"] == "8px"
+        assert yes_anchor.style["height"] == "8px"
+        assert yes_anchor.style["opacity"] == 1.0
+        branch_css = css_rule_block(yes_anchor.data["content"], ".branch-anchor-node")
+        assert "width: 6px" in branch_css
+        assert "height: 6px" in branch_css
+        assert "visibility: visible" in branch_css
+        assert "visibility: hidden" not in branch_css
+        assert yes_anchor.position != no_anchor.position
+        assert {segment.style["stroke"] for segment in yes_segments} == {"#16a34a"}
+        assert {segment.style["stroke"] for segment in no_segments} == {"#dc2626"}
+        assert any(segment.marker_end.get("color") == "#16a34a" for segment in yes_segments)
+        assert any(segment.marker_end.get("color") == "#dc2626" for segment in no_segments)
 
 
 def test_issue_no_branch_routes_around_mitigation_card(documents) -> None:
@@ -432,7 +590,7 @@ def test_issue_no_branch_routes_around_mitigation_card(documents) -> None:
     assert "route-anchor::e_issue_no::3" in node_by_id
     assert "e_issue_no" in edge_by_id
     assert edge_by_id["e_issue_no"].label == ""
-    assert edge_by_id["e_issue_no"].source == "dec_operational_issue"
+    assert edge_by_id["e_issue_no"].source == "route-anchor::e_issue_no::source"
     assert edge_by_id["e_issue_no"].target == "route-anchor::e_issue_no::0"
     assert "Нет" in node_by_id["edge-label::e_issue_no"].data["content"]
     assert "route::e_issue_no::4" in edge_by_id
@@ -443,7 +601,7 @@ def test_issue_no_branch_routes_around_mitigation_card(documents) -> None:
     mitigation_top = mitigation.position["y"]
     mitigation_bottom = mitigation_top + int(str(mitigation.style["height"]).removesuffix("px"))
     for anchor_id in ("route-anchor::e_issue_no::1", "route-anchor::e_issue_no::2"):
-        lane_y = node_by_id[anchor_id].position["y"] + 1
+        lane_y = node_by_id[anchor_id].position["y"] + ROUTE_ANCHOR_SIZE / 2
         assert lane_y < mitigation_top or lane_y > mitigation_bottom
 
 
@@ -455,6 +613,12 @@ def distance_to_rect(
     dx = max(left - point[0], 0, point[0] - right)
     dy = max(top - point[1], 0, point[1] - bottom)
     return hypot(dx, dy)
+
+
+def css_rule_block(content: str, selector: str) -> str:
+    start = content.index(selector)
+    end = content.index("}", start)
+    return content[start:end]
 
 
 def test_empty_active_node_set_keeps_all_edges_dimmed(documents) -> None:

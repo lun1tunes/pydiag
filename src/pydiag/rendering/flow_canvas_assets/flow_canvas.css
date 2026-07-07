@@ -1,0 +1,304 @@
+.flow-canvas-root {
+  position: relative;
+  width: 100%;
+  height: clamp(520px, calc(100vh - 6.5rem), 860px);
+  height: clamp(520px, calc(100dvh - 6.5rem), 860px);
+  overflow: hidden;
+  border-radius: 18px;
+  color: #0f172a;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  background:
+    radial-gradient(circle at top left, rgba(20, 184, 166, 0.09), transparent 28%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, #f8fbfd 0%, #f3f6fb 100%);
+}
+
+.flow-canvas-toolbar {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 8;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.flow-canvas-toolbar__button {
+  appearance: none;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  background: rgba(255, 255, 255, 0.94);
+  color: #0f172a;
+  border-radius: 999px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
+  cursor: pointer;
+}
+
+.flow-canvas-toolbar__button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
+}
+
+.flow-canvas-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.14) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.flow-canvas-viewport.is-panning {
+  cursor: grabbing;
+}
+
+.flow-canvas-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.flow-canvas-minimap {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 9;
+  width: 204px;
+  height: 148px;
+  padding: 10px;
+  border-radius: 18px;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+}
+
+.flow-canvas-minimap__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.flow-canvas-minimap__backdrop {
+  fill: rgba(248, 250, 252, 0.96);
+  stroke: rgba(148, 163, 184, 0.34);
+  stroke-width: 1;
+}
+
+.flow-canvas-minimap__edge {
+  fill: none;
+  stroke: rgba(71, 85, 105, 0.36);
+  stroke-width: 6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-canvas-minimap__node {
+  fill: rgba(255, 255, 255, 0.94);
+  stroke: rgba(15, 23, 42, 0.34);
+  stroke-width: 4;
+}
+
+.flow-canvas-minimap__node.is-process,
+.flow-canvas-minimap__node.is-decision-card {
+  fill: rgba(20, 184, 166, 0.16);
+}
+
+.flow-canvas-minimap__node.is-decision-diamond {
+  fill: rgba(245, 158, 11, 0.18);
+}
+
+.flow-canvas-minimap__node.is-database {
+  fill: rgba(14, 165, 233, 0.14);
+}
+
+.flow-canvas-minimap__node.is-input-data {
+  fill: rgba(59, 130, 246, 0.12);
+}
+
+.flow-canvas-minimap__node.is-event {
+  fill: rgba(241, 245, 249, 0.98);
+}
+
+.flow-canvas-minimap__node.is-selected {
+  stroke: rgba(20, 184, 166, 0.86);
+}
+
+.flow-canvas-minimap__viewport {
+  fill: rgba(14, 165, 233, 0.1);
+  stroke: rgba(14, 165, 233, 0.86);
+  stroke-width: 5;
+}
+
+.flow-canvas-edges,
+.flow-canvas-labels,
+.flow-canvas-nodes {
+  position: absolute;
+  inset: 0;
+}
+
+.flow-canvas-edges {
+  overflow: visible;
+}
+
+.flow-edge-path {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.flow-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16px;
+  cursor: pointer;
+}
+
+.flow-edge-path.is-selected {
+  filter: drop-shadow(0 0 10px rgba(15, 23, 42, 0.18));
+}
+
+.flow-edge-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.10);
+  font-size: 12px;
+  font-weight: 780;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.flow-edge-label:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.14);
+}
+
+.flow-node-shell {
+  position: absolute;
+}
+
+.flow-node-card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.flow-node-card.is-draggable {
+  cursor: grab;
+}
+
+.flow-node-card.is-dragging {
+  cursor: grabbing;
+}
+
+.flow-node-card:focus-visible,
+.flow-token:focus-visible,
+.flow-edge-label:focus-visible,
+.flow-canvas-toolbar__button:focus-visible {
+  outline: 3px solid rgba(20, 184, 166, 0.38);
+  outline-offset: 3px;
+}
+
+.flow-node-text {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: inherit;
+  font-weight: 760;
+  line-height: 1.24;
+  overflow-wrap: anywhere;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.flow-node-top-rail {
+  position: absolute;
+  top: -30px;
+  left: 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.flow-node-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.flow-node-wells {
+  position: absolute;
+  top: calc(100% + 12px);
+  left: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, 136px);
+  gap: 8px 10px;
+}
+
+.flow-token {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  cursor: pointer;
+}
+
+.flow-token:hover {
+  transform: translateY(-1px);
+}
+
+.flow-empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 14px;
+}
+
+@media (max-width: 840px) {
+  .flow-canvas-root {
+    height: clamp(420px, calc(100vh - 5.5rem), 720px);
+    height: clamp(420px, calc(100dvh - 5.5rem), 720px);
+  }
+
+  .flow-canvas-minimap {
+    right: 12px;
+    bottom: 12px;
+    width: 144px;
+    height: 112px;
+    padding: 8px;
+  }
+}

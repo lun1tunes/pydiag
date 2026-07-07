@@ -5,10 +5,15 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from pydiag.models import well_by_id
-from pydiag.storage import load_wells_doc
+from pydiag.domain import well_by_id
+from pydiag.infrastructure import load_wells_doc
+from pydiag.infrastructure.flow_source_graph import (
+    dump_structured_yaml_payload,
+    load_structured_payload,
+)
 
 APP_PATH = Path(__file__).resolve().parents[2] / "app.py"
+FIXTURE_SOURCE_PATH = APP_PATH.parent / "tests" / "fixtures" / "flow_source.yaml"
 
 
 def run_app_with_temp_data(
@@ -19,6 +24,7 @@ def run_app_with_temp_data(
 ) -> AppTest:
     graph_path, wells_path = data_paths
     monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
+    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(FIXTURE_SOURCE_PATH))
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
     monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
     monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
@@ -74,8 +80,11 @@ def click_button(app: AppTest, label: str) -> AppTest:
 def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> None:
     app = run_app_with_temp_data(data_paths, monkeypatch)
 
-    assert any("Карта планирования и бурения" in item.value for item in app.markdown)
-    assert any("Узлы" in item.value and "19" in item.value for item in app.markdown)
+    assert not any("Карта планирования и бурения" in item.value for item in app.markdown)
+    assert not any(
+        "Скважины привязаны к этапам процесса через current_node_id" in item.value
+        for item in app.markdown
+    )
     assert any("Легенда" in item.value for item in app.markdown)
     assert any("Типы блоков" in item.value for item in app.markdown)
     assert any("Цвета ответственных" in item.value for item in app.markdown)
@@ -87,7 +96,7 @@ def test_streamlit_app_requires_explicit_users(data_paths, monkeypatch) -> None:
 
     assert any("Пользователи не настроены" in item.value for item in app.warning)
     labels = {button.label for button in app.button}
-    assert {"Войти", "Перечитать JSON"} <= labels
+    assert {"Войти", "Перечитать данные"} <= labels
     assert "Продвинуть" not in labels
 
 
@@ -109,7 +118,7 @@ def test_streamlit_admin_login_reveals_management_panel(
     }
 
 
-def test_streamlit_admin_can_move_well_without_touching_real_json(
+def test_streamlit_admin_can_move_well_without_touching_real_wells_file(
     data_paths,
     monkeypatch,
 ) -> None:
@@ -127,7 +136,7 @@ def test_streamlit_admin_can_move_well_without_touching_real_json(
     assert well.history[-1].action == "move"
 
 
-def test_streamlit_admin_can_create_well_in_temp_json(
+def test_streamlit_admin_can_create_well_in_temp_wells_file(
     data_paths,
     monkeypatch,
 ) -> None:
@@ -150,10 +159,10 @@ def test_streamlit_admin_can_create_well_in_temp_json(
 
 def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> None:
     _, wells_path = data_paths
-    payload = json.loads(wells_path.read_text(encoding="utf-8"))
+    payload = load_structured_payload(wells_path.read_bytes())
     for well in payload["wells"]:
         well["is_archived"] = True
-    wells_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    wells_path.write_text(dump_structured_yaml_payload(payload), encoding="utf-8")
 
     app = run_app_with_temp_data(data_paths, monkeypatch)
     login_as_admin(app)

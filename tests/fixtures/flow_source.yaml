@@ -1,0 +1,373 @@
+schema_version: "flow-source/1.0"
+graph_id: "planning-and-drilling-map"
+title: "Карта планирования и бурения"
+version: 1
+responsibles:
+  planning:
+    label: "Планирование"
+    type: "team"
+    fill: "#dcecff"
+    border: "#356ca8"
+    text: "#17314f"
+    active: true
+  geology:
+    label: "Геология"
+    type: "team"
+    fill: "#e3f7ea"
+    border: "#3f8a55"
+    text: "#17311e"
+    active: true
+  procurement:
+    label: "Закупки"
+    type: "team"
+    fill: "#fff2d6"
+    border: "#b17a23"
+    text: "#43300d"
+    active: true
+  hse:
+    label: "ПБОТОС"
+    type: "team"
+    fill: "#ffe3e3"
+    border: "#b84c4c"
+    text: "#4e1717"
+    active: true
+  drilling:
+    label: "Бурение"
+    type: "team"
+    fill: "#e9e4ff"
+    border: "#6954b8"
+    text: "#261b53"
+    active: true
+  completion:
+    label: "Заканчивание"
+    type: "team"
+    fill: "#dff5f2"
+    border: "#16877d"
+    text: "#123834"
+    active: true
+  logistics:
+    label: "Логистика"
+    type: "team"
+    fill: "#edf2f7"
+    border: "#64748b"
+    text: "#253041"
+    active: true
+nodes:
+  input_geo_license:
+    title: "Лицензия и исходные геоданные"
+    kind: "input_data"
+    duration: "4 hours"
+    transitions:
+      -
+        to: "proc_initial_review"
+        kind: "default"
+        id: "e_input_review"
+  db_offset_wells:
+    title: "Архив соседних скважин"
+    kind: "database"
+    duration: "2 hours"
+    transitions:
+      -
+        to: "proc_initial_review"
+        kind: "dashed"
+        label: "контекст"
+        id: "e_offsets_review"
+  proc_initial_review:
+    title: "Первичный анализ и паспорт скважины"
+    kind: "process"
+    responsible: "planning"
+    participants:
+      - "geology"
+      - "hse"
+    duration: "16 hours"
+    transitions:
+      -
+        to: "dec_data_complete"
+        kind: "default"
+        id: "e_review_decision"
+  dec_data_complete:
+    title: "Данные полные?"
+    kind: "decision_diamond"
+    responsible: "planning"
+    participants:
+      - "geology"
+    duration: "40 minutes"
+    transitions:
+      -
+        to: "proc_well_design"
+        kind: "yes"
+        id: "e_data_yes"
+      -
+        to: "card_data_rework"
+        kind: "no"
+        id: "e_data_no"
+  card_data_rework:
+    title: "Запросить недостающие данные"
+    kind: "decision_card"
+    responsible: "planning"
+    participants:
+      - "geology"
+    duration: "8 hours"
+    transitions:
+      -
+        to: "proc_initial_review"
+        kind: "dashed"
+        label: "доработка"
+        id: "e_rework_back"
+  proc_well_design:
+    title: "Проект профиля и конструкции"
+    kind: "process"
+    responsible: "geology"
+    participants:
+      - "planning"
+    duration: "1 day"
+    transitions:
+      -
+        to: "proc_hse_review"
+        kind: "default"
+        id: "e_design_hse"
+      -
+        to: "dec_design_ok"
+        kind: "default"
+        id: "e_design_to_decision"
+  proc_hse_review:
+    title: "Проверка HSE и разрешений"
+    kind: "process"
+    responsible: "hse"
+    duration: "12 hours"
+    transitions:
+      -
+        to: "dec_design_ok"
+        kind: "default"
+        id: "e_hse_design_ok"
+  dec_design_ok:
+    title: "Проект согласован?"
+    kind: "decision_diamond"
+    responsible: "planning"
+    participants:
+      - "hse"
+    duration: "2 hours"
+    transitions:
+      -
+        to: "proc_procurement"
+        kind: "yes"
+        id: "e_design_yes"
+      -
+        to: "proc_well_design"
+        kind: "no"
+        id: "e_design_no"
+  proc_procurement:
+    title: "Закупка сервисов и материалов"
+    kind: "process"
+    responsible: "procurement"
+    participants:
+      - "planning"
+      - "drilling"
+    duration: "3 days"
+    transitions:
+      -
+        to: "db_contracts"
+        kind: "dashed"
+        label: "реестр"
+        id: "e_procurement_contracts"
+      -
+        to: "proc_mobilization"
+        kind: "default"
+        id: "e_procurement_mob"
+  db_contracts:
+    title: "Договоры и заявки"
+    kind: "database"
+    duration: "1 hour"
+  proc_mobilization:
+    title: "Мобилизация буровой и сервисов"
+    kind: "process"
+    responsible: "logistics"
+    participants:
+      - "hse"
+    duration: "2 days"
+    transitions:
+      -
+        to: "proc_spud"
+        kind: "default"
+        id: "e_mob_spud"
+  proc_spud:
+    title: "Спуск направления и начало бурения"
+    kind: "process"
+    responsible: "drilling"
+    duration: "18 hours"
+    transitions:
+      -
+        to: "dec_operational_issue"
+        kind: "default"
+        id: "e_spud_issue"
+  dec_operational_issue:
+    title: "Есть осложнение?"
+    kind: "decision_diamond"
+    responsible: "drilling"
+    participants:
+      - "hse"
+    duration: "40 minutes"
+    transitions:
+      -
+        to: "card_mitigation"
+        kind: "yes"
+        id: "e_issue_yes"
+      -
+        to: "proc_drilling_complete"
+        kind: "no"
+        id: "e_issue_no"
+  card_mitigation:
+    title: "План ликвидации осложнения"
+    kind: "decision_card"
+    responsible: "drilling"
+    participants:
+      - "hse"
+    duration: "6 hours"
+    transitions:
+      -
+        to: "proc_spud"
+        kind: "dashed"
+        label: "после мер"
+        id: "e_mitigation_back"
+  proc_drilling_complete:
+    title: "Завершение бурения и крепление"
+    kind: "process"
+    responsible: "drilling"
+    participants:
+      - "hse"
+    duration: "36 hours"
+    transitions:
+      -
+        to: "proc_completion"
+        kind: "default"
+        id: "e_drill_completion"
+  proc_completion:
+    title: "Заканчивание и передача в освоение"
+    kind: "process"
+    responsible: "completion"
+    participants:
+      - "planning"
+    duration: "30 hours"
+    transitions:
+      -
+        to: "input_lessons"
+        kind: "dashed"
+        label: "факт"
+        id: "e_completion_lessons"
+      -
+        to: "db_final_archive"
+        kind: "default"
+        id: "e_completion_archive"
+  input_lessons:
+    title: "Извлеченные уроки"
+    kind: "input_data"
+    duration: "4 hours"
+  db_final_archive:
+    title: "Финальный архив скважины"
+    kind: "database"
+    duration: "2 hours"
+    transitions:
+      -
+        to: "event_handover_done"
+        kind: "default"
+        id: "e_archive_handover_done"
+  event_handover_done:
+    title: "Скважина передана в эксплуатацию"
+    kind: "event"
+    duration: "10 minutes"
+layout:
+  input_geo_license:
+    x: 80
+    y: 260
+    w: 250
+    h: 94
+  db_offset_wells:
+    x: 80
+    y: 500
+    w: 250
+    h: 96
+  proc_initial_review:
+    x: 420
+    y: 260
+    w: 300
+    h: 116
+  dec_data_complete:
+    x: 810
+    y: 270
+    w: 230
+    h: 112
+  card_data_rework:
+    x: 810
+    y: 82
+    w: 250
+    h: 98
+  proc_well_design:
+    x: 1160
+    y: 260
+    w: 300
+    h: 116
+  proc_hse_review:
+    x: 1510
+    y: 82
+    w: 280
+    h: 104
+  dec_design_ok:
+    x: 1510
+    y: 270
+    w: 240
+    h: 112
+  proc_procurement:
+    x: 1870
+    y: 260
+    w: 310
+    h: 116
+  db_contracts:
+    x: 1870
+    y: 500
+    w: 270
+    h: 96
+  proc_mobilization:
+    x: 2250
+    y: 260
+    w: 310
+    h: 116
+  proc_spud:
+    x: 2630
+    y: 260
+    w: 310
+    h: 116
+  dec_operational_issue:
+    x: 3010
+    y: 270
+    w: 240
+    h: 112
+  card_mitigation:
+    x: 3010
+    y: 82
+    w: 270
+    h: 102
+  proc_drilling_complete:
+    x: 3370
+    y: 260
+    w: 310
+    h: 116
+  proc_completion:
+    x: 3750
+    y: 260
+    w: 320
+    h: 116
+  input_lessons:
+    x: 3750
+    y: 500
+    w: 270
+    h: 96
+  db_final_archive:
+    x: 4140
+    y: 260
+    w: 280
+    h: 100
+  event_handover_done:
+    x: 4500
+    y: 270
+    w: 280
+    h: 86

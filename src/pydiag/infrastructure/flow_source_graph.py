@@ -1,0 +1,973 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from pydiag.domain.models import HEX_COLOR_RE, FlowGraphDocument, MetaValue, parse_node_time
+from pydiag.infrastructure.editable_flow_graph import (
+    EDITABLE_FLOW_GRAPH_SCHEMA_VERSION,
+    EditableEdgeKind,
+    EditableFlowGraphDocument,
+    EditableFlowGraphNode,
+    EditableNodeKind,
+)
+
+FLOW_SOURCE_SCHEMA_VERSION = "flow-source/1.0"
+SHORT_DURATION_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>[mhd])$")
+AUTO_LAYOUT_COLUMNS = 4
+AUTO_LAYOUT_HORIZONTAL_STEP = 420
+AUTO_LAYOUT_VERTICAL_STEP = 240
+DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
+    "process": (320, 120),
+    "decision_diamond": (360, 220),
+    "decision_card": (340, 140),
+    "database": (320, 120),
+    "input_data": (320, 120),
+    "event": (320, 96),
+}
+CYRILLIC_TO_LATIN = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+SourceResponsibleType = Literal["team", "role", "system", "external"]
+
+__all__ = [
+    "FLOW_SOURCE_SCHEMA_VERSION",
+    "FlowSourceDocument",
+    "dump_structured_yaml_payload",
+    "dump_flow_source_payload",
+    "flow_source_payload_from_editable_payload",
+    "editable_flow_graph_payload_from_source_payload",
+    "flow_source_payload_from_runtime_payload",
+    "is_flow_source_payload",
+    "load_structured_payload",
+    "update_flow_source_payload_layout",
+]
+
+
+class FlowSourceStrictModel(BaseModel):
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+@dataclass(frozen=True)
+class YamlLine:
+    number: int
+    indent: int
+    content: str
+
+
+class FlowSourceResponsible(FlowSourceStrictModel):
+    label: str = Field(min_length=1)
+    abbr: str | None = None
+    type: SourceResponsibleType = "team"
+    fill: str
+    border: str
+    text: str = "#172033"
+    aliases: list[str] = Field(default_factory=list)
+    note: str | None = None
+    active: bool = True
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+    @field_validator("fill", "border", "text")
+    @classmethod
+    def validate_color(cls, value: str) -> str:
+        if not HEX_COLOR_RE.fullmatch(value):
+            raise ValueError("color values must use 6-digit hex format, for example '#dcecff'")
+        return value
+
+
+class FlowSourceSection(FlowSourceStrictModel):
+    title: str = Field(min_length=1)
+    order: int = 0
+    note: str | None = None
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+
+class FlowSourceTransition(FlowSourceStrictModel):
+    to: str = Field(min_length=1)
+    kind: EditableEdgeKind = "default"
+    label: str | None = None
+    condition: str | None = None
+    note: str | None = None
+    id: str | None = None
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+
+class FlowSourceNode(FlowSourceStrictModel):
+    title: str = Field(min_length=1)
+    kind: EditableNodeKind
+    section: str | None = None
+    responsible: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    approvers: list[str] = Field(default_factory=list)
+    duration: str | None = None
+    note: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    source_ref: dict[str, MetaValue] = Field(default_factory=dict)
+    transitions: list[FlowSourceTransition] = Field(default_factory=list)
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+    @field_validator("duration")
+    @classmethod
+    def normalize_duration(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.strip().lower().split())
+        shorthand = SHORT_DURATION_RE.fullmatch(normalized)
+        if shorthand is not None:
+            amount = int(shorthand.group("amount"))
+            unit = {
+                "m": "minute" if amount == 1 else "minutes",
+                "h": "hour" if amount == 1 else "hours",
+                "d": "day" if amount == 1 else "days",
+            }[shorthand.group("unit")]
+            normalized = f"{amount} {unit}"
+        parse_node_time(normalized)
+        return normalized
+
+
+class FlowSourceLayoutEntry(FlowSourceStrictModel):
+    x: float
+    y: float
+    w: int = Field(ge=80, le=1200)
+    h: int = Field(ge=40, le=800)
+
+
+class FlowSourceDocument(FlowSourceStrictModel):
+    schema_version: Literal["flow-source/1.0"] = FLOW_SOURCE_SCHEMA_VERSION
+    graph_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    description: str | None = None
+    responsibles: dict[str, FlowSourceResponsible]
+    sections: dict[str, FlowSourceSection] = Field(default_factory=dict)
+    nodes: dict[str, FlowSourceNode]
+    layout: dict[str, FlowSourceLayoutEntry] = Field(default_factory=dict)
+    metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> FlowSourceDocument:
+        if not self.responsibles:
+            raise ValueError("At least one responsible must be defined")
+
+        responsible_ids = set(self.responsibles)
+        node_ids = set(self.nodes)
+        section_ids = set(self.sections)
+        explicit_transition_ids: list[str] = []
+
+        unknown_layout_ids = sorted(set(self.layout) - node_ids)
+        if unknown_layout_ids:
+            raise ValueError(f"Unknown layout node ids: {', '.join(unknown_layout_ids)}")
+
+        for node_id, node in self.nodes.items():
+            if node.section is not None and node.section not in section_ids:
+                raise ValueError(f"Node {node_id}: unknown section {node.section}")
+
+            combined = [
+                responsible
+                for responsible in [node.responsible, *node.participants, *node.approvers]
+                if responsible is not None
+            ]
+            if len(combined) != len(set(combined)):
+                raise ValueError(f"Node {node_id}: duplicate responsibles are not allowed")
+            for responsible in combined:
+                if responsible not in responsible_ids:
+                    raise ValueError(f"Node {node_id}: unknown responsible {responsible}")
+
+            for transition in node.transitions:
+                if transition.to not in node_ids:
+                    raise ValueError(f"Node {node_id}: unknown transition target {transition.to}")
+                if transition.id is not None:
+                    explicit_transition_ids.append(transition.id)
+
+        if len(explicit_transition_ids) != len(set(explicit_transition_ids)):
+            raise ValueError("Duplicate transition ids are not allowed")
+        return self
+
+
+def load_structured_payload(raw: bytes | str) -> object:
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return parse_yaml_subset(stripped)
+
+
+def is_flow_source_payload(payload: object) -> bool:
+    return isinstance(payload, dict) and payload.get("schema_version") == FLOW_SOURCE_SCHEMA_VERSION
+
+
+def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+
+    nodes_payload: list[dict[str, Any]] = []
+    edges_payload: list[dict[str, Any]] = []
+    used_edge_ids: set[str] = set()
+
+    for node_index, (node_id, node) in enumerate(document.nodes.items()):
+        layout = document.layout.get(node_id) or auto_layout_entry(node.kind, node_index)
+        nodes_payload.append(
+            {
+                "id": node_id,
+                "kind": node.kind,
+                "title": node.title,
+                "position": {
+                    "x": round(float(layout.x), 2),
+                    "y": round(float(layout.y), 2),
+                },
+                "size": {
+                    "w": int(layout.w),
+                    "h": int(layout.h),
+                },
+                "responsible": node.responsible,
+                "participants": node.participants,
+                "approvers": node.approvers,
+                "note": node.note,
+                "duration": node.duration,
+                "metadata": editable_node_metadata(node),
+            }
+        )
+        for transition_index, transition in enumerate(node.transitions):
+            edge_id = unique_edge_id(
+                transition.id,
+                source=node_id,
+                target=transition.to,
+                kind=transition.kind,
+                label=transition.label,
+                index=transition_index,
+                used_ids=used_edge_ids,
+            )
+            used_edge_ids.add(edge_id)
+            edges_payload.append(
+                {
+                    "id": edge_id,
+                    "kind": transition.kind,
+                    "source": node_id,
+                    "target": transition.to,
+                    "label": effective_transition_label(transition.kind, transition.label),
+                    "metadata": editable_transition_metadata(transition),
+                }
+            )
+
+    editable_payload = {
+        "schema_version": EDITABLE_FLOW_GRAPH_SCHEMA_VERSION,
+        "version": document.version,
+        "responsibles": {
+            responsible_id: {
+                "label": responsible.label,
+                "fill": responsible.fill,
+                "border": responsible.border,
+                "text": responsible.text,
+            }
+            for responsible_id, responsible in document.responsibles.items()
+        },
+        "nodes": nodes_payload,
+        "edges": edges_payload,
+    }
+    EditableFlowGraphDocument.model_validate(editable_payload, strict=True)
+    return editable_payload
+
+
+def flow_source_payload_from_runtime_payload(
+    payload: object,
+    *,
+    graph_id: str,
+    title: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    document = FlowGraphDocument.model_validate(payload, strict=True)
+    transitions_by_source: dict[str, list[dict[str, Any]]] = {
+        node.id: [] for node in document.nodes
+    }
+    for edge in document.edges:
+        transitions_by_source[edge.source].append(
+            {
+                "to": edge.target,
+                "kind": "default" if edge.kind == "usual" else edge.kind,
+                "label": (
+                    None
+                    if edge.label
+                    == effective_transition_label(
+                        "default" if edge.kind == "usual" else edge.kind,
+                        None,
+                    )
+                    else edge.label
+                ),
+                "id": edge.id,
+                "metadata": dict(edge.metadata),
+            }
+        )
+
+    source_payload = {
+        "schema_version": FLOW_SOURCE_SCHEMA_VERSION,
+        "graph_id": graph_id,
+        "title": title,
+        "version": document.version,
+        "description": description,
+        "responsibles": {
+            responsible_id: {
+                "label": style.label,
+                "fill": style.fill,
+                "border": style.border,
+                "text": style.text,
+            }
+            for responsible_id, style in document.responsibles.items()
+        },
+        "nodes": {
+            node.id: {
+                "title": node.text,
+                "kind": node.kind,
+                "responsible": node.primary_responsible,
+                "participants": node.secondary_responsibles,
+                "duration": node.time,
+                "transitions": transitions_by_source[node.id],
+                "metadata": dict(node.metadata),
+            }
+            for node in document.nodes
+        },
+        "layout": {
+            node.id: {
+                "x": round(float(node.position.x), 2),
+                "y": round(float(node.position.y), 2),
+                "w": int(node.size.w),
+                "h": int(node.size.h),
+            }
+            for node in document.nodes
+        },
+    }
+    FlowSourceDocument.model_validate(source_payload, strict=True)
+    return source_payload
+
+
+def flow_source_payload_from_editable_payload(
+    payload: object,
+    *,
+    graph_id: str,
+    title: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    document = EditableFlowGraphDocument.model_validate(payload, strict=True)
+    transitions_by_source: dict[str, list[dict[str, Any]]] = {
+        node.id: [] for node in document.nodes
+    }
+    for edge in document.edges:
+        metadata = dict(edge.metadata)
+        condition = metadata.pop("condition", None)
+        note = metadata.pop("note", None)
+        transitions_by_source[edge.source].append(
+            {
+                "to": edge.target,
+                "kind": edge.kind,
+                "label": transition_source_label(edge.kind, edge.label),
+                "condition": condition if isinstance(condition, str) else None,
+                "note": note if isinstance(note, str) else None,
+                "id": edge.id,
+                "metadata": metadata,
+            }
+        )
+
+    sections = editable_sections_payload(document.nodes)
+    source_payload = {
+        "schema_version": FLOW_SOURCE_SCHEMA_VERSION,
+        "graph_id": graph_id,
+        "title": title,
+        "version": document.version,
+        "description": description,
+        "responsibles": {
+            responsible_id: {
+                "label": style.label,
+                "type": "team",
+                "fill": style.fill,
+                "border": style.border,
+                "text": style.text,
+            }
+            for responsible_id, style in document.responsibles.items()
+        },
+        "sections": sections,
+        "nodes": {
+            node.id: editable_node_source_payload(node, transitions_by_source[node.id])
+            for node in document.nodes
+        },
+        "layout": {
+            node.id: {
+                "x": round(float(node.position.x), 2),
+                "y": round(float(node.position.y), 2),
+                "w": int(node.size.w),
+                "h": int(node.size.h),
+            }
+            for node in document.nodes
+        },
+    }
+    FlowSourceDocument.model_validate(source_payload, strict=True)
+    return source_payload
+
+
+def update_flow_source_payload_layout(
+    payload: object,
+    *,
+    positions: dict[str, tuple[float, float]],
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+
+    unknown_ids = sorted(set(positions) - set(document.nodes))
+    if unknown_ids:
+        raise ValueError(f"Unknown graph node positions: {', '.join(unknown_ids)}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    node_indexes = {node_id: index for index, node_id in enumerate(document.nodes)}
+    for node_id, position in positions.items():
+        existing = updated.layout.get(node_id)
+        if existing is None:
+            existing = auto_layout_entry(
+                updated.nodes[node_id].kind,
+                node_indexes[node_id],
+            )
+        updated.layout[node_id] = FlowSourceLayoutEntry(
+            x=round(float(position[0]), 2),
+            y=round(float(position[1]), 2),
+            w=int(existing.w),
+            h=int(existing.h),
+        )
+    return updated.model_dump(mode="json")
+
+
+def dump_flow_source_payload(payload: object) -> str:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    normalized = prune_empty_yaml_value(document.model_dump(mode="json"))
+    return dump_structured_yaml_payload(normalized)
+
+
+def dump_structured_yaml_payload(payload: object) -> str:
+    if isinstance(payload, dict):
+        rendered = render_yaml_mapping(payload, indent=0)
+    elif isinstance(payload, list):
+        rendered = render_yaml_sequence(payload, indent=0)
+    else:
+        rendered = render_yaml_scalar(payload)
+    return rendered.rstrip() + "\n"
+
+
+def editable_node_metadata(node: FlowSourceNode) -> dict[str, MetaValue]:
+    metadata = dict(node.metadata)
+    if node.section is not None:
+        metadata.setdefault("source_section", node.section)
+    if node.tags:
+        metadata.setdefault("source_tags", ", ".join(node.tags))
+    for key, value in node.source_ref.items():
+        metadata.setdefault(f"source_ref:{key}", value)
+    return metadata
+
+
+def editable_transition_metadata(transition: FlowSourceTransition) -> dict[str, MetaValue]:
+    metadata = dict(transition.metadata)
+    if transition.condition is not None:
+        metadata.setdefault("condition", transition.condition)
+    if transition.note is not None:
+        metadata.setdefault("note", transition.note)
+    return metadata
+
+
+def effective_transition_label(kind: EditableEdgeKind, label: str | None) -> str | None:
+    if label is not None:
+        return label
+    if kind == "yes":
+        return "Да"
+    if kind == "no":
+        return "Нет"
+    return None
+
+
+def transition_source_label(kind: EditableEdgeKind, label: str | None) -> str | None:
+    if label is None:
+        return None
+    if label == effective_transition_label(kind, None):
+        return None
+    return label
+
+
+def auto_layout_entry(kind: EditableNodeKind, index: int) -> FlowSourceLayoutEntry:
+    width, height = DEFAULT_NODE_SIZES[kind]
+    row = index // AUTO_LAYOUT_COLUMNS
+    col = index % AUTO_LAYOUT_COLUMNS
+    return FlowSourceLayoutEntry(
+        x=float(120 + col * AUTO_LAYOUT_HORIZONTAL_STEP),
+        y=float(140 + row * AUTO_LAYOUT_VERTICAL_STEP),
+        w=width,
+        h=height,
+    )
+
+
+def unique_edge_id(
+    explicit_id: str | None,
+    *,
+    source: str,
+    target: str,
+    kind: EditableEdgeKind,
+    label: str | None,
+    index: int,
+    used_ids: set[str],
+) -> str:
+    if explicit_id is not None:
+        base = explicit_id
+    else:
+        parts = ["edge", source, target]
+        if kind != "default":
+            parts.append(kind)
+        if label:
+            parts.append(label)
+        parts.append(str(index + 1))
+        base = slugify(" ".join(parts)) or f"edge_{len(used_ids) + 1}"
+
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def slugify(value: str) -> str:
+    transliterated = "".join(CYRILLIC_TO_LATIN.get(char, char) for char in value.lower())
+    normalized = re.sub(r"[^a-z0-9]+", "_", transliterated).strip("_")
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized[:96]
+
+
+def prune_empty_yaml_value(value: object) -> object:
+    if isinstance(value, dict):
+        pruned: dict[str, object] = {}
+        for key, item in value.items():
+            normalized = prune_empty_yaml_value(item)
+            if normalized in (None, [], {}):
+                continue
+            pruned[key] = normalized
+        return pruned
+    if isinstance(value, list):
+        pruned_items = [prune_empty_yaml_value(item) for item in value]
+        return [item for item in pruned_items if item not in (None, [], {})]
+    return value
+
+
+def editable_node_source_payload(
+    node: EditableFlowGraphNode,
+    transitions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    metadata = dict(node.metadata)
+    source_ref = extract_prefixed_metadata(metadata, "source_ref:")
+    section = metadata.pop("source_section", None)
+    tags = source_tags_from_metadata(metadata.pop("source_tags", None))
+    return {
+        "title": node.title,
+        "kind": node.kind,
+        "section": section if isinstance(section, str) else None,
+        "responsible": node.responsible,
+        "participants": list(node.participants),
+        "approvers": list(node.approvers),
+        "duration": node.duration,
+        "note": node.note,
+        "tags": tags,
+        "source_ref": source_ref,
+        "transitions": transitions,
+        "metadata": metadata,
+    }
+
+
+def editable_sections_payload(
+    nodes: list[EditableFlowGraphNode],
+) -> dict[str, dict[str, Any]]:
+    sections: dict[str, dict[str, Any]] = {}
+    for index, node in enumerate(nodes):
+        section_id = node.metadata.get("source_section")
+        if not isinstance(section_id, str) or not section_id or section_id in sections:
+            continue
+        sections[section_id] = {
+            "title": section_id.replace("_", " ").strip().title() or section_id,
+            "order": index,
+        }
+    return sections
+
+
+def extract_prefixed_metadata(
+    metadata: dict[str, MetaValue],
+    prefix: str,
+) -> dict[str, MetaValue]:
+    extracted: dict[str, MetaValue] = {}
+    for key in list(metadata):
+        if not key.startswith(prefix):
+            continue
+        extracted[key.removeprefix(prefix)] = metadata.pop(key)
+    return extracted
+
+
+def source_tags_from_metadata(value: MetaValue) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def render_yaml_mapping(mapping: dict[str, object], *, indent: int) -> str:
+    lines: list[str] = []
+    for key, value in mapping.items():
+        prefix = " " * indent + f"{key}:"
+        if is_yaml_scalar(value):
+            lines.append(f"{prefix} {render_yaml_scalar(value)}")
+            continue
+        lines.append(prefix)
+        lines.extend(render_yaml_lines(value, indent=indent + 2))
+    return "\n".join(lines)
+
+
+def render_yaml_sequence(items: list[object], *, indent: int) -> str:
+    lines: list[str] = []
+    for item in items:
+        prefix = " " * indent + "-"
+        if is_yaml_scalar(item):
+            lines.append(f"{prefix} {render_yaml_scalar(item)}")
+            continue
+        lines.append(prefix)
+        lines.extend(render_yaml_lines(item, indent=indent + 2))
+    return "\n".join(lines)
+
+
+def render_yaml_lines(value: object, *, indent: int) -> list[str]:
+    if isinstance(value, dict):
+        return render_yaml_mapping(value, indent=indent).splitlines()
+    if isinstance(value, list):
+        return render_yaml_sequence(value, indent=indent).splitlines()
+    return [(" " * indent) + render_yaml_scalar(value)]
+
+
+def is_yaml_scalar(value: object) -> bool:
+    return not isinstance(value, (dict, list))
+
+
+def render_yaml_scalar(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def parse_yaml_subset(text: str) -> object:
+    lines = tokenize_yaml_lines(text)
+    if not lines:
+        return None
+    if lines[0].indent != 0:
+        raise ValueError(
+            f"Top-level YAML indentation must start at column 0 (line {lines[0].number})"
+        )
+
+    value, next_index = parse_yaml_block(lines, index=0, indent=0)
+    if next_index != len(lines):
+        trailing = lines[next_index]
+        raise ValueError(f"Unexpected trailing YAML content at line {trailing.number}")
+    return value
+
+
+def tokenize_yaml_lines(text: str) -> list[YamlLine]:
+    lines: list[YamlLine] = []
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        if "\t" in raw_line:
+            raise ValueError(f"Tabs are not supported in YAML indentation (line {number})")
+        without_comment = strip_yaml_comment(raw_line).rstrip()
+        if not without_comment.strip():
+            continue
+        indent = len(without_comment) - len(without_comment.lstrip(" "))
+        lines.append(
+            YamlLine(
+                number=number,
+                indent=indent,
+                content=without_comment[indent:],
+            )
+        )
+    return lines
+
+
+def strip_yaml_comment(line: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char in {"'", '"'} and not escaped:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        if char == "#" and quote is None:
+            return line[:index]
+        escaped = False
+    return line
+
+
+def parse_yaml_block(lines: list[YamlLine], *, index: int, indent: int) -> tuple[object, int]:
+    line = lines[index]
+    if line.indent != indent:
+        raise ValueError(f"Invalid YAML indentation at line {line.number}")
+    if is_yaml_sequence_line(line.content):
+        return parse_yaml_sequence(lines, index=index, indent=indent)
+    return parse_yaml_mapping(lines, index=index, indent=indent)
+
+
+def parse_yaml_mapping(
+    lines: list[YamlLine], *, index: int, indent: int
+) -> tuple[dict[str, object], int]:
+    mapping: dict[str, object] = {}
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent != indent or is_yaml_sequence_line(line.content):
+            break
+
+        key, rest = split_yaml_mapping_entry(line.content, line.number)
+        if key in mapping:
+            raise ValueError(f"Duplicate YAML key '{key}' at line {line.number}")
+        index += 1
+        if rest:
+            mapping[key] = parse_yaml_scalar(rest)
+            continue
+
+        if index < len(lines) and lines[index].indent > indent:
+            value, index = parse_yaml_block(lines, index=index, indent=lines[index].indent)
+            mapping[key] = value
+            continue
+        mapping[key] = None
+
+    return mapping, index
+
+
+def parse_yaml_sequence(
+    lines: list[YamlLine], *, index: int, indent: int
+) -> tuple[list[object], int]:
+    items: list[object] = []
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent != indent or not is_yaml_sequence_line(line.content):
+            break
+
+        item_text = line.content[1:].strip()
+        index += 1
+        if not item_text:
+            if index < len(lines) and lines[index].indent > indent:
+                item, index = parse_yaml_block(lines, index=index, indent=lines[index].indent)
+            else:
+                item = None
+            items.append(item)
+            continue
+
+        if looks_like_yaml_mapping_entry(item_text):
+            item, index = parse_yaml_sequence_mapping_item(
+                lines,
+                index=index,
+                indent=indent,
+                first_entry=item_text,
+                line_number=line.number,
+            )
+            items.append(item)
+            continue
+
+        items.append(parse_yaml_scalar(item_text))
+    return items, index
+
+
+def parse_yaml_sequence_mapping_item(
+    lines: list[YamlLine],
+    *,
+    index: int,
+    indent: int,
+    first_entry: str,
+    line_number: int,
+) -> tuple[dict[str, object], int]:
+    item: dict[str, object] = {}
+    key, rest = split_yaml_mapping_entry(first_entry, line_number)
+    if rest:
+        item[key] = parse_yaml_scalar(rest)
+    elif index < len(lines) and lines[index].indent > indent + 1:
+        value, index = parse_yaml_block(lines, index=index, indent=lines[index].indent)
+        item[key] = value
+    else:
+        item[key] = None
+
+    item_indent = indent + 2
+    while index < len(lines):
+        line = lines[index]
+        if line.indent <= indent:
+            break
+        if line.indent != item_indent or is_yaml_sequence_line(line.content):
+            break
+
+        key, rest = split_yaml_mapping_entry(line.content, line.number)
+        if key in item:
+            raise ValueError(f"Duplicate YAML key '{key}' at line {line.number}")
+        index += 1
+        if rest:
+            item[key] = parse_yaml_scalar(rest)
+            continue
+
+        if index < len(lines) and lines[index].indent > item_indent:
+            value, index = parse_yaml_block(lines, index=index, indent=lines[index].indent)
+            item[key] = value
+            continue
+        item[key] = None
+    return item, index
+
+
+def split_yaml_mapping_entry(content: str, line_number: int) -> tuple[str, str]:
+    separator_index = find_unquoted(content, ":")
+    if separator_index <= 0:
+        raise ValueError(f"Invalid YAML mapping entry at line {line_number}")
+    key = content[:separator_index].strip()
+    if not key:
+        raise ValueError(f"Empty YAML key at line {line_number}")
+    rest = content[separator_index + 1 :].strip()
+    return key, rest
+
+
+def looks_like_yaml_mapping_entry(value: str) -> bool:
+    return find_unquoted(value, ":") > 0
+
+
+def is_yaml_sequence_line(value: str) -> bool:
+    return value == "-" or value.startswith("- ")
+
+
+def parse_yaml_scalar(value: str) -> object:
+    if value.startswith("[") and value.endswith("]"):
+        return parse_yaml_inline_list(value[1:-1])
+    if value in {"null", "Null", "NULL", "~"}:
+        return None
+    if value in {"true", "True", "TRUE"}:
+        return True
+    if value in {"false", "False", "FALSE"}:
+        return False
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[-+]?\d+\.\d+", value):
+        return float(value)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return unquote_yaml_string(value)
+    return value
+
+
+def parse_yaml_inline_list(value: str) -> list[object]:
+    content = value.strip()
+    if not content:
+        return []
+    return [parse_yaml_scalar(part.strip()) for part in split_unquoted(content, ",")]
+
+
+def split_unquoted(value: str, separator: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    depth = 0
+
+    for index, char in enumerate(value):
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char in {"'", '"'} and not escaped:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None:
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth -= 1
+            elif char == separator and depth == 0:
+                parts.append(value[start:index])
+                start = index + 1
+        escaped = False
+    parts.append(value[start:])
+    return parts
+
+
+def find_unquoted(value: str, target: str) -> int:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char in {"'", '"'} and not escaped:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif char == target and quote is None:
+            return index
+        escaped = False
+    return -1
+
+
+def unquote_yaml_string(value: str) -> str:
+    quote = value[0]
+    body = value[1:-1]
+    if quote == "'":
+        return body.replace("''", "'")
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return body

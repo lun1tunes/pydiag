@@ -1,54 +1,197 @@
 # pydiag
 
-Прототип Streamlit-приложения для карты процесса планирования и бурения скважины.
+Streamlit-приложение для интерактивной карты процесса планирования и бурения скважин.
 
-## Запуск на Windows
+Схема рендерится локальным bidi-компонентом из репозитория. `node`, `npm`,
+`poetry`, `uv` и отдельный frontend build не нужны. Рабочий сценарий проекта:
+обычный `.venv` и установка зависимостей из `requirements*.txt`.
 
-PowerShell:
+## Быстрый запуск
+
+Windows PowerShell:
 
 ```powershell
 py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\streamlit.exe run app.py
 ```
 
-CMD:
-
-```bat
-py -3.13 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\streamlit.exe run app.py
-```
-
-## Запуск на Linux/macOS
+Linux/macOS:
 
 ```bash
 python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/streamlit run app.py
 ```
 
-Если в системе нет `python3.13-venv`, окружение можно создать любым инструментом, который создает обычный `.venv`, а зависимости все равно ставятся из `requirements.txt`.
+Для разработки и тестов:
 
-Все файловые пути внутри приложения обрабатываются через `pathlib`, атомарная запись использует `os.replace`, а POSIX-only `fsync` директории автоматически пропускается на Windows. Запись `wells.json` дополнительно защищена lock-файлом рядом с JSON: на Windows используется `msvcrt.locking`, на Linux/macOS — `fcntl.flock`.
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
 
-## Данные
+## Каноническая структура данных
 
-- `data/flow_graph.json` содержит узлы, связи, координаты и ответственных.
-- `data/wells.json` содержит скважины, их `current_node_id` и историю переходов.
+Единственная runtime-папка проекта: `data/`.
 
-Узлы схемы используют компактный контракт: `type`, `text`, `position`, `size`,
-опционально `responsible`, `time`, `metadata`. Поддерживаемые типы:
-`process`, `decision_diamond`, `decision_card`, `database`, `input_data`, `event`.
-Для процессов и решений `responsible` обязателен и задается списком: первый
-элемент задает основной цвет блока, остальные отображаются короткими боковыми
-бейджами. `time` задается строкой в формате `40 minutes`, `10 hours` или
-`2 days`.
+```text
+data/
+  flow_sources/
+    flow_source.yaml
+    flow_source.v0001.yaml
+    flow_source.v0002.yaml
+  real_true_data.json
+  flow_graph.json
+  wells.yaml
+```
 
-Связи используют четыре типа `kind`: `usual` — обычная черная стрелка,
-`dashed` — серая пунктирная, `yes` — стрелка «Да», `no` — стрелка «Нет».
+Смысл файлов:
 
-Авторизация настраивается в `.streamlit/secrets.toml`:
+- `data/flow_sources/flow_source.yaml`:
+  главный человекочитаемый source-of-truth графа.
+- `data/flow_sources/flow_source.vNNNN.yaml`:
+  архивные версии source YAML.
+- `data/real_true_data.json`:
+  сырой импорт из Figma.
+- `data/flow_graph.json`:
+  materialized/generated runtime-граф для быстрого чтения приложением.
+- `data/wells.yaml`:
+  текущее состояние скважин.
+
+Главное правило:
+
+- редактируемым источником схемы считается `flow_source.yaml`;
+- `flow_graph.json` не является отдельным источником истины;
+- `real_true_data.json` нужен для импорта и пересборки source-схемы;
+- `wells.yaml` хранит только runtime-состояние скважин.
+
+Каталог `data/` полностью игнорируется git и не попадает в runtime bundle.
+
+## Форматы входных данных
+
+Поддерживаются два источника схемы:
+
+1. `flow-source/1.0` YAML.
+2. Figma-like JSON skeleton из `real_true_data.json`.
+
+### Нормальный рабочий формат
+
+Пример `flow_source.yaml`:
+
+```yaml
+schema_version: flow-source/1.0
+graph_id: pilot-drilling
+title: Pilot drilling flow
+version: 7
+responsibles:
+  planning:
+    label: Planning
+    type: team
+    fill: "#dcecff"
+    border: "#356ca8"
+    text: "#17314f"
+nodes:
+  review_data:
+    title: Проверка комплекта данных
+    kind: process
+    responsible: planning
+    participants: [geology]
+    approvers: [hse]
+    duration: 40m
+    transitions:
+      - to: data_complete
+  data_complete:
+    title: Данные полные?
+    kind: decision_diamond
+    responsible: planning
+    transitions:
+      - to: well_design
+        kind: yes
+      - to: review_data
+        kind: no
+layout:
+  review_data:
+    x: 380
+    y: 60
+    w: 320
+    h: 120
+```
+
+### Сырой Figma JSON
+
+Импорт поддерживает:
+
+- `TEXT`
+- `SHAPE_WITH_TEXT`
+- `CONNECTOR`
+
+Семантика может приходить двумя путями:
+
+- через явные `flowNode` / `flowEdge`;
+- через fallback metadata в поле `name`.
+
+Для `TEXT` или `SHAPE_WITH_TEXT` ожидаются такие смысловые поля:
+
+- `flowNode.id`
+- `flowNode.type`
+- `flowNode.responsibles`
+- `flowNode.time`
+
+Для `CONNECTOR`:
+
+- `flowEdge.id`
+- `flowEdge.kind`
+- `flowEdge.source`
+- `flowEdge.target`
+- `flowEdge.label`
+
+Если `source/target` не заданы явно, importer пытается восстановить связь по
+геометрии.
+
+## Импорт и материализация
+
+Из сырого Figma JSON в нормальный YAML:
+
+```bash
+.venv/bin/python scripts/materialize_flow_source.py
+```
+
+Из `flow_source.yaml` в materialized runtime-граф:
+
+```bash
+.venv/bin/python scripts/materialize_flow_graph.py
+```
+
+Нормализация старого skeleton JSON:
+
+```bash
+.venv/bin/python scripts/normalize_flow_graph_skeleton.py
+```
+
+Если нужно использовать внешнюю папку с данными, доступны env-переменные:
+
+- `PYDIAG_SOURCE_GRAPH_PATH`
+- `PYDIAG_RAW_GRAPH_PATH`
+- `PYDIAG_GRAPH_PATH`
+- `PYDIAG_WELLS_PATH`
+
+Пример:
+
+```bash
+PYDIAG_SOURCE_GRAPH_PATH=/opt/pydiag/flow_sources/flow_source.yaml \
+PYDIAG_GRAPH_PATH=/opt/pydiag/flow_graph.json \
+PYDIAG_WELLS_PATH=/opt/pydiag/wells.yaml \
+.venv/bin/streamlit run app.py
+```
+
+## UI и авторизация
+
+Авторизация настраивается в `.streamlit/secrets.toml`.
+Шаблон лежит в `.streamlit/secrets.example.toml`.
+
+Минимальный пример:
 
 ```toml
 [users.admin]
@@ -56,110 +199,106 @@ name = "Администратор"
 password = "replace-me-strong"
 ```
 
-Можно добавить несколько пользователей:
+`super_admin` дополнительно может:
 
-```toml
-[users.planner]
-name = "Иван Планировщик"
-password = "another-strong-password"
-```
+- включать режим редактирования расположения карточек;
+- сохранять layout обратно в live `flow_source.yaml`;
+- создавать архивную версию source YAML.
 
-После входа имя пользователя показывается сверху в боковой панели. В production
-пароли должны быть заданы явно и быть не короче 8 символов.
-Для локальной разработки можно временно включить небезопасный fallback:
+## Архитектура
 
-PowerShell:
+Проект специально разделен на слои.
 
-```powershell
-$env:PYDIAG_ALLOW_INSECURE_ADMIN = "1"
-.\.venv\Scripts\streamlit.exe run app.py
-```
+- `src/pydiag/domain/`
+  Pydantic-модели, инварианты графа, переходы скважин, pure domain logic.
+- `src/pydiag/application/`
+  use-case слой: загрузка документов, состояние схемы, persistence orchestration,
+  редактирование layout, admin-сценарии.
+- `src/pydiag/presentation/`
+  Streamlit UI, sidebar, inspector, auth, screen composition.
+- `src/pydiag/infrastructure/`
+  файловое хранение, atomic writes, lock-файлы, импорт Figma, path/env resolution.
+- `src/pydiag/rendering/`
+  canvas payload, layout/routing, HTML/CSS/JS локального компонента.
+- `src/pydiag/common/`
+  общие примитивы и ошибки.
 
-Linux/macOS:
+Правила зависимостей:
 
-```bash
-PYDIAG_ALLOW_INSECURE_ADMIN=1 .venv/bin/streamlit run app.py
-```
+- `domain` не знает про Streamlit, JSON и локальные компоненты;
+- `application` знает про `domain`, но не про Streamlit и файловый I/O;
+- `presentation` не должна ходить в storage напрямую;
+- `infrastructure` не зависит от presentation;
+- `rendering` не должен тащить application-flow или storage.
 
-Пути к данным можно переопределить переменными окружения:
+`app.py` остается тонким entrypoint. Новую логику туда не складываем.
 
-PowerShell:
+## Правила разработки
 
-```powershell
-$env:PYDIAG_GRAPH_PATH = "C:\pydiag-data\flow_graph.json"
-$env:PYDIAG_WELLS_PATH = "C:\pydiag-data\wells.json"
-.\.venv\Scripts\streamlit.exe run app.py
-```
+Куда класть код:
 
-Linux/macOS:
+- бизнес-правила и инварианты: `domain/`
+- session/use-case orchestration: `application/`
+- Streamlit rendering и формы: `presentation/`
+- JSON/YAML I/O, locks, import/export: `infrastructure/`
+- canvas/layout/render helpers: `rendering/`
 
-```bash
-PYDIAG_GRAPH_PATH=/path/to/flow_graph.json
-PYDIAG_WELLS_PATH=/path/to/wells.json
-.venv/bin/streamlit run app.py
-```
+Практические правила:
 
-## Тесты
+- предпочитать маленькие owner-модули вместо разрастания `app.py` и крупных runtime-файлов;
+- если логика pure и переиспользуемая, выносить ее рядом с owner-модулем;
+- presentation-рендереры не должны сами выбирать low-level file operations;
+- новые импорты делать через пакеты `pydiag.domain`, `pydiag.application`,
+  `pydiag.presentation`, `pydiag.infrastructure`, `pydiag.rendering`.
 
-Установка dev-зависимостей:
+## Проверки качества
 
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-```
-
-Linux/macOS:
-
-```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
-```
-
-Быстрый прогон на любой платформе:
-
-```powershell
-python scripts/venv_run.py -m pytest
-```
-
-Полный quality gate на любой платформе:
-
-```powershell
-python scripts/venv_run.py scripts/quality.py
-```
-
-Эквивалентные Unix-команды:
+Быстрый прогон тестов:
 
 ```bash
 .venv/bin/python -m pytest
-.venv/bin/python -m pytest --cov=src/pydiag --cov-report=term-missing --cov-fail-under=85
 ```
 
-В набор входят unit-тесты доменной модели, сервисов переходов и JSON-хранилища, а также Streamlit UI-интеграционные тесты через `streamlit.testing.v1.AppTest`. UI-тесты подменяют `PYDIAG_GRAPH_PATH` и `PYDIAG_WELLS_PATH`, поэтому реальные `data/*.json` не изменяются.
-
-Линт на любой платформе:
-
-```powershell
-python scripts/venv_run.py -m ruff check .
-python scripts/venv_run.py -m ruff format --check .
-```
-
-Эквивалентные Unix-команды:
+Полный quality gate:
 
 ```bash
-.venv/bin/python -m ruff check .
-.venv/bin/python -m ruff format --check .
+.venv/bin/python scripts/quality.py
 ```
 
-## Проверка JSON
+Что делает `scripts/quality.py`:
 
-Windows:
+- проверяет repository safety;
+- валидирует fixture-данные;
+- компилирует Python-файлы;
+- запускает `ruff check` и `ruff format --check` с фиксированными параметрами;
+- запускает `pytest` с покрытием.
 
-```powershell
-python scripts/venv_run.py scripts/validate_data.py
-```
+## Runtime bundle
 
-Linux/macOS:
+Сборка runtime bundle:
 
 ```bash
-.venv/bin/python scripts/validate_data.py
+python scripts/project_pack.py pack
 ```
+
+Распаковка:
+
+```bash
+python scripts/project_pack.py unpack --archive dist/project_bundle.txt
+```
+
+Bundle включает весь код приложения, runtime-скрипты и безопасные конфиги,
+достаточные для запуска и локальной генерации `data/` на месте. `.venv`,
+секреты, runtime-данные из `data/` и unsafe-входы вроде symlink или
+неразрешенных runtime-asset файлов туда не попадают. Это дополнительно
+проверяет `scripts/verify_repository_safety.py`.
+
+## Production checklist
+
+Состояние можно считать production-ready, если выполнено следующее:
+
+1. Реальные данные лежат в `data/` или во внешнем каталоге по env-переменным.
+2. `data/flow_sources/flow_source.yaml` валиден и соответствует `wells.yaml`.
+3. Запускаются `scripts/materialize_flow_graph.py` и `scripts/quality.py`.
+4. Настроен `.streamlit/secrets.toml` с нормальными паролями.
+5. В git не попали `data/` и `.streamlit/secrets.toml`.
