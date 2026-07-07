@@ -281,10 +281,12 @@ password = "replace-me-strong"
 python scripts/project_pack.py pack
 ```
 
+По умолчанию архив сохраняется в корень проекта в `all.txt`.
+
 Распаковка:
 
 ```bash
-python scripts/project_pack.py unpack --archive dist/project_bundle.txt
+python scripts/project_pack.py unpack --archive all.txt
 ```
 
 Bundle включает весь код приложения, runtime-скрипты и безопасные конфиги,
