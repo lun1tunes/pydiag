@@ -23,7 +23,7 @@ name = "Planner"
 is_admin = true
 
 ===END_FILE===
-===BEGIN_FILE===	README.md	7704
+===BEGIN_FILE===	README.md	7931
 # pydiag
 
 Streamlit-приложение для интерактивной карты процесса планирования и бурения скважин.
@@ -317,6 +317,11 @@ python scripts/project_pack.py pack
 python scripts/project_pack.py unpack --archive all.txt
 ```
 
+После `unpack` создаётся каркас `data/wells.example.yaml`.
+Его можно скопировать в `data/wells.yaml` и быстро заполнить вручную.
+Если `data/wells.yaml` не создать, приложение сгенерирует пустой шаблон само
+при первом запуске.
+
 Bundle включает весь код приложения, runtime-скрипты и безопасные конфиги,
 достаточные для запуска и локальной генерации `data/` на месте. `.venv`,
 секреты, runtime-данные из `data/` и unsafe-входы вроде symlink или
@@ -543,16 +548,44 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	8283
+===BEGIN_FILE===	scripts/project_pack.py	9483
 #!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 from pathlib import Path, PurePosixPath
+from textwrap import dedent
 
 ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
+WELLS_EXAMPLE_REL_PATH = Path("data") / "wells.example.yaml"
+WELLS_EXAMPLE_TEMPLATE = (
+    dedent(
+        """
+        schema_version: "1.0"
+        version: 1
+        wells: []
+        # Copy this file to data/wells.yaml and replace the example below with real wells:
+        # wells:
+        #   - id: well_1
+        #     name: Скв. 1
+        #     current_node_id: replace_with_graph_node_id
+        #     history:
+        #       - ts: "2026-05-08T08:00:00Z"
+        #         node_id: replace_with_graph_node_id
+        #         action: create
+        #         to_node_id: replace_with_graph_node_id
+        #         by: system
+        #         comment: initial placement
+        #     metadata:
+        #       field: Example field
+        #       rig: BU-01
+        #     is_archived: false
+        """
+    ).strip()
+    + "\n"
+)
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -737,6 +770,13 @@ def pack(root: Path, output_file: Path) -> None:
     print(f"Packed {len(files)} files into {output_file}")
 
 
+def ensure_runtime_scaffold(root: Path) -> None:
+    wells_example_path = root / WELLS_EXAMPLE_REL_PATH
+    if not wells_example_path.exists():
+        wells_example_path.parent.mkdir(parents=True, exist_ok=True)
+        wells_example_path.write_text(WELLS_EXAMPLE_TEMPLATE, encoding="utf-8")
+
+
 def unpack(root: Path, input_file: Path) -> None:
     if not input_file.exists():
         raise FileNotFoundError(f"Archive file not found: {input_file}")
@@ -785,6 +825,7 @@ def unpack(root: Path, input_file: Path) -> None:
             target.write_text(content, encoding="utf-8")
             restored += 1
 
+    ensure_runtime_scaffold(root)
     print(f"Restored {restored} files from {input_file}")
 
 
@@ -1193,7 +1234,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/documents_gateway.py	971
+===BEGIN_FILE===	src/pydiag/application/documents_gateway.py	1026
 from __future__ import annotations
 
 from typing import Protocol
@@ -1209,6 +1250,8 @@ class DocumentsGateway(Protocol):
         self,
         graph_version_id: str | None = None,
     ) -> tuple[FlowGraphDocument, WellsDocument]: ...
+
+    def ensure_live_graph_source(self) -> object: ...
 
     def save_wells(
         self,
@@ -5605,7 +5648,7 @@ def unquote_yaml_string(value: str) -> str:
         return body
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/graph_versions.py	4035
+===BEGIN_FILE===	src/pydiag/infrastructure/graph_versions.py	4872
 from __future__ import annotations
 
 import re
@@ -5632,10 +5675,12 @@ from .storage_paths import (
     graph_version_paths,
     next_graph_version_path,
     preferred_graph_source_path,
+    source_graph_path,
 )
 
 __all__ = [
     "can_materialize_graph_version",
+    "ensure_live_graph_source",
     "GraphVersionInfo",
     "list_graph_versions",
     "materialize_new_graph_version_from_raw_source",
@@ -5714,6 +5759,31 @@ def materialized_flow_source_payload(source: Path) -> dict[str, object]:
     )
 
 
+def ensure_live_graph_source(
+    source_path: str | Path | None = None,
+    target_path: str | Path | None = None,
+) -> Path:
+    target = Path(target_path or source_graph_path())
+    if target.exists():
+        return target
+
+    resolved_source = source_path or preferred_graph_source_path()
+    if resolved_source is None:
+        raise FileNotFoundError("Graph source not found")
+    source = Path(resolved_source)
+    if source.resolve() == target.resolve():
+        if target.exists():
+            return target
+        raise FileNotFoundError(f"Graph source not found: {source}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_text_atomic(
+        target,
+        dump_flow_source_payload(materialized_flow_source_payload(source)),
+    )
+    return target
+
+
 def materialize_new_graph_version_from_raw_source(
     source_path: str | Path | None = None,
 ) -> GraphVersionInfo:
@@ -5735,7 +5805,7 @@ def materialize_new_graph_version_from_raw_source(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/json_documents_gateway.py	3182
+===BEGIN_FILE===	src/pydiag/infrastructure/json_documents_gateway.py	3390
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -5747,6 +5817,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 from .graph_versions import (
     can_materialize_graph_version,
+    ensure_live_graph_source,
     list_graph_versions,
     materialize_new_graph_version_from_raw_source,
     resolve_graph_version_path,
@@ -5769,6 +5840,7 @@ class JsonDocumentsGateway:
     resolve_graph_version_path_fn: Callable[[str | None], Path] = resolve_graph_version_path
     list_graph_versions_fn: Callable[[], list[GraphVersionInfo]] = list_graph_versions
     can_materialize_graph_version_fn: Callable[[], bool] = can_materialize_graph_version
+    ensure_live_graph_source_fn: Callable[[], Path] = ensure_live_graph_source
     materialize_graph_version_fn: Callable[[], GraphVersionInfo] = (
         materialize_new_graph_version_from_raw_source
     )
@@ -5789,6 +5861,9 @@ class JsonDocumentsGateway:
         return self.load_documents_fn(
             graph_doc_path=self.resolve_graph_version_path_fn(graph_version_id)
         )
+
+    def ensure_live_graph_source(self) -> Path:
+        return self.ensure_live_graph_source_fn()
 
     def save_wells(
         self,
@@ -6062,12 +6137,11 @@ def release_file_lock(lock_file: BinaryIO) -> None:
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage_loading.py	3974
+===BEGIN_FILE===	src/pydiag/infrastructure/storage_loading.py	3277
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from textwrap import dedent
 
 from pydantic import ValidationError
 
@@ -6087,8 +6161,10 @@ from .flow_source_graph import (
     is_flow_source_payload,
     load_structured_payload,
 )
-from .storage_io import save_text_atomic
-from .storage_materialization import materialize_flow_graph_from_source
+from .storage_materialization import (
+    ensure_wells_doc_exists as ensure_wells_doc_bootstrap,
+    materialize_flow_graph_from_source,
+)
 from .storage_paths import (
     GRAPH_PATH,
     configured_graph_path,
@@ -6102,28 +6178,6 @@ __all__ = [
     "load_graph_doc",
     "load_wells_doc",
 ]
-
-EMPTY_WELLS_YAML_TEMPLATE = dedent(
-    """
-    schema_version: "1.0"
-    version: 1
-    wells: []
-    # Replace the empty list above with entries like:
-    # wells:
-    #   - id: well_1
-    #     name: Скв. 1
-    #     current_node_id: intake_data
-    #     history:
-    #       - ts: "2026-05-08T08:00:00Z"
-    #         node_id: intake_data
-    #         action: create
-    #         to_node_id: intake_data
-    #         by: system
-    #         comment: initial placement
-    #     metadata: {}
-    #     is_archived: false
-    """
-).strip() + "\n"
 
 
 def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
@@ -6150,7 +6204,7 @@ def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
 
 def load_wells_doc(path: str | Path | None = None) -> WellsDocument:
     target = Path(path or wells_path())
-    ensure_wells_doc_exists(target)
+    ensure_wells_doc_bootstrap(target)
     raw = target.read_bytes()
     try:
         return WellsDocument.model_validate_json(raw, strict=True)
@@ -6170,14 +6224,6 @@ def load_documents(
     wells = load_wells_doc(wells_doc_path)
     validate_wells_against_graph(graph, wells)
     return graph, wells
-
-
-def ensure_wells_doc_exists(path: Path) -> None:
-    if path.exists():
-        return
-    save_text_atomic(path, EMPTY_WELLS_YAML_TEMPLATE)
-
-
 def resolve_graph_read_path(path: str | Path | None) -> Path:
     if path is not None:
         return Path(path)
@@ -6196,10 +6242,11 @@ def resolve_graph_read_path(path: str | Path | None) -> Path:
     return graph_path()
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage_materialization.py	2221
+===BEGIN_FILE===	src/pydiag/infrastructure/storage_materialization.py	2995
 from __future__ import annotations
 
 from pathlib import Path
+from textwrap import dedent
 
 from pydiag.domain.models import FlowGraphDocument
 
@@ -6211,7 +6258,7 @@ from .flow_source_graph import (
     is_flow_source_payload,
     load_structured_payload,
 )
-from .storage_io import save_json_atomic
+from .storage_io import save_json_atomic, save_text_atomic
 from .storage_paths import (
     configured_graph_path,
     graph_path,
@@ -6219,9 +6266,32 @@ from .storage_paths import (
 )
 
 __all__ = [
+    "ensure_wells_doc_exists",
     "materialize_flow_graph_from_raw_source",
     "materialize_flow_graph_from_source",
 ]
+
+EMPTY_WELLS_YAML_TEMPLATE = dedent(
+    """
+    schema_version: "1.0"
+    version: 1
+    wells: []
+    # Replace the empty list above with entries like:
+    # wells:
+    #   - id: well_1
+    #     name: Скв. 1
+    #     current_node_id: intake_data
+    #     history:
+    #       - ts: "2026-05-08T08:00:00Z"
+    #         node_id: intake_data
+    #         action: create
+    #         to_node_id: intake_data
+    #         by: system
+    #         comment: initial placement
+    #     metadata: {}
+    #     is_archived: false
+    """
+).strip() + "\n"
 
 
 def materialize_flow_graph_from_source(
@@ -6258,6 +6328,12 @@ def materialize_flow_graph_from_raw_source(
     target_path: str | Path | None = None,
 ) -> FlowGraphDocument:
     return materialize_flow_graph_from_source(source_path=source_path, target_path=target_path)
+
+
+def ensure_wells_doc_exists(path: Path) -> None:
+    if path.exists():
+        return
+    save_text_atomic(path, EMPTY_WELLS_YAML_TEMPLATE)
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/infrastructure/storage_paths.py	3373
@@ -8155,7 +8231,7 @@ class StreamlitAppRuntime:
             self._render_inspector(graph, wells, selected_id)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	7074
+===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	8009
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -8242,20 +8318,29 @@ class StreamlitSessionCoordinator:
         return None
 
     def select_graph_version(self, version_id: str | None) -> None:
-        if version_id == self.selected_graph_version_id():
+        previous_version_id = self.selected_graph_version_id()
+        if version_id == previous_version_id:
             return
-        if version_id is None:
-            self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
-        else:
-            self.session_state[SELECTED_GRAPH_VERSION_KEY] = version_id
-        self.load_app_data(force=True)
+        self._set_selected_graph_version(version_id)
+        try:
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self._set_selected_graph_version(previous_version_id)
+            self.st_module.error(f"Не удалось переключить версию схемы: {exc}")
+            return
         self.flash("Версия схемы переключена")
         self.st_module.rerun()
 
     def materialize_graph_version(self) -> None:
-        version = self.documents_gateway.materialize_graph_version()
-        self.session_state[SELECTED_GRAPH_VERSION_KEY] = version.id
-        self.load_app_data(force=True)
+        previous_version_id = self.selected_graph_version_id()
+        try:
+            version = self.documents_gateway.materialize_graph_version()
+            self._set_selected_graph_version(version.id)
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self._set_selected_graph_version(previous_version_id)
+            self.st_module.error(f"Не удалось сохранить версию source YAML: {exc}")
+            return
         self.flash(f"Создана новая версия source YAML: {version.label}")
         self.st_module.rerun()
 
@@ -8274,7 +8359,13 @@ class StreamlitSessionCoordinator:
             self.st_module.success(data.message)
 
     def reload_data(self) -> None:
-        self.load_app_data(force=True)
+        try:
+            if self.selected_graph_version_id() is None:
+                self.documents_gateway.ensure_live_graph_source()
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self.st_module.error(f"Не удалось перечитать данные: {exc}")
+            return
         self.flash("Данные перечитаны")
         self.st_module.rerun()
 
@@ -8358,6 +8449,12 @@ class StreamlitSessionCoordinator:
             return
         if should_rerun:
             self.st_module.rerun()
+
+    def _set_selected_graph_version(self, version_id: str | None) -> None:
+        if version_id is None:
+            self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
+            return
+        self.session_state[SELECTED_GRAPH_VERSION_KEY] = version_id
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/presentation/selection.py	1200

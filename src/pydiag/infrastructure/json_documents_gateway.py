@@ -9,6 +9,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 from .graph_versions import (
     can_materialize_graph_version,
+    ensure_live_graph_source,
     list_graph_versions,
     materialize_new_graph_version_from_raw_source,
     resolve_graph_version_path,
@@ -31,6 +32,7 @@ class JsonDocumentsGateway:
     resolve_graph_version_path_fn: Callable[[str | None], Path] = resolve_graph_version_path
     list_graph_versions_fn: Callable[[], list[GraphVersionInfo]] = list_graph_versions
     can_materialize_graph_version_fn: Callable[[], bool] = can_materialize_graph_version
+    ensure_live_graph_source_fn: Callable[[], Path] = ensure_live_graph_source
     materialize_graph_version_fn: Callable[[], GraphVersionInfo] = (
         materialize_new_graph_version_from_raw_source
     )
@@ -51,6 +53,9 @@ class JsonDocumentsGateway:
         return self.load_documents_fn(
             graph_doc_path=self.resolve_graph_version_path_fn(graph_version_id)
         )
+
+    def ensure_live_graph_source(self) -> Path:
+        return self.ensure_live_graph_source_fn()
 
     def save_wells(
         self,

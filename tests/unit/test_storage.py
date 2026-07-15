@@ -10,6 +10,7 @@ from pydiag.domain import move_well_to_node, well_by_id
 from pydiag.infrastructure.flow_source_graph import load_structured_payload
 from pydiag.infrastructure.graph_versions import (
     can_materialize_graph_version,
+    ensure_live_graph_source,
     materialize_new_graph_version_from_raw_source,
 )
 from pydiag.infrastructure.storage_io import fsync_parent_dir, json_file_lock
@@ -462,6 +463,76 @@ def test_materialize_new_graph_version_from_raw_source_writes_versioned_yaml(
     assert payload["version"] == 3
     assert payload["nodes"]["start"]["title"] == "Start"
     assert payload["nodes"]["end"]["title"] == "End"
+
+
+def test_ensure_live_graph_source_materializes_live_yaml_from_raw_source(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    flow_sources_dir = tmp_path / "flow_sources"
+    target = flow_sources_dir / "flow_source.yaml"
+    raw = tmp_path / "real_true_data.json"
+    raw.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", target)
+    monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", raw)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
+
+    created = ensure_live_graph_source()
+    payload = load_structured_payload(created.read_bytes())
+
+    assert created == target
+    assert created.exists() is True
+    assert payload["schema_version"] == "flow-source/1.0"
+    assert payload["version"] == 3
+    assert payload["nodes"]["start"]["title"] == "Start"
+    assert payload["nodes"]["end"]["title"] == "End"
+
+
+def test_ensure_live_graph_source_preserves_existing_live_yaml(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    flow_sources_dir = tmp_path / "flow_sources"
+    target = flow_sources_dir / "flow_source.yaml"
+    raw = tmp_path / "real_true_data.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = flow_source_yaml()
+    target.write_text(original, encoding="utf-8")
+    raw.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", target)
+    monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", raw)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
+
+    created = ensure_live_graph_source()
+
+    assert created == target
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_ensure_live_graph_source_raises_when_no_source_payload_is_available(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    target = tmp_path / "flow_sources" / "flow_source.yaml"
+    raw = tmp_path / "real_true_data.json"
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", target)
+    monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", raw)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
+
+    with pytest.raises(FileNotFoundError, match="Graph source not found"):
+        ensure_live_graph_source()
 
 
 def test_materialize_flow_graph_from_raw_source_creates_editable_graph(tmp_path) -> None:

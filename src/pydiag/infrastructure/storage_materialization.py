@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from textwrap import dedent
 
 from pydiag.domain.models import FlowGraphDocument
 
@@ -12,7 +13,7 @@ from .flow_source_graph import (
     is_flow_source_payload,
     load_structured_payload,
 )
-from .storage_io import save_json_atomic
+from .storage_io import save_json_atomic, save_text_atomic
 from .storage_paths import (
     configured_graph_path,
     graph_path,
@@ -20,9 +21,32 @@ from .storage_paths import (
 )
 
 __all__ = [
+    "ensure_wells_doc_exists",
     "materialize_flow_graph_from_raw_source",
     "materialize_flow_graph_from_source",
 ]
+
+EMPTY_WELLS_YAML_TEMPLATE = dedent(
+    """
+    schema_version: "1.0"
+    version: 1
+    wells: []
+    # Replace the empty list above with entries like:
+    # wells:
+    #   - id: well_1
+    #     name: Скв. 1
+    #     current_node_id: intake_data
+    #     history:
+    #       - ts: "2026-05-08T08:00:00Z"
+    #         node_id: intake_data
+    #         action: create
+    #         to_node_id: intake_data
+    #         by: system
+    #         comment: initial placement
+    #     metadata: {}
+    #     is_archived: false
+    """
+).strip() + "\n"
 
 
 def materialize_flow_graph_from_source(
@@ -59,3 +83,9 @@ def materialize_flow_graph_from_raw_source(
     target_path: str | Path | None = None,
 ) -> FlowGraphDocument:
     return materialize_flow_graph_from_source(source_path=source_path, target_path=target_path)
+
+
+def ensure_wells_doc_exists(path: Path) -> None:
+    if path.exists():
+        return
+    save_text_atomic(path, EMPTY_WELLS_YAML_TEMPLATE)

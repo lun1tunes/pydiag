@@ -3,10 +3,38 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path, PurePosixPath
+from textwrap import dedent
 
 ARCHIVE_FILE = "all.txt"
 BEGIN = "===BEGIN_FILE==="
 END = "===END_FILE==="
+WELLS_EXAMPLE_REL_PATH = Path("data") / "wells.example.yaml"
+WELLS_EXAMPLE_TEMPLATE = (
+    dedent(
+        """
+        schema_version: "1.0"
+        version: 1
+        wells: []
+        # Copy this file to data/wells.yaml and replace the example below with real wells:
+        # wells:
+        #   - id: well_1
+        #     name: Скв. 1
+        #     current_node_id: replace_with_graph_node_id
+        #     history:
+        #       - ts: "2026-05-08T08:00:00Z"
+        #         node_id: replace_with_graph_node_id
+        #         action: create
+        #         to_node_id: replace_with_graph_node_id
+        #         by: system
+        #         comment: initial placement
+        #     metadata:
+        #       field: Example field
+        #       rig: BU-01
+        #     is_archived: false
+        """
+    ).strip()
+    + "\n"
+)
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -191,6 +219,13 @@ def pack(root: Path, output_file: Path) -> None:
     print(f"Packed {len(files)} files into {output_file}")
 
 
+def ensure_runtime_scaffold(root: Path) -> None:
+    wells_example_path = root / WELLS_EXAMPLE_REL_PATH
+    if not wells_example_path.exists():
+        wells_example_path.parent.mkdir(parents=True, exist_ok=True)
+        wells_example_path.write_text(WELLS_EXAMPLE_TEMPLATE, encoding="utf-8")
+
+
 def unpack(root: Path, input_file: Path) -> None:
     if not input_file.exists():
         raise FileNotFoundError(f"Archive file not found: {input_file}")
@@ -239,6 +274,7 @@ def unpack(root: Path, input_file: Path) -> None:
             target.write_text(content, encoding="utf-8")
             restored += 1
 
+    ensure_runtime_scaffold(root)
     print(f"Restored {restored} files from {input_file}")
 
 

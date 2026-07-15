@@ -84,20 +84,29 @@ class StreamlitSessionCoordinator:
         return None
 
     def select_graph_version(self, version_id: str | None) -> None:
-        if version_id == self.selected_graph_version_id():
+        previous_version_id = self.selected_graph_version_id()
+        if version_id == previous_version_id:
             return
-        if version_id is None:
-            self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
-        else:
-            self.session_state[SELECTED_GRAPH_VERSION_KEY] = version_id
-        self.load_app_data(force=True)
+        self._set_selected_graph_version(version_id)
+        try:
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self._set_selected_graph_version(previous_version_id)
+            self.st_module.error(f"Не удалось переключить версию схемы: {exc}")
+            return
         self.flash("Версия схемы переключена")
         self.st_module.rerun()
 
     def materialize_graph_version(self) -> None:
-        version = self.documents_gateway.materialize_graph_version()
-        self.session_state[SELECTED_GRAPH_VERSION_KEY] = version.id
-        self.load_app_data(force=True)
+        previous_version_id = self.selected_graph_version_id()
+        try:
+            version = self.documents_gateway.materialize_graph_version()
+            self._set_selected_graph_version(version.id)
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self._set_selected_graph_version(previous_version_id)
+            self.st_module.error(f"Не удалось сохранить версию source YAML: {exc}")
+            return
         self.flash(f"Создана новая версия source YAML: {version.label}")
         self.st_module.rerun()
 
@@ -116,7 +125,13 @@ class StreamlitSessionCoordinator:
             self.st_module.success(data.message)
 
     def reload_data(self) -> None:
-        self.load_app_data(force=True)
+        try:
+            if self.selected_graph_version_id() is None:
+                self.documents_gateway.ensure_live_graph_source()
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self.st_module.error(f"Не удалось перечитать данные: {exc}")
+            return
         self.flash("Данные перечитаны")
         self.st_module.rerun()
 
@@ -200,3 +215,9 @@ class StreamlitSessionCoordinator:
             return
         if should_rerun:
             self.st_module.rerun()
+
+    def _set_selected_graph_version(self, version_id: str | None) -> None:
+        if version_id is None:
+            self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
+            return
+        self.session_state[SELECTED_GRAPH_VERSION_KEY] = version_id

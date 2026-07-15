@@ -14,6 +14,8 @@ class DocumentsGateway(Protocol):
         graph_version_id: str | None = None,
     ) -> tuple[FlowGraphDocument, WellsDocument]: ...
 
+    def ensure_live_graph_source(self) -> object: ...
+
     def save_wells(
         self,
         document: WellsDocument,

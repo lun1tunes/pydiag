@@ -121,3 +121,22 @@ def test_unpack_rejects_parent_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsafe target path"):
         project_pack.unpack(tmp_path / "restore", archive)
+
+
+def test_unpack_creates_wells_example_yaml(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    restore = tmp_path / "restore"
+    archive = tmp_path / "bundle.txt"
+    make_runtime_tree(source)
+
+    project_pack.pack(source, archive)
+    project_pack.unpack(restore, archive)
+
+    wells_example = restore / "data" / "wells.example.yaml"
+    content = wells_example.read_text(encoding="utf-8")
+
+    assert wells_example.exists()
+    assert 'schema_version: "1.0"' in content
+    assert "wells: []" in content
+    assert "Copy this file to data/wells.yaml" in content
+    assert "current_node_id: replace_with_graph_node_id" in content

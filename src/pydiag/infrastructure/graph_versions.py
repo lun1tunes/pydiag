@@ -24,10 +24,12 @@ from .storage_paths import (
     graph_version_paths,
     next_graph_version_path,
     preferred_graph_source_path,
+    source_graph_path,
 )
 
 __all__ = [
     "can_materialize_graph_version",
+    "ensure_live_graph_source",
     "GraphVersionInfo",
     "list_graph_versions",
     "materialize_new_graph_version_from_raw_source",
@@ -104,6 +106,31 @@ def materialized_flow_source_payload(source: Path) -> dict[str, object]:
         graph_id=inferred_graph_id(source),
         title=inferred_title(source),
     )
+
+
+def ensure_live_graph_source(
+    source_path: str | Path | None = None,
+    target_path: str | Path | None = None,
+) -> Path:
+    target = Path(target_path or source_graph_path())
+    if target.exists():
+        return target
+
+    resolved_source = source_path or preferred_graph_source_path()
+    if resolved_source is None:
+        raise FileNotFoundError("Graph source not found")
+    source = Path(resolved_source)
+    if source.resolve() == target.resolve():
+        if target.exists():
+            return target
+        raise FileNotFoundError(f"Graph source not found: {source}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_text_atomic(
+        target,
+        dump_flow_source_payload(materialized_flow_source_payload(source)),
+    )
+    return target
 
 
 def materialize_new_graph_version_from_raw_source(

@@ -291,6 +291,11 @@ python scripts/project_pack.py pack
 python scripts/project_pack.py unpack --archive all.txt
 ```
 
+После `unpack` создаётся каркас `data/wells.example.yaml`.
+Его можно скопировать в `data/wells.yaml` и быстро заполнить вручную.
+Если `data/wells.yaml` не создать, приложение сгенерирует пустой шаблон само
+при первом запуске.
+
 Bundle включает весь код приложения, runtime-скрипты и безопасные конфиги,
 достаточные для запуска и локальной генерации `data/` на месте. `.venv`,
 секреты, runtime-данные из `data/` и unsafe-входы вроде symlink или
