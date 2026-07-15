@@ -8,11 +8,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
 FLOW_SOURCES_DIR = DATA_DIR / "flow_sources"
 GRAPH_PATH = DATA_DIR / "flow_graph.json"
+AUTH_SESSIONS_PATH = DATA_DIR / ".auth_sessions.json"
 GRAPH_VERSIONS_DIR = FLOW_SOURCES_DIR
 SOURCE_GRAPH_PATH = FLOW_SOURCES_DIR / "flow_source.yaml"
 RAW_GRAPH_PATH = DATA_DIR / "real_true_data.json"
 WELLS_PATH = DATA_DIR / "wells.yaml"
 GRAPH_PATH_ENV = "PYDIAG_GRAPH_PATH"
+AUTH_SESSIONS_PATH_ENV = "PYDIAG_AUTH_SESSIONS_PATH"
 SOURCE_GRAPH_PATH_ENV = "PYDIAG_SOURCE_GRAPH_PATH"
 RAW_GRAPH_PATH_ENV = "PYDIAG_RAW_GRAPH_PATH"
 WELLS_PATH_ENV = "PYDIAG_WELLS_PATH"
@@ -20,6 +22,8 @@ FLOW_SOURCE_VERSION_FILENAME_RE = re.compile(r"^flow_source\.v(?P<sequence>\d{4}
 GRAPH_VERSION_FILENAME_RE = FLOW_SOURCE_VERSION_FILENAME_RE
 
 __all__ = [
+    "AUTH_SESSIONS_PATH",
+    "AUTH_SESSIONS_PATH_ENV",
     "DATA_DIR",
     "FLOW_SOURCES_DIR",
     "FLOW_SOURCE_VERSION_FILENAME_RE",
@@ -33,6 +37,7 @@ __all__ = [
     "RAW_GRAPH_PATH_ENV",
     "WELLS_PATH",
     "WELLS_PATH_ENV",
+    "auth_sessions_path",
     "configured_graph_path",
     "graph_path",
     "graph_versions_dir",
@@ -44,6 +49,13 @@ __all__ = [
     "raw_graph_path",
     "wells_path",
 ]
+
+
+def auth_sessions_path() -> Path:
+    configured = os.getenv(AUTH_SESSIONS_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return AUTH_SESSIONS_PATH
 
 
 def configured_graph_path() -> Path | None:

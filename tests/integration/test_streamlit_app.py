@@ -289,6 +289,36 @@ def test_streamlit_admin_can_save_custom_layout_without_overwriting_source_layou
     }
 
 
+def test_streamlit_admin_can_update_layout_draft_from_workspace_panel(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    assert not app.exception
+    login_as_admin(app)
+
+    set_selectbox(app, "Расположение", "custom")
+    set_toggle(app, "Редактировать положение", True)
+    set_text_input(app, "X в текущем layout", "733.5")
+    set_text_input(app, "Y в текущем layout", "412.25")
+    click_button(app, "Применить положение")
+
+    assert app.session_state["position_edit_positions"]["proc_initial_review"] == (
+        733.5,
+        412.25,
+    )
+    saved = load_structured_payload(source_path.read_bytes())
+    assert "custom_layout" not in saved or "proc_initial_review" not in saved.get("custom_layout", {})
+
+
 def test_streamlit_admin_can_edit_selected_flow_source_node(
     tmp_path: Path,
     monkeypatch,

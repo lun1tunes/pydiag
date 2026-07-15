@@ -1,5 +1,6 @@
 """Cross-layer shared primitives."""
 
+from .auth_sessions import AuthSessionRecord, AuthSessionStore
 from .errors import FileLockTimeoutError, VersionConflictError
 from .graph_source_admin import (
     GraphSourceEdgeDraft,
@@ -12,6 +13,8 @@ from .graph_source_admin import (
 from .graph_versions import GraphVersionInfo
 
 __all__ = [
+    "AuthSessionRecord",
+    "AuthSessionStore",
     "FileLockTimeoutError",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",

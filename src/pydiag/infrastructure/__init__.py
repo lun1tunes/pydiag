@@ -2,6 +2,7 @@
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
 
+from .auth_session_store import FileAuthSessionStore
 from .figma_import import (
     flow_graph_payload_from_figma_payload,
     is_figma_skeleton_payload,
@@ -47,6 +48,7 @@ __all__ = [
     "FileLockTimeoutError",
     "FLOW_SOURCE_SCHEMA_VERSION",
     "FlowSourceDocument",
+    "FileAuthSessionStore",
     "JsonDocumentsGateway",
     "VersionConflictError",
     "can_materialize_graph_version",

@@ -10,8 +10,10 @@ from pydiag.application import (
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
+    ensure_position_edit_positions,
     pop_flash,
     persist_graph_document_update,
+    normalize_position_pair,
     position_edit_positions_from_state,
     reset_position_edit_state,
 )
@@ -32,6 +34,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
 LOADED_GRAPH_VERSION_KEY = "loaded_graph_version_id"
+POSITION_EDIT_RERUN_REQUEST_KEY = "_position_edit_rerun_requested"
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,37 @@ class StreamlitSessionCoordinator:
         graph: FlowGraphDocument,
     ) -> dict[str, tuple[float, float]]:
         return position_edit_positions_from_state(self.session_state, graph)
+
+    def ensure_position_edit_draft(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        layout_mode: str,
+    ) -> dict[str, tuple[float, float]]:
+        return ensure_position_edit_positions(
+            self.session_state,
+            graph,
+            wells,
+            layout_mode,
+        )
+
+    def update_position_edit_draft(
+        self,
+        graph: FlowGraphDocument,
+        *,
+        node_id: str,
+        x: float,
+        y: float,
+    ) -> dict[str, tuple[float, float]]:
+        positions = dict(position_edit_positions_from_state(self.session_state, graph))
+        positions[node_id] = normalize_position_pair((x, y))
+        self.session_state["position_edit_positions"] = positions
+        self.session_state["position_edit_dirty"] = True
+        self.session_state[POSITION_EDIT_RERUN_REQUEST_KEY] = True
+        return positions
+
+    def consume_position_edit_rerun_request(self) -> bool:
+        return bool(self.session_state.pop(POSITION_EDIT_RERUN_REQUEST_KEY, False))
 
     def save_wells(
         self,

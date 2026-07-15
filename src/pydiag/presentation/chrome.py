@@ -77,7 +77,7 @@ APP_CSS = """
 }
 .block-container {
     max-width: none;
-    padding: 0.8rem 1.55rem 1.5rem;
+    padding: 0.55rem 1.35rem 0.8rem;
 }
 [data-testid="stSidebar"] {
     background: #eef2f6;
@@ -124,9 +124,8 @@ APP_CSS = """
     margin-top: 2px;
 }
 .inspector-shell {
-    border-top: 1px solid rgba(100, 116, 139, 0.20);
-    padding-top: 1rem;
-    margin-top: 1rem;
+    padding-top: 0.15rem;
+    margin-top: 0;
     min-height: auto;
 }
 .muted-line {

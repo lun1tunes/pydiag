@@ -2024,9 +2024,10 @@ class WellAdminService:
         return edge
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/common/__init__.py	629
+===BEGIN_FILE===	src/pydiag/common/__init__.py	741
 """Cross-layer shared primitives."""
 
+from .auth_sessions import AuthSessionRecord, AuthSessionStore
 from .errors import FileLockTimeoutError, VersionConflictError
 from .graph_source_admin import (
     GraphSourceEdgeDraft,
@@ -2039,6 +2040,8 @@ from .graph_source_admin import (
 from .graph_versions import GraphVersionInfo
 
 __all__ = [
+    "AuthSessionRecord",
+    "AuthSessionStore",
     "FileLockTimeoutError",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
@@ -2049,6 +2052,58 @@ __all__ = [
     "UpdateGraphSourceNodeCommand",
     "VersionConflictError",
 ]
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/common/auth_sessions.py	976
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+__all__ = ["AuthSessionRecord", "AuthSessionStore"]
+
+
+@dataclass(frozen=True)
+class AuthSessionRecord:
+    session_id: str
+    app_scope: str
+    username: str
+    password_fingerprint: str
+    created_at: float
+    expires_at: float
+
+
+class AuthSessionStore(Protocol):
+    def create_session(
+        self,
+        *,
+        app_scope: str,
+        username: str,
+        password_fingerprint: str,
+        ttl_seconds: int,
+    ) -> AuthSessionRecord: ...
+
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+    ) -> AuthSessionRecord | None: ...
+
+    def refresh_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+        ttl_seconds: int,
+    ) -> AuthSessionRecord | None: ...
+
+    def revoke_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+    ) -> bool: ...
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/common/errors.py	228
@@ -2706,11 +2761,12 @@ def transition_label(edge: FlowEdge, graph: FlowGraphDocument) -> str:
     return f"{prefix}: {target_text}"
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/__init__.py	2339
+===BEGIN_FILE===	src/pydiag/infrastructure/__init__.py	2420
 """Infrastructure layer public API."""
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
 
+from .auth_session_store import FileAuthSessionStore
 from .figma_import import (
     flow_graph_payload_from_figma_payload,
     is_figma_skeleton_payload,
@@ -2756,6 +2812,7 @@ __all__ = [
     "FileLockTimeoutError",
     "FLOW_SOURCE_SCHEMA_VERSION",
     "FlowSourceDocument",
+    "FileAuthSessionStore",
     "JsonDocumentsGateway",
     "VersionConflictError",
     "can_materialize_graph_version",
@@ -2788,6 +2845,226 @@ __all__ = [
     "update_figma_payload_positions",
     "wells_path",
 ]
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/infrastructure/auth_session_store.py	6978
+from __future__ import annotations
+
+import json
+import secrets
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pydiag.common.auth_sessions import AuthSessionRecord
+
+from .storage_io import json_file_lock, save_json_atomic
+from .storage_paths import auth_sessions_path
+
+SESSION_REGISTRY_VERSION = 1
+
+__all__ = ["FileAuthSessionStore"]
+
+
+def default_session_id() -> str:
+    return secrets.token_urlsafe(32)
+
+
+@dataclass(frozen=True)
+class FileAuthSessionStore:
+    path_fn: Callable[[], Path] = auth_sessions_path
+    now_fn: Callable[[], float] = time.time
+    session_id_factory: Callable[[], str] = default_session_id
+    lock_timeout_seconds: float = 10.0
+
+    def create_session(
+        self,
+        *,
+        app_scope: str,
+        username: str,
+        password_fingerprint: str,
+        ttl_seconds: int,
+    ) -> AuthSessionRecord:
+        now = self.now_fn()
+        ttl = max(int(ttl_seconds), 1)
+        record = AuthSessionRecord(
+            session_id=self.session_id_factory(),
+            app_scope=app_scope,
+            username=username,
+            password_fingerprint=password_fingerprint,
+            created_at=now,
+            expires_at=now + ttl,
+        )
+
+        def mutate(sessions: dict[str, dict[str, object]]) -> tuple[AuthSessionRecord, bool]:
+            sessions[record.session_id] = _serialize_record(record)
+            return record, True
+
+        return self._with_registry(now=now, mutate=mutate)
+
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+    ) -> AuthSessionRecord | None:
+        def mutate(
+            sessions: dict[str, dict[str, object]],
+        ) -> tuple[AuthSessionRecord | None, bool]:
+            return _lookup_session(sessions, session_id, app_scope=app_scope), False
+
+        return self._with_registry(mutate=mutate)
+
+    def refresh_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+        ttl_seconds: int,
+    ) -> AuthSessionRecord | None:
+        now = self.now_fn()
+        ttl = max(int(ttl_seconds), 1)
+
+        def mutate(
+            sessions: dict[str, dict[str, object]],
+        ) -> tuple[AuthSessionRecord | None, bool]:
+            record = _lookup_session(sessions, session_id, app_scope=app_scope)
+            if record is None:
+                return None, False
+            refreshed = AuthSessionRecord(
+                session_id=record.session_id,
+                app_scope=record.app_scope,
+                username=record.username,
+                password_fingerprint=record.password_fingerprint,
+                created_at=record.created_at,
+                expires_at=now + ttl,
+            )
+            sessions[session_id] = _serialize_record(refreshed)
+            return refreshed, True
+
+        return self._with_registry(now=now, mutate=mutate)
+
+    def revoke_session(
+        self,
+        session_id: str,
+        *,
+        app_scope: str,
+    ) -> bool:
+        def mutate(sessions: dict[str, dict[str, object]]) -> tuple[bool, bool]:
+            record = _lookup_session(sessions, session_id, app_scope=app_scope)
+            if record is None:
+                return False, False
+            sessions.pop(session_id, None)
+            return True, True
+
+        return self._with_registry(mutate=mutate)
+
+    def _with_registry(
+        self,
+        *,
+        mutate: Callable[[dict[str, dict[str, object]]], tuple[Any, bool]],
+        now: float | None = None,
+    ) -> Any:
+        path = self.path_fn()
+        with json_file_lock(path, timeout=self.lock_timeout_seconds):
+            registry = _load_registry(path)
+            sessions = registry.setdefault("sessions", {})
+            changed = _cleanup_expired_sessions(
+                sessions,
+                self.now_fn() if now is None else now,
+            )
+            result, mutated = mutate(sessions)
+            if changed or mutated:
+                save_json_atomic(
+                    path,
+                    {
+                        "version": SESSION_REGISTRY_VERSION,
+                        "sessions": sessions,
+                    },
+                )
+            return result
+
+
+def _load_registry(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": SESSION_REGISTRY_VERSION, "sessions": {}}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": SESSION_REGISTRY_VERSION, "sessions": {}}
+    if not isinstance(payload, dict):
+        return {"version": SESSION_REGISTRY_VERSION, "sessions": {}}
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+    return {"version": payload.get("version", SESSION_REGISTRY_VERSION), "sessions": sessions}
+
+
+def _cleanup_expired_sessions(sessions: dict[str, dict[str, object]], now: float) -> bool:
+    changed = False
+    expired_ids: list[str] = []
+    for session_id, payload in sessions.items():
+        record = _deserialize_record(session_id, payload)
+        if record is None or record.expires_at <= now:
+            expired_ids.append(session_id)
+    for session_id in expired_ids:
+        sessions.pop(session_id, None)
+        changed = True
+    return changed
+
+
+def _lookup_session(
+    sessions: Mapping[str, dict[str, object]],
+    session_id: str,
+    *,
+    app_scope: str,
+) -> AuthSessionRecord | None:
+    payload = sessions.get(session_id)
+    record = _deserialize_record(session_id, payload)
+    if record is None or record.app_scope != app_scope:
+        return None
+    return record
+
+
+def _deserialize_record(session_id: str, payload: object) -> AuthSessionRecord | None:
+    if not isinstance(payload, Mapping):
+        return None
+    app_scope = payload.get("app_scope")
+    username = payload.get("username")
+    password_fingerprint = payload.get("password_fingerprint")
+    created_at = payload.get("created_at")
+    expires_at = payload.get("expires_at")
+    if not (
+        isinstance(app_scope, str)
+        and app_scope
+        and isinstance(username, str)
+        and username
+        and isinstance(password_fingerprint, str)
+        and password_fingerprint
+        and isinstance(created_at, int | float)
+        and isinstance(expires_at, int | float)
+    ):
+        return None
+    return AuthSessionRecord(
+        session_id=session_id,
+        app_scope=app_scope,
+        username=username,
+        password_fingerprint=password_fingerprint,
+        created_at=float(created_at),
+        expires_at=float(expires_at),
+    )
+
+
+def _serialize_record(record: AuthSessionRecord) -> dict[str, object]:
+    return {
+        "app_scope": record.app_scope,
+        "username": record.username,
+        "password_fingerprint": record.password_fingerprint,
+        "created_at": round(float(record.created_at), 6),
+        "expires_at": round(float(record.expires_at), 6),
+    }
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/infrastructure/editable_flow_graph.py	8189
@@ -6449,7 +6726,7 @@ class JsonDocumentsGateway:
         return self.resolve_graph_version_path_fn(graph_version_id)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage.py	2576
+===BEGIN_FILE===	src/pydiag/infrastructure/storage.py	2734
 from __future__ import annotations
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
@@ -6474,6 +6751,8 @@ from .storage_materialization import (
     materialize_flow_graph_from_source,
 )
 from .storage_paths import (
+    AUTH_SESSIONS_PATH,
+    AUTH_SESSIONS_PATH_ENV,
     GRAPH_PATH,
     GRAPH_PATH_ENV,
     GRAPH_VERSIONS_DIR,
@@ -6483,6 +6762,7 @@ from .storage_paths import (
     SOURCE_GRAPH_PATH_ENV,
     WELLS_PATH,
     WELLS_PATH_ENV,
+    auth_sessions_path,
     graph_path,
     graph_versions_dir,
     graph_version_paths,
@@ -6503,6 +6783,8 @@ from .storage_writes import (
 )
 
 __all__ = [
+    "AUTH_SESSIONS_PATH",
+    "AUTH_SESSIONS_PATH_ENV",
     "GRAPH_PATH",
     "GRAPH_PATH_ENV",
     "GRAPH_VERSIONS_DIR",
@@ -6515,6 +6797,7 @@ __all__ = [
     "FileLockTimeoutError",
     "VersionConflictError",
     "acquire_file_lock",
+    "auth_sessions_path",
     "ensure_lock_file_region",
     "fsync_parent_dir",
     "graph_path",
@@ -6889,7 +7172,7 @@ def ensure_wells_doc_exists(path: Path) -> None:
     save_text_atomic(path, EMPTY_WELLS_YAML_TEMPLATE)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage_paths.py	3529
+===BEGIN_FILE===	src/pydiag/infrastructure/storage_paths.py	3886
 from __future__ import annotations
 
 import os
@@ -6900,11 +7183,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
 FLOW_SOURCES_DIR = DATA_DIR / "flow_sources"
 GRAPH_PATH = DATA_DIR / "flow_graph.json"
+AUTH_SESSIONS_PATH = DATA_DIR / ".auth_sessions.json"
 GRAPH_VERSIONS_DIR = FLOW_SOURCES_DIR
 SOURCE_GRAPH_PATH = FLOW_SOURCES_DIR / "flow_source.yaml"
 RAW_GRAPH_PATH = DATA_DIR / "real_true_data.json"
 WELLS_PATH = DATA_DIR / "wells.yaml"
 GRAPH_PATH_ENV = "PYDIAG_GRAPH_PATH"
+AUTH_SESSIONS_PATH_ENV = "PYDIAG_AUTH_SESSIONS_PATH"
 SOURCE_GRAPH_PATH_ENV = "PYDIAG_SOURCE_GRAPH_PATH"
 RAW_GRAPH_PATH_ENV = "PYDIAG_RAW_GRAPH_PATH"
 WELLS_PATH_ENV = "PYDIAG_WELLS_PATH"
@@ -6912,6 +7197,8 @@ FLOW_SOURCE_VERSION_FILENAME_RE = re.compile(r"^flow_source\.v(?P<sequence>\d{4}
 GRAPH_VERSION_FILENAME_RE = FLOW_SOURCE_VERSION_FILENAME_RE
 
 __all__ = [
+    "AUTH_SESSIONS_PATH",
+    "AUTH_SESSIONS_PATH_ENV",
     "DATA_DIR",
     "FLOW_SOURCES_DIR",
     "FLOW_SOURCE_VERSION_FILENAME_RE",
@@ -6925,6 +7212,7 @@ __all__ = [
     "RAW_GRAPH_PATH_ENV",
     "WELLS_PATH",
     "WELLS_PATH_ENV",
+    "auth_sessions_path",
     "configured_graph_path",
     "graph_path",
     "graph_versions_dir",
@@ -6936,6 +7224,13 @@ __all__ = [
     "raw_graph_path",
     "wells_path",
 ]
+
+
+def auth_sessions_path() -> Path:
+    configured = os.getenv(AUTH_SESSIONS_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return AUTH_SESSIONS_PATH
 
 
 def configured_graph_path() -> Path | None:
@@ -7299,7 +7594,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/admin.py	20072
+===BEGIN_FILE===	src/pydiag/presentation/admin.py	20240
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -7583,6 +7878,11 @@ def render_graph_source_node_editor(
     except Exception as exc:
         st_module.error(f"Не удалось загрузить карточку из source YAML: {exc}")
         return
+
+    st_module.caption(
+        "Эти поля меняют канонический source YAML. "
+        "Для черновика текущего layout используйте блок 'Положение на холсте' выше."
+    )
 
     responsible_ids = list(graph.responsibles.keys())
     primary_options = [EMPTY_RESPONSIBLE_OPTION, *responsible_ids]
@@ -7998,12 +8298,14 @@ def suggest_well_id(wells: WellsDocument) -> str:
     return f"well_{max_number + 1}"
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/auth.py	2879
+===BEGIN_FILE===	src/pydiag/presentation/auth.py	4175
 from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
+
+from pydiag.common.auth_sessions import AuthSessionStore
 
 from .auth_config import (
     admin_password,
@@ -8019,8 +8321,15 @@ from .auth_config import (
     password_is_allowed,
     streamlit_secrets_enabled,
 )
+from .auth_persistence import (
+    auth_request_context,
+    login_user_with_persistence,
+    logout_user_with_persistence,
+    sync_persistent_auth_session,
+)
 from .auth_models import AuthUser
 from .auth_session import (
+    DEFAULT_AUTH_SESSION_TTL_SECONDS,
     current_auth_user,
     current_user_is_admin,
     current_user_is_super_admin,
@@ -8054,6 +8363,8 @@ __all__ = [
 @dataclass(frozen=True)
 class StreamlitAuthContext:
     st_module: Any
+    session_store: AuthSessionStore | None = None
+    session_ttl_seconds: int = DEFAULT_AUTH_SESSION_TTL_SECONDS
 
     @property
     def session_state(self) -> MutableMapping[str, Any]:
@@ -8096,10 +8407,35 @@ class StreamlitAuthContext:
         return auth_config_warning(self.st_module)
 
     def login_user(self, user: AuthUser) -> None:
-        login_user(self.session_state, user)
+        login_user_with_persistence(
+            self.session_state,
+            user,
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+            session_ttl_seconds=self.session_ttl_seconds,
+        )
 
     def logout_user(self) -> None:
-        logout_user(self.session_state)
+        logout_user_with_persistence(
+            self.session_state,
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+        )
+
+    def sync_persistent_auth(self) -> None:
+        markup = sync_persistent_auth_session(
+            self.session_state,
+            self.configured_auth_users(),
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+            session_ttl_seconds=self.session_ttl_seconds,
+        )
+        if markup and hasattr(self.st_module, "html"):
+            self.st_module.html(
+                markup,
+                width="content",
+                unsafe_allow_javascript=True,
+            )
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/presentation/auth_config.py	978
@@ -8159,6 +8495,321 @@ class AuthUser:
     password: str
     is_admin: bool = True
     is_super_admin: bool = False
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/presentation/auth_persistence.py	9831
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping, MutableMapping
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+
+from pydiag.common.auth_sessions import AuthSessionStore
+
+from .auth_models import AuthUser
+from .auth_session import (
+    DEFAULT_AUTH_SESSION_TTL_SECONDS,
+    clear_persistent_auth_session,
+    consume_persistent_auth_cookie_markup,
+    current_auth_user,
+    login_user,
+    logout_user,
+    pending_persistent_auth_cookie_command,
+    persistent_auth_session_id,
+    queue_persistent_auth_cookie_clear,
+    queue_persistent_auth_cookie_set,
+    set_persistent_auth_session,
+)
+
+__all__ = [
+    "AuthCookieScope",
+    "AuthRequestContext",
+    "auth_request_context",
+    "auth_session_ttl_seconds",
+    "login_user_with_persistence",
+    "logout_user_with_persistence",
+    "sync_persistent_auth_session",
+]
+
+AUTH_SESSION_TTL_ENV = "PYDIAG_AUTH_SESSION_TTL_SECONDS"
+MIN_AUTH_SESSION_TTL_SECONDS = 900
+MAX_AUTH_SESSION_TTL_SECONDS = 2_592_000
+
+
+@dataclass(frozen=True)
+class AuthRequestContext:
+    url: str | None
+    cookies: Mapping[str, str]
+    headers: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class AuthCookieScope:
+    app_scope: str
+    cookie_name: str
+    cookie_path: str
+
+
+def auth_request_context(st_module: Any) -> AuthRequestContext:
+    cookies: Mapping[str, str] = {}
+    headers: Mapping[str, str] = {}
+    url: str | None = None
+    context = getattr(st_module, "context", None)
+    if context is not None:
+        url = getattr(context, "url", None)
+        raw_cookies = getattr(context, "cookies", {})
+        raw_headers = getattr(context, "headers", {})
+        cookies = _mapping_from_context(raw_cookies)
+        headers = _mapping_from_context(raw_headers)
+    return AuthRequestContext(url=url, cookies=cookies, headers=headers)
+
+
+def auth_session_ttl_seconds() -> int:
+    import os
+
+    raw = os.getenv(AUTH_SESSION_TTL_ENV)
+    if not raw:
+        return DEFAULT_AUTH_SESSION_TTL_SECONDS
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return DEFAULT_AUTH_SESSION_TTL_SECONDS
+    return max(MIN_AUTH_SESSION_TTL_SECONDS, min(MAX_AUTH_SESSION_TTL_SECONDS, parsed))
+
+
+def login_user_with_persistence(
+    session_state: MutableMapping[str, Any],
+    user: AuthUser,
+    *,
+    session_store: AuthSessionStore | None,
+    request_context: AuthRequestContext,
+    session_ttl_seconds: int,
+) -> None:
+    login_user(session_state, user)
+    if session_store is None:
+        return
+
+    scope = auth_cookie_scope(request_context)
+    try:
+        record = session_store.create_session(
+            app_scope=scope.app_scope,
+            username=user.username,
+            password_fingerprint=password_fingerprint(user),
+            ttl_seconds=session_ttl_seconds,
+        )
+    except Exception:
+        return
+
+    set_persistent_auth_session(
+        session_state,
+        session_id=record.session_id,
+        cookie_name=scope.cookie_name,
+        cookie_path=scope.cookie_path,
+    )
+    queue_persistent_auth_cookie_set(
+        session_state,
+        cookie_name=scope.cookie_name,
+        session_id=record.session_id,
+        cookie_path=scope.cookie_path,
+        max_age_seconds=session_ttl_seconds,
+    )
+
+
+def logout_user_with_persistence(
+    session_state: MutableMapping[str, Any],
+    *,
+    session_store: AuthSessionStore | None,
+    request_context: AuthRequestContext,
+) -> None:
+    scope = auth_cookie_scope(request_context)
+    session_id = persistent_auth_session_id(session_state)
+    if session_id is None:
+        cookie_value = request_context.cookies.get(scope.cookie_name)
+        if isinstance(cookie_value, str) and cookie_value:
+            session_id = cookie_value
+
+    if session_store is not None and session_id is not None:
+        try:
+            session_store.revoke_session(session_id, app_scope=scope.app_scope)
+        except Exception:
+            pass
+
+    logout_user(session_state)
+    queue_persistent_auth_cookie_clear(
+        session_state,
+        cookie_name=scope.cookie_name,
+        cookie_path=scope.cookie_path,
+    )
+
+
+def sync_persistent_auth_session(
+    session_state: MutableMapping[str, Any],
+    users: Mapping[str, AuthUser],
+    *,
+    session_store: AuthSessionStore | None,
+    request_context: AuthRequestContext,
+    session_ttl_seconds: int,
+) -> str | None:
+    scope = auth_cookie_scope(request_context)
+    pending = pending_persistent_auth_cookie_command(session_state)
+    if pending and pending.get("action") == "clear":
+        clear_persistent_auth_session(session_state)
+        return consume_persistent_auth_cookie_markup(session_state)
+
+    if current_auth_user(session_state) is None and session_store is not None:
+        raw_session_id = request_context.cookies.get(scope.cookie_name)
+        session_id = raw_session_id if isinstance(raw_session_id, str) and raw_session_id else None
+        if session_id is not None:
+            restored = restore_session_from_store(
+                session_state,
+                users,
+                session_store=session_store,
+                scope=scope,
+                session_id=session_id,
+                session_ttl_seconds=session_ttl_seconds,
+            )
+            if not restored:
+                clear_persistent_auth_session(session_state)
+                queue_persistent_auth_cookie_clear(
+                    session_state,
+                    cookie_name=scope.cookie_name,
+                    cookie_path=scope.cookie_path,
+                )
+
+    return consume_persistent_auth_cookie_markup(session_state)
+
+
+def restore_session_from_store(
+    session_state: MutableMapping[str, Any],
+    users: Mapping[str, AuthUser],
+    *,
+    session_store: AuthSessionStore,
+    scope: AuthCookieScope,
+    session_id: str,
+    session_ttl_seconds: int,
+) -> bool:
+    try:
+        record = session_store.get_session(session_id, app_scope=scope.app_scope)
+    except Exception:
+        return False
+    if record is None:
+        return False
+
+    user = users.get(record.username)
+    if user is None or record.password_fingerprint != password_fingerprint(user):
+        try:
+            session_store.revoke_session(session_id, app_scope=scope.app_scope)
+        except Exception:
+            pass
+        return False
+
+    try:
+        refreshed = session_store.refresh_session(
+            session_id,
+            app_scope=scope.app_scope,
+            ttl_seconds=session_ttl_seconds,
+        )
+    except Exception:
+        return False
+    if refreshed is None:
+        return False
+
+    login_user(session_state, user)
+    set_persistent_auth_session(
+        session_state,
+        session_id=refreshed.session_id,
+        cookie_name=scope.cookie_name,
+        cookie_path=scope.cookie_path,
+    )
+    queue_persistent_auth_cookie_set(
+        session_state,
+        cookie_name=scope.cookie_name,
+        session_id=refreshed.session_id,
+        cookie_path=scope.cookie_path,
+        max_age_seconds=session_ttl_seconds,
+    )
+    return True
+
+
+def auth_cookie_scope(request_context: AuthRequestContext) -> AuthCookieScope:
+    normalized_url = normalize_request_url(request_context)
+    split = urlsplit(normalized_url)
+    cookie_path = split.path or "/"
+    digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:16]
+    prefix = "__Secure-" if split.scheme == "https" else ""
+    return AuthCookieScope(
+        app_scope=normalized_url,
+        cookie_name=f"{prefix}pydiag_auth_{digest}",
+        cookie_path=cookie_path,
+    )
+
+
+def normalize_request_url(request_context: AuthRequestContext) -> str:
+    if isinstance(request_context.url, str) and request_context.url:
+        split = urlsplit(request_context.url)
+        return normalized_url_parts(split.scheme or "http", split.netloc, split.path)
+
+    host = header_value(request_context.headers, "Host")
+    scheme = header_value(request_context.headers, "X-Forwarded-Proto") or "http"
+    return normalized_url_parts(scheme, host or "localhost", "/")
+
+
+def normalized_url_parts(scheme: str, netloc: str, path: str) -> str:
+    normalized_path = path or "/"
+    if not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+    if normalized_path != "/":
+        normalized_path = normalized_path.rstrip("/")
+        if not normalized_path:
+            normalized_path = "/"
+    return f"{scheme}://{netloc}{normalized_path}"
+
+
+def header_value(headers: Mapping[str, str], name: str) -> str | None:
+    if name in headers:
+        value = headers.get(name)
+        return value if isinstance(value, str) and value else None
+    lowered = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lowered and isinstance(value, str) and value:
+            return value
+    return None
+
+
+def password_fingerprint(user: AuthUser) -> str:
+    payload = f"{user.username}\0{user.password}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _mapping_from_context(raw: object) -> Mapping[str, str]:
+    if isinstance(raw, Mapping):
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+    if hasattr(raw, "to_dict"):
+        try:
+            converted = raw.to_dict()
+        except Exception:
+            return {}
+        if isinstance(converted, Mapping):
+            return {
+                str(key): str(value)
+                for key, value in converted.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+    try:
+        converted = dict(raw)
+    except Exception:
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in converted.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/presentation/auth_policy.py	3347
@@ -8268,21 +8919,37 @@ def authenticate_user(st_module, username: str, password: str) -> AuthUser | Non
     return None
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/auth_session.py	1433
+===BEGIN_FILE===	src/pydiag/presentation/auth_session.py	6493
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from .auth_models import AuthUser
 
 __all__ = [
+    "AUTH_COOKIE_SYNC_KEY",
+    "DEFAULT_AUTH_SESSION_TTL_SECONDS",
+    "clear_persistent_auth_session",
+    "consume_persistent_auth_cookie_markup",
     "current_auth_user",
     "current_user_is_admin",
     "current_user_is_super_admin",
     "login_user",
     "logout_user",
+    "pending_persistent_auth_cookie_command",
+    "persistent_auth_session_id",
+    "queue_persistent_auth_cookie_clear",
+    "queue_persistent_auth_cookie_set",
+    "set_persistent_auth_session",
 ]
+
+DEFAULT_AUTH_SESSION_TTL_SECONDS = 86_400
+AUTH_COOKIE_SYNC_KEY = "_pydiag_auth_cookie_sync"
+PERSISTENT_AUTH_SESSION_ID_KEY = "_pydiag_persistent_auth_session_id"
+PERSISTENT_AUTH_COOKIE_NAME_KEY = "_pydiag_persistent_auth_cookie_name"
+PERSISTENT_AUTH_COOKIE_PATH_KEY = "_pydiag_persistent_auth_cookie_path"
 
 
 def current_auth_user(session_state: Mapping[str, Any]) -> dict[str, str | bool] | None:
@@ -8302,7 +8969,10 @@ def current_user_is_super_admin(session_state: Mapping[str, Any]) -> bool:
     return bool(user and user.get("is_super_admin", False))
 
 
-def login_user(session_state: MutableMapping[str, Any], user: AuthUser) -> None:
+def login_user(
+    session_state: MutableMapping[str, Any],
+    user: AuthUser,
+) -> None:
     session_state["authenticated_user"] = {
         "username": user.username,
         "display_name": user.display_name,
@@ -8315,6 +8985,154 @@ def login_user(session_state: MutableMapping[str, Any], user: AuthUser) -> None:
 def logout_user(session_state: MutableMapping[str, Any]) -> None:
     session_state.pop("authenticated_user", None)
     session_state["admin_authenticated"] = False
+    clear_persistent_auth_session(session_state)
+
+
+def set_persistent_auth_session(
+    session_state: MutableMapping[str, Any],
+    *,
+    session_id: str,
+    cookie_name: str,
+    cookie_path: str,
+) -> None:
+    session_state[PERSISTENT_AUTH_SESSION_ID_KEY] = session_id
+    session_state[PERSISTENT_AUTH_COOKIE_NAME_KEY] = cookie_name
+    session_state[PERSISTENT_AUTH_COOKIE_PATH_KEY] = cookie_path
+
+
+def clear_persistent_auth_session(session_state: MutableMapping[str, Any]) -> None:
+    session_state.pop(PERSISTENT_AUTH_SESSION_ID_KEY, None)
+    session_state.pop(PERSISTENT_AUTH_COOKIE_NAME_KEY, None)
+    session_state.pop(PERSISTENT_AUTH_COOKIE_PATH_KEY, None)
+
+
+def persistent_auth_session_id(session_state: Mapping[str, Any]) -> str | None:
+    value = session_state.get(PERSISTENT_AUTH_SESSION_ID_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def pending_persistent_auth_cookie_command(
+    session_state: Mapping[str, Any],
+) -> Mapping[str, str] | None:
+    command = session_state.get(AUTH_COOKIE_SYNC_KEY)
+    return command if isinstance(command, Mapping) else None
+
+
+def queue_persistent_auth_cookie_set(
+    session_state: MutableMapping[str, Any],
+    *,
+    cookie_name: str,
+    session_id: str,
+    cookie_path: str,
+    max_age_seconds: int,
+) -> None:
+    session_state[AUTH_COOKIE_SYNC_KEY] = {
+        "action": "set",
+        "name": cookie_name,
+        "value": session_id,
+        "path": cookie_path,
+        "max_age": str(max(int(max_age_seconds), 1)),
+    }
+
+
+def queue_persistent_auth_cookie_clear(
+    session_state: MutableMapping[str, Any],
+    *,
+    cookie_name: str,
+    cookie_path: str,
+) -> None:
+    session_state[AUTH_COOKIE_SYNC_KEY] = {
+        "action": "clear",
+        "name": cookie_name,
+        "path": cookie_path,
+    }
+
+
+def consume_persistent_auth_cookie_markup(
+    session_state: MutableMapping[str, Any],
+) -> str | None:
+    command = session_state.pop(AUTH_COOKIE_SYNC_KEY, None)
+    if not isinstance(command, Mapping):
+        return None
+
+    action = command.get("action")
+    if action == "set":
+        name = command.get("name")
+        value = command.get("value")
+        path = command.get("path")
+        max_age = command.get("max_age")
+        if (
+            isinstance(name, str)
+            and name
+            and isinstance(value, str)
+            and value
+            and isinstance(path, str)
+            and path
+            and isinstance(max_age, str)
+            and max_age
+        ):
+            return persistent_auth_cookie_markup(
+                cookie_name=name,
+                session_id=value,
+                cookie_path=path,
+                max_age=max_age,
+            )
+        return None
+    if action == "clear":
+        name = command.get("name")
+        path = command.get("path")
+        if isinstance(name, str) and name and isinstance(path, str) and path:
+            return clear_persistent_auth_cookie_markup(cookie_name=name, cookie_path=path)
+    return None
+
+
+def persistent_auth_cookie_markup(
+    *,
+    cookie_name: str,
+    session_id: str,
+    cookie_path: str,
+    max_age: str,
+) -> str:
+    return cookie_sync_markup(
+        script_body=(
+            "document.cookie = `${payload.name}=${encodeURIComponent(payload.value)}; "
+            "Path=${payload.path}; Max-Age=${payload.maxAge}; SameSite=Strict${secure}`;"
+        ),
+        payload={
+            "name": cookie_name,
+            "value": session_id,
+            "path": cookie_path,
+            "maxAge": max_age,
+        },
+    )
+
+
+def clear_persistent_auth_cookie_markup(
+    *,
+    cookie_name: str,
+    cookie_path: str,
+) -> str:
+    return cookie_sync_markup(
+        script_body=(
+            "document.cookie = `${payload.name}=; Path=${payload.path}; "
+            "Max-Age=0; SameSite=Strict${secure}`;"
+        ),
+        payload={"name": cookie_name, "path": cookie_path},
+    )
+
+
+def cookie_sync_markup(*, script_body: str, payload: Mapping[str, str]) -> str:
+    payload_json = json.dumps(dict(payload), ensure_ascii=True)
+    return (
+        "<div style=\"display:none\" aria-hidden=\"true\"></div>\n"
+        "<script>\n"
+        "(() => {\n"
+        f"  const payload = {payload_json};\n"
+        "  const secure = window.location.protocol === 'https:' ? '; Secure' : '';\n"
+        f"  {script_body}\n"
+        "})();\n"
+        "</script>"
+    )
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/presentation/auth_sources.py	3115
@@ -8425,7 +9243,7 @@ def insecure_admin_mode_enabled() -> bool:
     return os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1"
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/chrome.py	10979
+===BEGIN_FILE===	src/pydiag/presentation/chrome.py	10927
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8505,7 +9323,7 @@ APP_CSS = """
 }
 .block-container {
     max-width: none;
-    padding: 0.8rem 1.55rem 1.5rem;
+    padding: 0.55rem 1.35rem 0.8rem;
 }
 [data-testid="stSidebar"] {
     background: #eef2f6;
@@ -8552,9 +9370,8 @@ APP_CSS = """
     margin-top: 2px;
 }
 .inspector-shell {
-    border-top: 1px solid rgba(100, 116, 139, 0.20);
-    padding-top: 1rem;
-    margin-top: 1rem;
+    padding-top: 0.15rem;
+    margin-top: 0;
     min-height: auto;
 }
 .muted-line {
@@ -9146,18 +9963,25 @@ def details_grid_html(items: list[tuple[str, str]]) -> str:
     return f'<div class="mini-kv">{cells}</div>'
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime.py	6727
+===BEGIN_FILE===	src/pydiag/presentation/runtime.py	14506
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from pydiag.application import FLOW_CANVAS_COMPONENT_KEY, DocumentsGateway
+from pydiag.common.auth_sessions import AuthSessionStore
 from pydiag.application import render_flow as render_flow_view
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
-from pydiag.presentation.admin import AdminActions, render_admin_panel
+from pydiag.presentation.admin import (
+    AdminActions,
+    format_layout_float,
+    render_admin_panel,
+)
 from pydiag.presentation.auth import StreamlitAuthContext
+from pydiag.presentation.auth_session import DEFAULT_AUTH_SESSION_TTL_SECONDS
 from pydiag.presentation.chrome import inject_css, render_legend
 from pydiag.presentation.inspector import InspectorActions, render_inspector
 from pydiag.presentation.runtime_session import StreamlitSessionCoordinator
@@ -9165,11 +9989,16 @@ from pydiag.presentation.selection import resolve_selection
 from pydiag.presentation.sidebar import SidebarActions, render_sidebar
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
+WORKSPACE_PANEL_HEIGHT = 720
+LAYOUT_DRAFT_ERROR_KEY = "_layout_draft_error"
+
 
 @dataclass(frozen=True)
 class StreamlitAppRuntime:
     st_module: Any
     documents_gateway: DocumentsGateway
+    auth_session_store: AuthSessionStore | None = None
+    auth_session_ttl_seconds: int = DEFAULT_AUTH_SESSION_TTL_SECONDS
     render_canvas: Callable[..., object] = render_flow_canvas
 
     @property
@@ -9177,7 +10006,67 @@ class StreamlitAppRuntime:
         return StreamlitSessionCoordinator(self.st_module, self.documents_gateway)
 
     def auth_context(self) -> StreamlitAuthContext:
-        return StreamlitAuthContext(self.st_module)
+        return StreamlitAuthContext(
+            self.st_module,
+            session_store=self.auth_session_store,
+            session_ttl_seconds=self.auth_session_ttl_seconds,
+        )
+
+    def _layout_draft_input_key(
+        self,
+        *,
+        axis: str,
+        layout_mode: str,
+        node_id: str,
+    ) -> str:
+        return f"layout_draft_{axis}::{layout_mode}::{node_id}"
+
+    def _apply_layout_draft(
+        self,
+        graph: FlowGraphDocument,
+        *,
+        node_id: str,
+        layout_mode: str,
+    ) -> None:
+        layout_x = self.st_module.session_state.get(
+            self._layout_draft_input_key(axis="x", layout_mode=layout_mode, node_id=node_id),
+            "",
+        )
+        layout_y = self.st_module.session_state.get(
+            self._layout_draft_input_key(axis="y", layout_mode=layout_mode, node_id=node_id),
+            "",
+        )
+        parsed = parse_layout_draft_xy(layout_x=str(layout_x), layout_y=str(layout_y))
+        if isinstance(parsed, str):
+            self.st_module.session_state[LAYOUT_DRAFT_ERROR_KEY] = {
+                "layout_mode": layout_mode,
+                "node_id": node_id,
+                "message": parsed,
+            }
+            return
+
+        self.st_module.session_state.pop(LAYOUT_DRAFT_ERROR_KEY, None)
+        self.session.update_position_edit_draft(
+            graph,
+            node_id=node_id,
+            x=parsed[0],
+            y=parsed[1],
+        )
+
+    def _render_layout_draft_error(
+        self,
+        *,
+        layout_mode: str,
+        node_id: str,
+    ) -> None:
+        error_state = self.st_module.session_state.get(LAYOUT_DRAFT_ERROR_KEY)
+        if not isinstance(error_state, dict):
+            return
+        if error_state.get("layout_mode") != layout_mode or error_state.get("node_id") != node_id:
+            return
+        message = error_state.get("message")
+        if isinstance(message, str) and message:
+            self.st_module.error(message)
 
     def _render_sidebar(
         self, graph: FlowGraphDocument
@@ -9235,6 +10124,101 @@ class StreamlitAppRuntime:
                 render_admin_panel=self._render_admin_panel,
             ),
         )
+
+    def _render_layout_draft_panel(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        selected_id: str | None,
+        *,
+        layout_mode: str,
+        position_edit_enabled: bool,
+    ) -> None:
+        if not self.auth_context().current_user_is_admin():
+            return
+
+        session = self.session
+        selected_kind, selected = resolve_selection(selected_id, graph, wells)
+        with self.st_module.expander(
+            "Положение на холсте",
+            expanded=selected_kind == "node",
+        ):
+            if not session.position_edit_available():
+                self.st_module.caption(
+                    session.position_edit_block_reason()
+                    or "Редактирование layout сейчас недоступно."
+                )
+                return
+
+            if layout_mode == "snake":
+                self.st_module.caption(
+                    "В режиме 'Змейка' позиции рассчитываются автоматически. "
+                    "Переключитесь на source или custom layout."
+                )
+                return
+
+            if selected_kind != "node" or selected is None:
+                self.st_module.caption(
+                    "Выберите карточку на схеме, чтобы менять её положение или перетаскивать мышью."
+                )
+                return
+
+            if not position_edit_enabled:
+                self.st_module.caption(
+                    "Включите 'Редактировать положение' в sidebar, чтобы двигать карточку "
+                    "мышью или менять X/Y без полного перезапуска страницы."
+                )
+                if self.st_module.button(
+                    "Включить drag карточек",
+                    key="enable_position_edit_button",
+                    width="stretch",
+                ):
+                    self.st_module.session_state["position_edit_enabled"] = True
+                    self.st_module.rerun()
+                return
+
+            positions = session.ensure_position_edit_draft(graph, wells, layout_mode)
+            current_x, current_y = positions.get(
+                selected.id,
+                (selected.position.x, selected.position.y),
+            )
+            self.st_module.caption(
+                "Это черновик текущего layout. "
+                "Поля source YAML ниже меняют канонические координаты схемы."
+            )
+            self.st_module.caption(
+                "Тяните карточку за сам блок. Пустой фон двигает сцену."
+            )
+            col_a, col_b = self.st_module.columns(2)
+            with col_a:
+                self.st_module.text_input(
+                    "X в текущем layout",
+                    value=format_layout_float(current_x),
+                    key=self._layout_draft_input_key(
+                        axis="x",
+                        layout_mode=layout_mode,
+                        node_id=selected.id,
+                    ),
+                )
+            with col_b:
+                self.st_module.text_input(
+                    "Y в текущем layout",
+                    value=format_layout_float(current_y),
+                    key=self._layout_draft_input_key(
+                        axis="y",
+                        layout_mode=layout_mode,
+                        node_id=selected.id,
+                    ),
+                )
+            self.st_module.button(
+                "Применить положение",
+                key=f"apply_layout_draft::{layout_mode}::{selected.id}",
+                width="stretch",
+                on_click=self._apply_layout_draft,
+                args=(graph,),
+                kwargs={"node_id": selected.id, "layout_mode": layout_mode},
+            )
+            self._render_layout_draft_error(layout_mode=layout_mode, node_id=selected.id)
 
     def _render_admin_panel(
         self,
@@ -9302,9 +10286,43 @@ class StreamlitAppRuntime:
             component_key=FLOW_CANVAS_COMPONENT_KEY,
         )
 
+    def _render_workspace(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        *,
+        search: str,
+        responsible_filter: list[str],
+        kind_filter: list[str],
+        layout_mode: str,
+        position_edit_enabled: bool,
+    ) -> None:
+        diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
+        with diagram_col:
+            selected_id = self._render_flow(
+                graph,
+                wells,
+                search=search,
+                responsible_filter=responsible_filter,
+                kind_filter=kind_filter,
+                layout_mode=layout_mode,
+                position_edit_enabled=position_edit_enabled,
+            )
+        with side_col:
+            with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
+                self._render_layout_draft_panel(
+                    graph,
+                    wells,
+                    selected_id,
+                    layout_mode=layout_mode,
+                    position_edit_enabled=position_edit_enabled,
+                )
+                self._render_inspector(graph, wells, selected_id)
+
     def run(self) -> None:
         session = self.session
         inject_css(self.st_module)
+        self.auth_context().sync_persistent_auth()
         session.render_flash()
         try:
             graph, wells = session.load_app_data()
@@ -9317,23 +10335,40 @@ class StreamlitAppRuntime:
             self._render_sidebar(graph)
         )
 
-        selected_id = self._render_flow(
-            graph,
-            wells,
-            search=search,
-            responsible_filter=responsible_filter,
-            kind_filter=kind_filter,
-            layout_mode=layout_mode,
-            position_edit_enabled=position_edit_enabled,
-        )
-        with self.st_module.expander(
-            "Инспектор и управление",
-            expanded=bool(selected_id) or self.auth_context().current_user_is_admin(),
-        ):
-            self._render_inspector(graph, wells, selected_id)
+        @self.st_module.fragment
+        def render_workspace_fragment() -> None:
+            self._render_workspace(
+                graph,
+                wells,
+                search=search,
+                responsible_filter=responsible_filter,
+                kind_filter=kind_filter,
+                layout_mode=layout_mode,
+                position_edit_enabled=position_edit_enabled,
+            )
+
+        render_workspace_fragment()
+        if session.consume_position_edit_rerun_request():
+            self.st_module.rerun()
+
+
+def parse_layout_draft_xy(
+    *,
+    layout_x: str,
+    layout_y: str,
+) -> tuple[float, float] | str:
+    try:
+        parsed_x = round(float(layout_x.strip()), 2)
+        parsed_y = round(float(layout_y.strip()), 2)
+    except ValueError:
+        return "Координаты текущего layout должны быть числами."
+
+    if not isfinite(parsed_x) or not isfinite(parsed_y):
+        return "Координаты текущего layout должны быть конечными числами."
+    return parsed_x, parsed_y
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	11375
+===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	12544
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -9346,8 +10381,10 @@ from pydiag.application import (
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
+    ensure_position_edit_positions,
     pop_flash,
     persist_graph_document_update,
+    normalize_position_pair,
     position_edit_positions_from_state,
     reset_position_edit_state,
 )
@@ -9368,6 +10405,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
 LOADED_GRAPH_VERSION_KEY = "loaded_graph_version_id"
+POSITION_EDIT_RERUN_REQUEST_KEY = "_position_edit_rerun_requested"
 
 
 @dataclass(frozen=True)
@@ -9489,6 +10527,37 @@ class StreamlitSessionCoordinator:
         graph: FlowGraphDocument,
     ) -> dict[str, tuple[float, float]]:
         return position_edit_positions_from_state(self.session_state, graph)
+
+    def ensure_position_edit_draft(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        layout_mode: str,
+    ) -> dict[str, tuple[float, float]]:
+        return ensure_position_edit_positions(
+            self.session_state,
+            graph,
+            wells,
+            layout_mode,
+        )
+
+    def update_position_edit_draft(
+        self,
+        graph: FlowGraphDocument,
+        *,
+        node_id: str,
+        x: float,
+        y: float,
+    ) -> dict[str, tuple[float, float]]:
+        positions = dict(position_edit_positions_from_state(self.session_state, graph))
+        positions[node_id] = normalize_position_pair((x, y))
+        self.session_state["position_edit_positions"] = positions
+        self.session_state["position_edit_dirty"] = True
+        self.session_state[POSITION_EDIT_RERUN_REQUEST_KEY] = True
+        return positions
+
+    def consume_position_edit_rerun_request(self) -> bool:
+        return bool(self.session_state.pop(POSITION_EDIT_RERUN_REQUEST_KEY, False))
 
     def save_wells(
         self,
@@ -10082,12 +11151,13 @@ def render_layout_section(
     return position_edit_state.enabled
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/streamlit_app.py	732
+===BEGIN_FILE===	src/pydiag/presentation/streamlit_app.py	940
 from __future__ import annotations
 
 import streamlit as st
 
-from pydiag.infrastructure import JsonDocumentsGateway
+from pydiag.infrastructure import FileAuthSessionStore, JsonDocumentsGateway
+from pydiag.presentation.auth_persistence import auth_session_ttl_seconds
 from pydiag.presentation.runtime import StreamlitAppRuntime
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
@@ -10103,6 +11173,8 @@ def runtime() -> StreamlitAppRuntime:
     return StreamlitAppRuntime(
         st_module=st,
         documents_gateway=JsonDocumentsGateway(),
+        auth_session_store=FileAuthSessionStore(),
+        auth_session_ttl_seconds=auth_session_ttl_seconds(),
         render_canvas=render_flow_canvas,
     )
 
@@ -10249,12 +11321,12 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	6047
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	6813
 .flow-canvas-root {
   position: relative;
   width: 100%;
-  height: clamp(520px, calc(100vh - 6.5rem), 860px);
-  height: clamp(520px, calc(100dvh - 6.5rem), 860px);
+  height: clamp(500px, calc(100vh - 5rem), 720px);
+  height: clamp(500px, calc(100dvh - 5rem), 720px);
   overflow: hidden;
   border-radius: 18px;
   color: #0f172a;
@@ -10262,9 +11334,10 @@ __all__ = [
   user-select: none;
   -webkit-user-select: none;
   background:
-    radial-gradient(circle at top left, rgba(20, 184, 166, 0.09), transparent 28%),
-    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 24%),
-    linear-gradient(180deg, #f8fbfd 0%, #f3f6fb 100%);
+    radial-gradient(circle at 12% 10%, rgba(244, 114, 182, 0.08), transparent 22%),
+    radial-gradient(circle at 90% 8%, rgba(14, 165, 233, 0.08), transparent 24%),
+    radial-gradient(circle at 55% 100%, rgba(251, 191, 36, 0.07), transparent 22%),
+    linear-gradient(180deg, #fafaf8 0%, #f3f4f6 100%);
 }
 
 .flow-canvas-toolbar {
@@ -10275,6 +11348,36 @@ __all__ = [
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.flow-canvas-hint {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 8;
+  display: grid;
+  gap: 2px;
+  max-width: min(360px, calc(100% - 124px));
+  padding: 10px 14px;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.flow-canvas-hint strong {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.flow-canvas-hint span {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #0f172a;
 }
 
 .flow-canvas-toolbar__button {
@@ -10303,10 +11406,9 @@ __all__ = [
   overflow: hidden;
   cursor: grab;
   touch-action: none;
-  background-image:
-    linear-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.14) 1px, transparent 1px);
-  background-size: 28px 28px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.8), transparent 44%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.46), rgba(226, 232, 240, 0.22));
 }
 
 .flow-canvas-viewport.is-panning {
@@ -10459,6 +11561,7 @@ __all__ = [
   background: transparent;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none;
 }
 
 .flow-node-card.is-draggable {
@@ -10542,8 +11645,8 @@ __all__ = [
 
 @media (max-width: 840px) {
   .flow-canvas-root {
-    height: clamp(420px, calc(100vh - 5.5rem), 720px);
-    height: clamp(420px, calc(100dvh - 5.5rem), 720px);
+    height: clamp(420px, calc(100vh - 4.4rem), 620px);
+    height: clamp(420px, calc(100dvh - 4.4rem), 620px);
   }
 
   .flow-canvas-minimap {
@@ -10553,10 +11656,15 @@ __all__ = [
     height: 112px;
     padding: 8px;
   }
+
+  .flow-canvas-hint {
+    max-width: calc(100% - 104px);
+    padding: 8px 12px;
+  }
 }
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	23665
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	24706
 const TOOLBAR_BUTTONS = [
   { id: "zoom-in", label: "+" },
   { id: "zoom-out", label: "-" },
@@ -10690,6 +11798,12 @@ function renderState(state) {
       }
       queueRender(state);
     });
+  }
+
+  if (payload.position_edit_enabled) {
+    const hint = createElement("div", "flow-canvas-hint", root);
+    hint.innerHTML =
+      "<strong>Режим layout</strong><span>Тяните карточку за сам блок. Пустой фон двигает сцену.</span>";
   }
 
   const viewport = createElement(
@@ -10946,6 +12060,7 @@ function startNodeDrag(event, state, nodeId) {
   }
   event.preventDefault();
   event.stopPropagation();
+  clearSelection(state.ownerDocument);
 
   const nodePosition = state.positions[nodeId];
   if (!nodePosition) {
@@ -10955,7 +12070,14 @@ function startNodeDrag(event, state, nodeId) {
   const origin = { ...nodePosition };
   const start = { x: event.clientX, y: event.clientY };
   const ownerDocument = state.ownerDocument;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+    ownerDocument.body.style.cursor = "grabbing";
+  }
   const move = (moveEvent) => {
+    moveEvent.preventDefault();
     const dx = (moveEvent.clientX - start.x) / state.view.scale;
     const dy = (moveEvent.clientY - start.y) / state.view.scale;
     state.positions[nodeId] = {
@@ -10968,11 +12090,15 @@ function startNodeDrag(event, state, nodeId) {
     ownerDocument.removeEventListener("pointermove", move);
     ownerDocument.removeEventListener("pointerup", stop);
     ownerDocument.removeEventListener("pointercancel", stop);
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+      ownerDocument.body.style.cursor = previousCursor;
+    }
     state.draggingNodeId = null;
-    state.component.setStateValue("positions", state.positions);
+    state.component.setStateValue("positions", copyPositionMap(state.positions));
     queueRender(state);
   };
-  ownerDocument.addEventListener("pointermove", move);
+  ownerDocument.addEventListener("pointermove", move, { passive: false });
   ownerDocument.addEventListener("pointerup", stop);
   ownerDocument.addEventListener("pointercancel", stop);
 }
@@ -11216,6 +12342,17 @@ function nodePositionMap(nodes) {
     result[node.id] = {
       x: round(node.position.x),
       y: round(node.position.y),
+    };
+  }
+  return result;
+}
+
+function copyPositionMap(positions) {
+  const result = {};
+  for (const [nodeId, position] of Object.entries(positions)) {
+    result[nodeId] = {
+      x: round(position.x),
+      y: round(position.y),
     };
   }
   return result;

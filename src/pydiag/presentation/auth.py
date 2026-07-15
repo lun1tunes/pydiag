@@ -4,6 +4,8 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
+from pydiag.common.auth_sessions import AuthSessionStore
+
 from .auth_config import (
     admin_password,
     admin_password_warning,
@@ -18,8 +20,15 @@ from .auth_config import (
     password_is_allowed,
     streamlit_secrets_enabled,
 )
+from .auth_persistence import (
+    auth_request_context,
+    login_user_with_persistence,
+    logout_user_with_persistence,
+    sync_persistent_auth_session,
+)
 from .auth_models import AuthUser
 from .auth_session import (
+    DEFAULT_AUTH_SESSION_TTL_SECONDS,
     current_auth_user,
     current_user_is_admin,
     current_user_is_super_admin,
@@ -53,6 +62,8 @@ __all__ = [
 @dataclass(frozen=True)
 class StreamlitAuthContext:
     st_module: Any
+    session_store: AuthSessionStore | None = None
+    session_ttl_seconds: int = DEFAULT_AUTH_SESSION_TTL_SECONDS
 
     @property
     def session_state(self) -> MutableMapping[str, Any]:
@@ -95,7 +106,32 @@ class StreamlitAuthContext:
         return auth_config_warning(self.st_module)
 
     def login_user(self, user: AuthUser) -> None:
-        login_user(self.session_state, user)
+        login_user_with_persistence(
+            self.session_state,
+            user,
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+            session_ttl_seconds=self.session_ttl_seconds,
+        )
 
     def logout_user(self) -> None:
-        logout_user(self.session_state)
+        logout_user_with_persistence(
+            self.session_state,
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+        )
+
+    def sync_persistent_auth(self) -> None:
+        markup = sync_persistent_auth_session(
+            self.session_state,
+            self.configured_auth_users(),
+            session_store=self.session_store,
+            request_context=auth_request_context(self.st_module),
+            session_ttl_seconds=self.session_ttl_seconds,
+        )
+        if markup and hasattr(self.st_module, "html"):
+            self.st_module.html(
+                markup,
+                width="content",
+                unsafe_allow_javascript=True,
+            )

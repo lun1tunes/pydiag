@@ -1183,8 +1183,10 @@ def test_presentation_auth_facade_stays_thin() -> None:
         "collections.abc",
         "dataclasses",
         "typing",
+        "pydiag.common.auth_sessions",
         "pydiag.presentation.auth_config",
         "pydiag.presentation.auth_models",
+        "pydiag.presentation.auth_persistence",
         "pydiag.presentation.auth_session",
     }
 
@@ -1252,6 +1254,7 @@ def test_streamlit_app_entrypoint_stays_minimal() -> None:
     imports = file_imports(presentation_file("streamlit_app.py"))
     assert imports == {
         "pydiag.infrastructure",
+        "pydiag.presentation.auth_persistence",
         "streamlit",
         "pydiag.presentation.runtime",
         "pydiag.rendering.flow_canvas_component",

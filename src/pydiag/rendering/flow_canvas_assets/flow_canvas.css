@@ -1,8 +1,8 @@
 .flow-canvas-root {
   position: relative;
   width: 100%;
-  height: clamp(520px, calc(100vh - 6.5rem), 860px);
-  height: clamp(520px, calc(100dvh - 6.5rem), 860px);
+  height: clamp(500px, calc(100vh - 5rem), 720px);
+  height: clamp(500px, calc(100dvh - 5rem), 720px);
   overflow: hidden;
   border-radius: 18px;
   color: #0f172a;
@@ -10,9 +10,10 @@
   user-select: none;
   -webkit-user-select: none;
   background:
-    radial-gradient(circle at top left, rgba(20, 184, 166, 0.09), transparent 28%),
-    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 24%),
-    linear-gradient(180deg, #f8fbfd 0%, #f3f6fb 100%);
+    radial-gradient(circle at 12% 10%, rgba(244, 114, 182, 0.08), transparent 22%),
+    radial-gradient(circle at 90% 8%, rgba(14, 165, 233, 0.08), transparent 24%),
+    radial-gradient(circle at 55% 100%, rgba(251, 191, 36, 0.07), transparent 22%),
+    linear-gradient(180deg, #fafaf8 0%, #f3f4f6 100%);
 }
 
 .flow-canvas-toolbar {
@@ -23,6 +24,36 @@
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.flow-canvas-hint {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 8;
+  display: grid;
+  gap: 2px;
+  max-width: min(360px, calc(100% - 124px));
+  padding: 10px 14px;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.flow-canvas-hint strong {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.flow-canvas-hint span {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #0f172a;
 }
 
 .flow-canvas-toolbar__button {
@@ -51,10 +82,9 @@
   overflow: hidden;
   cursor: grab;
   touch-action: none;
-  background-image:
-    linear-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.14) 1px, transparent 1px);
-  background-size: 28px 28px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.8), transparent 44%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.46), rgba(226, 232, 240, 0.22));
 }
 
 .flow-canvas-viewport.is-panning {
@@ -207,6 +237,7 @@
   background: transparent;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none;
 }
 
 .flow-node-card.is-draggable {
@@ -290,8 +321,8 @@
 
 @media (max-width: 840px) {
   .flow-canvas-root {
-    height: clamp(420px, calc(100vh - 5.5rem), 720px);
-    height: clamp(420px, calc(100dvh - 5.5rem), 720px);
+    height: clamp(420px, calc(100vh - 4.4rem), 620px);
+    height: clamp(420px, calc(100dvh - 4.4rem), 620px);
   }
 
   .flow-canvas-minimap {
@@ -300,5 +331,10 @@
     width: 144px;
     height: 112px;
     padding: 8px;
+  }
+
+  .flow-canvas-hint {
+    max-width: calc(100% - 104px);
+    padding: 8px 12px;
   }
 }

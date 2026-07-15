@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from pydiag.presentation.auth import AuthUser
+from pydiag.infrastructure import FileAuthSessionStore
+from pydiag.presentation.auth import AuthUser, StreamlitAuthContext
 from pydiag.presentation.auth_config import (
     admin_password,
     admin_password_warning,
@@ -18,8 +19,30 @@ from pydiag.presentation.auth_session import (
 )
 
 
-def fake_st_module(*, session_state: dict | None = None, secrets: dict | None = None):
-    return SimpleNamespace(session_state=session_state or {}, secrets=secrets or {})
+def fake_st_module(
+    *,
+    session_state: dict | None = None,
+    secrets: dict | None = None,
+    cookies: dict | None = None,
+    headers: dict | None = None,
+    url: str | None = "https://pydiag.example/app",
+):
+    html_calls: list[tuple[str, dict[str, object]]] = []
+
+    def html(body: str, **kwargs) -> None:
+        html_calls.append((body, kwargs))
+
+    return SimpleNamespace(
+        session_state=session_state or {},
+        secrets=secrets or {},
+        context=SimpleNamespace(
+            cookies=cookies or {},
+            headers=headers or {},
+            url=url,
+        ),
+        html=html,
+        html_calls=html_calls,
+    )
 
 
 def test_admin_password_rejects_short_configured_value(monkeypatch) -> None:
@@ -122,6 +145,108 @@ def test_login_user_stores_super_admin_flag() -> None:
 
     assert current_user_is_admin(session_state) is True
     assert current_user_is_super_admin(session_state) is True
+
+
+def test_streamlit_auth_context_persists_restores_and_revokes_session(tmp_path) -> None:
+    user = AuthUser(
+        username="planner",
+        display_name="Иван Планировщик",
+        password="strong-pass",
+    )
+    store = FileAuthSessionStore(
+        path_fn=lambda: tmp_path / "auth_sessions.json",
+        session_id_factory=lambda: "session-001",
+    )
+
+    login_module = fake_st_module(session_state={})
+    login_context = StreamlitAuthContext(login_module, session_store=store)
+    login_context.login_user(user)
+    login_context.sync_persistent_auth()
+
+    cookie_name = login_module.session_state["_pydiag_persistent_auth_cookie_name"]
+    session_id = login_module.session_state["_pydiag_persistent_auth_session_id"]
+    assert session_id == "session-001"
+    assert cookie_name.startswith("__Secure-pydiag_auth_")
+    assert len(login_module.html_calls) == 1
+    assert login_module.html_calls[0][1]["unsafe_allow_javascript"] is True
+
+    restored_module = fake_st_module(
+        session_state={},
+        secrets={
+            "users": {
+                "planner": {
+                    "password": "strong-pass",
+                    "name": "Иван Планировщик",
+                }
+            }
+        },
+        cookies={cookie_name: session_id},
+    )
+    restored_context = StreamlitAuthContext(restored_module, session_store=store)
+    restored_context.sync_persistent_auth()
+
+    assert restored_module.session_state["authenticated_user"]["display_name"] == (
+        "Иван Планировщик"
+    )
+    assert len(restored_module.html_calls) == 1
+
+    restored_context.logout_user()
+    restored_context.sync_persistent_auth()
+
+    assert "authenticated_user" not in restored_module.session_state
+    assert restored_module.session_state["admin_authenticated"] is False
+    assert "Max-Age=0" in restored_module.html_calls[-1][0]
+    assert store.get_session(session_id, app_scope="https://pydiag.example/app") is None
+
+    stale_cookie_module = fake_st_module(
+        session_state=dict(restored_module.session_state),
+        secrets=restored_module.secrets,
+        cookies={cookie_name: session_id},
+    )
+    stale_cookie_context = StreamlitAuthContext(stale_cookie_module, session_store=store)
+    stale_cookie_context.sync_persistent_auth()
+
+    assert "authenticated_user" not in stale_cookie_module.session_state
+
+
+def test_streamlit_auth_context_clears_session_after_password_rotation(tmp_path) -> None:
+    store = FileAuthSessionStore(
+        path_fn=lambda: tmp_path / "auth_sessions.json",
+        session_id_factory=lambda: "session-001",
+    )
+    login_module = fake_st_module(session_state={})
+    login_context = StreamlitAuthContext(login_module, session_store=store)
+    login_context.login_user(
+        AuthUser(
+            username="planner",
+            display_name="Иван Планировщик",
+            password="strong-pass",
+        )
+    )
+    login_context.sync_persistent_auth()
+
+    cookie_name = login_module.session_state["_pydiag_persistent_auth_cookie_name"]
+    session_id = login_module.session_state["_pydiag_persistent_auth_session_id"]
+    rotated_module = fake_st_module(
+        session_state={},
+        secrets={
+            "users": {
+                "planner": {
+                    "password": "new-strong-pass",
+                    "name": "Иван Планировщик",
+                }
+            }
+        },
+        cookies={cookie_name: session_id},
+    )
+
+    rotated_context = StreamlitAuthContext(rotated_module, session_store=store)
+    rotated_context.sync_persistent_auth()
+
+    assert "authenticated_user" not in rotated_module.session_state
+    assert len(rotated_module.html_calls) == 1
+    assert "Max-Age=0" in rotated_module.html_calls[0][0]
+    assert store.get_session(session_id, app_scope="https://pydiag.example/app") is None
 
 
 def test_auth_config_warning_mentions_short_user_password(monkeypatch) -> None:

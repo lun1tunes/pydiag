@@ -282,6 +282,11 @@ def render_graph_source_node_editor(
         st_module.error(f"Не удалось загрузить карточку из source YAML: {exc}")
         return
 
+    st_module.caption(
+        "Эти поля меняют канонический source YAML. "
+        "Для черновика текущего layout используйте блок 'Положение на холсте' выше."
+    )
+
     responsible_ids = list(graph.responsibles.keys())
     primary_options = [EMPTY_RESPONSIBLE_OPTION, *responsible_ids]
     node_kind_options = [

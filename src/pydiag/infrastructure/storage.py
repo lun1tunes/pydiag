@@ -22,6 +22,8 @@ from .storage_materialization import (
     materialize_flow_graph_from_source,
 )
 from .storage_paths import (
+    AUTH_SESSIONS_PATH,
+    AUTH_SESSIONS_PATH_ENV,
     GRAPH_PATH,
     GRAPH_PATH_ENV,
     GRAPH_VERSIONS_DIR,
@@ -31,6 +33,7 @@ from .storage_paths import (
     SOURCE_GRAPH_PATH_ENV,
     WELLS_PATH,
     WELLS_PATH_ENV,
+    auth_sessions_path,
     graph_path,
     graph_versions_dir,
     graph_version_paths,
@@ -51,6 +54,8 @@ from .storage_writes import (
 )
 
 __all__ = [
+    "AUTH_SESSIONS_PATH",
+    "AUTH_SESSIONS_PATH_ENV",
     "GRAPH_PATH",
     "GRAPH_PATH_ENV",
     "GRAPH_VERSIONS_DIR",
@@ -63,6 +68,7 @@ __all__ = [
     "FileLockTimeoutError",
     "VersionConflictError",
     "acquire_file_lock",
+    "auth_sessions_path",
     "ensure_lock_file_region",
     "fsync_parent_dir",
     "graph_path",

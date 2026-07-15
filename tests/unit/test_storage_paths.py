@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydiag.infrastructure.storage_paths import graph_version_paths, next_graph_version_path
+from pydiag.infrastructure.storage_paths import (
+    auth_sessions_path,
+    graph_version_paths,
+    next_graph_version_path,
+)
 
 
 def test_graph_version_paths_follow_configured_source_directory(
@@ -23,3 +27,13 @@ def test_graph_version_paths_follow_configured_source_directory(
         source_dir / "flow_source.v0002.yaml",
     ]
     assert next_graph_version_path() == source_dir / "flow_source.v0003.yaml"
+
+
+def test_auth_sessions_path_uses_explicit_environment_override(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    configured = tmp_path / "sessions.json"
+    monkeypatch.setenv("PYDIAG_AUTH_SESSIONS_PATH", str(configured))
+
+    assert auth_sessions_path() == configured

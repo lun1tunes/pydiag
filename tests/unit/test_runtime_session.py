@@ -250,6 +250,30 @@ def test_session_coordinator_position_edit_helpers(documents) -> None:
     assert coordinator.position_edit_positions(graph)["proc_initial_review"] == (10.0, 20.0)
 
 
+def test_session_coordinator_updates_position_edit_draft(documents) -> None:
+    graph, wells = documents
+    st_module = FakeStreamlitModule()
+    coordinator = StreamlitSessionCoordinator(st_module, FakeDocumentsGateway())
+
+    draft = coordinator.ensure_position_edit_draft(graph, wells, "custom")
+    assert "proc_initial_review" in draft
+
+    updated = coordinator.update_position_edit_draft(
+        graph,
+        node_id="proc_initial_review",
+        x=733.5,
+        y=412.25,
+    )
+
+    assert updated["proc_initial_review"] == (733.5, 412.25)
+    assert st_module.session_state["position_edit_positions"]["proc_initial_review"] == (
+        733.5,
+        412.25,
+    )
+    assert st_module.session_state["position_edit_dirty"] is True
+    assert st_module.session_state["_position_edit_rerun_requested"] is True
+
+
 def test_session_coordinator_exposes_materialization_capability() -> None:
     st_module = FakeStreamlitModule()
     gateway = FakeDocumentsGateway()

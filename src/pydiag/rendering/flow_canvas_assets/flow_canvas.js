@@ -133,6 +133,12 @@ function renderState(state) {
     });
   }
 
+  if (payload.position_edit_enabled) {
+    const hint = createElement("div", "flow-canvas-hint", root);
+    hint.innerHTML =
+      "<strong>Режим layout</strong><span>Тяните карточку за сам блок. Пустой фон двигает сцену.</span>";
+  }
+
   const viewport = createElement(
     "div",
     state.isPanning ? "flow-canvas-viewport is-panning" : "flow-canvas-viewport",
@@ -387,6 +393,7 @@ function startNodeDrag(event, state, nodeId) {
   }
   event.preventDefault();
   event.stopPropagation();
+  clearSelection(state.ownerDocument);
 
   const nodePosition = state.positions[nodeId];
   if (!nodePosition) {
@@ -396,7 +403,14 @@ function startNodeDrag(event, state, nodeId) {
   const origin = { ...nodePosition };
   const start = { x: event.clientX, y: event.clientY };
   const ownerDocument = state.ownerDocument;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+    ownerDocument.body.style.cursor = "grabbing";
+  }
   const move = (moveEvent) => {
+    moveEvent.preventDefault();
     const dx = (moveEvent.clientX - start.x) / state.view.scale;
     const dy = (moveEvent.clientY - start.y) / state.view.scale;
     state.positions[nodeId] = {
@@ -409,11 +423,15 @@ function startNodeDrag(event, state, nodeId) {
     ownerDocument.removeEventListener("pointermove", move);
     ownerDocument.removeEventListener("pointerup", stop);
     ownerDocument.removeEventListener("pointercancel", stop);
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+      ownerDocument.body.style.cursor = previousCursor;
+    }
     state.draggingNodeId = null;
-    state.component.setStateValue("positions", state.positions);
+    state.component.setStateValue("positions", copyPositionMap(state.positions));
     queueRender(state);
   };
-  ownerDocument.addEventListener("pointermove", move);
+  ownerDocument.addEventListener("pointermove", move, { passive: false });
   ownerDocument.addEventListener("pointerup", stop);
   ownerDocument.addEventListener("pointercancel", stop);
 }
@@ -657,6 +675,17 @@ function nodePositionMap(nodes) {
     result[node.id] = {
       x: round(node.position.x),
       y: round(node.position.y),
+    };
+  }
+  return result;
+}
+
+function copyPositionMap(positions) {
+  const result = {};
+  for (const [nodeId, position] of Object.entries(positions)) {
+    result[nodeId] = {
+      x: round(position.x),
+      y: round(position.y),
     };
   }
   return result;
