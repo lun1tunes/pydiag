@@ -35,6 +35,7 @@ __all__ = [
     "WELLS_PATH_ENV",
     "configured_graph_path",
     "graph_path",
+    "graph_versions_dir",
     "graph_version_paths",
     "latest_graph_version_path",
     "next_graph_version_path",
@@ -59,12 +60,17 @@ def graph_path() -> Path:
     return GRAPH_PATH
 
 
+def graph_versions_dir() -> Path:
+    return source_graph_path().parent
+
+
 def graph_version_paths() -> list[Path]:
-    if not GRAPH_VERSIONS_DIR.exists():
+    versions_dir = graph_versions_dir()
+    if not versions_dir.exists():
         return []
 
     candidates: list[tuple[int, Path]] = []
-    for path in GRAPH_VERSIONS_DIR.iterdir():
+    for path in versions_dir.iterdir():
         if not path.is_file():
             continue
         match = GRAPH_VERSION_FILENAME_RE.fullmatch(path.name)
@@ -83,13 +89,14 @@ def latest_graph_version_path() -> Path | None:
 
 def next_graph_version_path() -> Path:
     candidates = graph_version_paths()
+    versions_dir = graph_versions_dir()
     if candidates:
         last_name = candidates[-1].name
         match = GRAPH_VERSION_FILENAME_RE.fullmatch(last_name)
         if match is not None:
             next_sequence = int(match.group("sequence")) + 1
-            return GRAPH_VERSIONS_DIR / f"flow_source.v{next_sequence:04d}.yaml"
-    return GRAPH_VERSIONS_DIR / "flow_source.v0001.yaml"
+            return versions_dir / f"flow_source.v{next_sequence:04d}.yaml"
+    return versions_dir / "flow_source.v0001.yaml"
 
 
 def source_graph_path() -> Path:

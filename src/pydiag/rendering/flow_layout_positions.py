@@ -33,7 +33,7 @@ def layout_positions(
     layout_mode: str = "snake",
     render_specs: dict[str, NodeRenderSpec] | None = None,
 ) -> dict[str, tuple[float, float]]:
-    if layout_mode == "manual":
+    if layout_mode in {"manual", "custom"}:
         return {node.id: (node.position.x, node.position.y) for node in graph.nodes}
     return snake_layout_positions(graph, render_specs or {})
 
@@ -75,13 +75,15 @@ def build_node_geometries(
     layout_mode: str,
 ) -> dict[str, NodeGeometry]:
     manual_rows = (
-        manual_row_lookup(graph, positions, render_specs) if layout_mode == "manual" else {}
+        manual_row_lookup(graph, positions, render_specs)
+        if layout_mode in {"manual", "custom"}
+        else {}
     )
     geometries: dict[str, NodeGeometry] = {}
     for index, node in enumerate(graph.nodes):
         position = positions[node.id]
         render_spec = render_specs[node.id]
-        if layout_mode == "manual":
+        if layout_mode in {"manual", "custom"}:
             row, visual_col = manual_rows[node.id]
         else:
             row = index // SNAKE_COLUMNS

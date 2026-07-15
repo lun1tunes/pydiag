@@ -6,6 +6,7 @@ from textwrap import dedent
 import pytest
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
+from pydiag.common.layout_metadata import CUSTOM_LAYOUT_X_META, CUSTOM_LAYOUT_Y_META
 from pydiag.domain import move_well_to_node, well_by_id
 from pydiag.infrastructure.flow_source_graph import load_structured_payload
 from pydiag.infrastructure.graph_versions import (
@@ -348,15 +349,16 @@ def test_graph_version_path_helpers_track_latest_and_next_version(
     monkeypatch,
     tmp_path,
 ) -> None:
-    import pydiag.infrastructure.storage_paths as storage_paths
-
     versions_dir = tmp_path / "flow_sources"
     versions_dir.mkdir()
     (versions_dir / "flow_source.v0002.yaml").write_text("{}", encoding="utf-8")
     (versions_dir / "flow_source.v0001.yaml").write_text("{}", encoding="utf-8")
     (versions_dir / "ignore-me.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(storage_paths, "GRAPH_VERSIONS_DIR", versions_dir)
+    monkeypatch.setenv(
+        "PYDIAG_SOURCE_GRAPH_PATH",
+        str(versions_dir / "flow_source.yaml"),
+    )
 
     assert graph_version_paths() == [
         versions_dir / "flow_source.v0001.yaml",
@@ -829,6 +831,70 @@ def test_save_graph_positions_with_version_check_updates_live_source_and_materia
     assert materialized_graph.version == graph.version + 1
     assert moved.position.x == 111.13
     assert moved.position.y == 222.22
+
+
+def test_save_graph_positions_with_version_check_updates_custom_layout_separately(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    source = tmp_path / "flow_source.yaml"
+    target = tmp_path / "flow_graph.json"
+    source.write_text(flow_source_yaml(), encoding="utf-8")
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", source)
+    monkeypatch.setattr(storage_paths, "GRAPH_PATH", target)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_GRAPH_PATH", raising=False)
+
+    graph = load_graph_doc()
+    saved = save_graph_positions_with_version_check(
+        {"review_data": (611.5, 333.25)},
+        expected_version=graph.version,
+        path=source,
+        layout_mode="custom",
+    )
+
+    payload = load_structured_payload(source.read_bytes())
+    materialized_graph = load_graph_doc(target)
+    review_node = next(node for node in materialized_graph.nodes if node.id == "review_data")
+
+    assert saved.version == graph.version + 1
+    assert payload["layout"]["review_data"] == {
+        "x": 380,
+        "y": 60,
+        "w": 320,
+        "h": 120,
+    }
+    assert payload["custom_layout"]["review_data"] == {
+        "x": 611.5,
+        "y": 333.25,
+        "w": 320,
+        "h": 120,
+    }
+    assert review_node.position.x == 380
+    assert review_node.position.y == 60
+    assert review_node.metadata[CUSTOM_LAYOUT_X_META] == 611.5
+    assert review_node.metadata[CUSTOM_LAYOUT_Y_META] == 333.25
+
+
+def test_save_graph_positions_with_version_check_rejects_unsupported_layout_mode(
+    data_paths,
+) -> None:
+    graph_path, _ = data_paths
+    graph = load_graph_doc(graph_path)
+
+    with pytest.raises(
+        ValueError,
+        match="Graph positions can only be saved for 'manual' or 'custom' layout modes",
+    ):
+        save_graph_positions_with_version_check(
+            {"proc_initial_review": (11.0, 22.0)},
+            expected_version=graph.version,
+            path=graph_path,
+            layout_mode="snake",
+        )
 
 
 def test_save_graph_positions_with_version_check_rejects_unknown_node(

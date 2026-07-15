@@ -6,7 +6,7 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 from pydiag.domain import well_by_id
-from pydiag.infrastructure import load_wells_doc
+from pydiag.infrastructure import load_wells_doc, materialize_flow_graph_from_source
 from pydiag.infrastructure.flow_source_graph import (
     dump_structured_yaml_payload,
     load_structured_payload,
@@ -14,6 +14,7 @@ from pydiag.infrastructure.flow_source_graph import (
 
 APP_PATH = Path(__file__).resolve().parents[2] / "app.py"
 FIXTURE_SOURCE_PATH = APP_PATH.parent / "tests" / "fixtures" / "flow_source.yaml"
+FIXTURE_WELLS_PATH = APP_PATH.parent / "tests" / "fixtures" / "wells.yaml"
 
 
 def run_app_with_temp_data(
@@ -21,10 +22,11 @@ def run_app_with_temp_data(
     monkeypatch,
     *,
     configure_admin: bool = True,
+    source_path: Path | None = None,
 ) -> AppTest:
     graph_path, wells_path = data_paths
     monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_path))
-    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(FIXTURE_SOURCE_PATH))
+    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(source_path or FIXTURE_SOURCE_PATH))
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_path))
     monkeypatch.setenv("PYDIAG_DISABLE_STREAMLIT_SECRETS", "1")
     monkeypatch.delenv("PYDIAG_ALLOW_INSECURE_ADMIN", raising=False)
@@ -75,6 +77,36 @@ def click_button(app: AppTest, label: str) -> AppTest:
             assert not app.exception
             return app
     raise AssertionError(f"Button not found: {label}")
+
+
+def set_selectbox(app: AppTest, label: str, value: str) -> AppTest:
+    for item in app.selectbox:
+        if item.label == label:
+            item.set_value(value).run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Selectbox not found: {label}")
+
+
+def set_toggle(app: AppTest, label: str, value: bool) -> AppTest:
+    for item in app.toggle:
+        if item.label == label:
+            item.set_value(value).run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Toggle not found: {label}")
+
+
+def prepare_temp_workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
+    graph_path = tmp_path / "flow_graph.json"
+    wells_path = tmp_path / "wells.yaml"
+    source_dir = tmp_path / "flow_sources"
+    source_dir.mkdir()
+    source_path = source_dir / "flow_source.yaml"
+    source_path.write_bytes(FIXTURE_SOURCE_PATH.read_bytes())
+    wells_path.write_bytes(FIXTURE_WELLS_PATH.read_bytes())
+    materialize_flow_graph_from_source(source_path=source_path, target_path=graph_path)
+    return graph_path, wells_path, source_path
 
 
 def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> None:
@@ -169,3 +201,144 @@ def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> Non
 
     assert any(item.value == "Активных скважин пока нет." for item in app.caption)
     assert "Продвинуть" not in {button.label for button in app.button}
+
+
+def test_streamlit_app_switches_graph_versions_from_source_selector(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+    version_path = source_path.parent / "flow_source.v0001.yaml"
+    payload = load_structured_payload(FIXTURE_SOURCE_PATH.read_bytes())
+    payload["nodes"]["proc_initial_review"]["title"] = "Архивная версия карточки"
+    version_path.write_text(
+        dump_structured_yaml_payload(payload),
+        encoding="utf-8",
+    )
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        configure_admin=False,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    assert not app.exception
+
+    set_selectbox(app, "Режим просмотра", "flow_source.v0001.yaml")
+
+    assert any("Архивная версия карточки" in item.value for item in app.markdown)
+
+
+def test_streamlit_admin_shows_read_only_controls_for_archived_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+    version_path = source_path.parent / "flow_source.v0001.yaml"
+    version_path.write_bytes(source_path.read_bytes())
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    login_as_admin(app)
+
+    set_selectbox(app, "Режим просмотра", "flow_source.v0001.yaml")
+
+    assert any(
+        item.value == "Изменение скважин доступно только для текущего source YAML."
+        for item in app.caption
+    )
+
+
+def test_streamlit_admin_can_save_custom_layout_without_overwriting_source_layout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    login_as_admin(app)
+
+    set_selectbox(app, "Расположение", "custom")
+    set_toggle(app, "Редактировать положение", True)
+    app.session_state["position_edit_positions"] = {"proc_initial_review": (733.5, 412.25)}
+    app.run(timeout=30)
+    assert not app.exception
+    click_button(app, "Сохранить")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    assert saved["layout"]["proc_initial_review"] == {
+        "x": 420,
+        "y": 260,
+        "w": 300,
+        "h": 116,
+    }
+    assert saved["custom_layout"]["proc_initial_review"] == {
+        "x": 733.5,
+        "y": 412.25,
+        "w": 300,
+        "h": 116,
+    }
+
+
+def test_streamlit_admin_can_edit_selected_flow_source_node(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    login_as_admin(app)
+
+    set_text_input(app, "Заголовок карточки", "UI updated node")
+    set_text_input(app, "X в source layout", "444.5")
+    set_text_input(app, "Y в source layout", "222.25")
+    set_selectbox(app, "Основной ответственный", "completion")
+    click_button(app, "Сохранить карточку")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    assert saved["nodes"]["proc_initial_review"]["title"] == "UI updated node"
+    assert saved["nodes"]["proc_initial_review"]["responsible"] == "completion"
+    assert saved["layout"]["proc_initial_review"]["x"] == 444.5
+    assert saved["layout"]["proc_initial_review"]["y"] == 222.25
+
+
+def test_streamlit_admin_can_edit_selected_flow_source_edge(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "e_review_decision"
+    app.run(timeout=30)
+    login_as_admin(app)
+
+    set_selectbox(app, "Куда", "card_data_rework")
+    set_selectbox(app, "Тип связи", "dashed")
+    set_text_input(app, "Метка связи", "UI reroute")
+    click_button(app, "Сохранить связь")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    transition = saved["nodes"]["proc_initial_review"]["transitions"][0]
+    assert transition["to"] == "card_data_rework"
+    assert transition["kind"] == "dashed"
+    assert transition["label"] == "UI reroute"

@@ -123,6 +123,29 @@ def test_unpack_rejects_parent_traversal(tmp_path: Path) -> None:
         project_pack.unpack(tmp_path / "restore", archive)
 
 
+def test_unpack_rejects_confidential_runtime_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.txt"
+    content = "wells: []"
+    archive.write_text(
+        f"{project_pack.BEGIN}\tdata/wells.yaml\t{len(content)}\n{content}\n{project_pack.END}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="confidential runtime files"):
+        project_pack.unpack(tmp_path / "restore", archive)
+
+
+def test_unpack_rejects_unexpected_runtime_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.txt"
+    archive.write_text(
+        f"{project_pack.BEGIN}\tnotes.md\t5\nhello\n{project_pack.END}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unexpected runtime bundle path"):
+        project_pack.unpack(tmp_path / "restore", archive)
+
+
 def test_unpack_creates_wells_example_yaml(tmp_path: Path) -> None:
     source = tmp_path / "source"
     restore = tmp_path / "restore"

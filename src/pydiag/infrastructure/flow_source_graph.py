@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pydiag.common.graph_source_admin import (
+    GraphSourceEdgeDraft,
+    GraphSourceNodeDraft,
+    UpdateGraphSourceEdgeCommand,
+    UpdateGraphSourceNodeCommand,
+)
+from pydiag.common.layout_metadata import (
+    CUSTOM_LAYOUT_X_META,
+    CUSTOM_LAYOUT_Y_META,
+)
 from pydiag.domain.models import HEX_COLOR_RE, FlowGraphDocument, MetaValue, parse_node_time
 from pydiag.infrastructure.editable_flow_graph import (
     EDITABLE_FLOW_GRAPH_SCHEMA_VERSION,
@@ -75,9 +86,14 @@ __all__ = [
     "flow_source_payload_from_editable_payload",
     "editable_flow_graph_payload_from_source_payload",
     "flow_source_payload_from_runtime_payload",
+    "graph_source_edge_draft_from_payload",
+    "graph_source_node_draft_from_payload",
     "is_flow_source_payload",
     "load_structured_payload",
+    "update_flow_source_payload_custom_layout",
+    "update_flow_source_payload_edge",
     "update_flow_source_payload_layout",
+    "update_flow_source_payload_node",
 ]
 
 
@@ -183,6 +199,7 @@ class FlowSourceDocument(FlowSourceStrictModel):
     sections: dict[str, FlowSourceSection] = Field(default_factory=dict)
     nodes: dict[str, FlowSourceNode]
     layout: dict[str, FlowSourceLayoutEntry] = Field(default_factory=dict)
+    custom_layout: dict[str, FlowSourceLayoutEntry] = Field(default_factory=dict)
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -198,6 +215,11 @@ class FlowSourceDocument(FlowSourceStrictModel):
         unknown_layout_ids = sorted(set(self.layout) - node_ids)
         if unknown_layout_ids:
             raise ValueError(f"Unknown layout node ids: {', '.join(unknown_layout_ids)}")
+        unknown_custom_layout_ids = sorted(set(self.custom_layout) - node_ids)
+        if unknown_custom_layout_ids:
+            raise ValueError(
+                f"Unknown custom layout node ids: {', '.join(unknown_custom_layout_ids)}"
+            )
 
         for node_id, node in self.nodes.items():
             if node.section is not None and node.section not in section_ids:
@@ -250,6 +272,7 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
 
     for node_index, (node_id, node) in enumerate(document.nodes.items()):
         layout = document.layout.get(node_id) or auto_layout_entry(node.kind, node_index)
+        custom_layout = document.custom_layout.get(node_id)
         nodes_payload.append(
             {
                 "id": node_id,
@@ -268,7 +291,10 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
                 "approvers": node.approvers,
                 "note": node.note,
                 "duration": node.duration,
-                "metadata": editable_node_metadata(node),
+                "metadata": editable_node_metadata(
+                    node,
+                    custom_layout=custom_layout,
+                ),
             }
         )
         for transition_index, transition in enumerate(node.transitions):
@@ -342,6 +368,27 @@ def flow_source_payload_from_runtime_payload(
             }
         )
 
+    nodes_payload: dict[str, dict[str, Any]] = {}
+    custom_layout: dict[str, dict[str, Any]] = {}
+    for node in document.nodes:
+        metadata = dict(node.metadata)
+        custom_layout_entry = extract_custom_layout_entry(
+            metadata,
+            width=int(node.size.w),
+            height=int(node.size.h),
+        )
+        if custom_layout_entry is not None:
+            custom_layout[node.id] = custom_layout_entry
+        nodes_payload[node.id] = {
+            "title": node.text,
+            "kind": node.kind,
+            "responsible": node.primary_responsible,
+            "participants": node.secondary_responsibles,
+            "duration": node.time,
+            "transitions": transitions_by_source[node.id],
+            "metadata": metadata,
+        }
+
     source_payload = {
         "schema_version": FLOW_SOURCE_SCHEMA_VERSION,
         "graph_id": graph_id,
@@ -357,18 +404,7 @@ def flow_source_payload_from_runtime_payload(
             }
             for responsible_id, style in document.responsibles.items()
         },
-        "nodes": {
-            node.id: {
-                "title": node.text,
-                "kind": node.kind,
-                "responsible": node.primary_responsible,
-                "participants": node.secondary_responsibles,
-                "duration": node.time,
-                "transitions": transitions_by_source[node.id],
-                "metadata": dict(node.metadata),
-            }
-            for node in document.nodes
-        },
+        "nodes": nodes_payload,
         "layout": {
             node.id: {
                 "x": round(float(node.position.x), 2),
@@ -378,6 +414,7 @@ def flow_source_payload_from_runtime_payload(
             }
             for node in document.nodes
         },
+        "custom_layout": custom_layout,
     }
     FlowSourceDocument.model_validate(source_payload, strict=True)
     return source_payload
@@ -411,6 +448,17 @@ def flow_source_payload_from_editable_payload(
         )
 
     sections = editable_sections_payload(document.nodes)
+    custom_layout: dict[str, dict[str, Any]] = {}
+    nodes_payload: dict[str, dict[str, Any]] = {}
+    for node in document.nodes:
+        node_payload, custom_layout_entry = editable_node_source_payload(
+            node,
+            transitions_by_source[node.id],
+        )
+        nodes_payload[node.id] = node_payload
+        if custom_layout_entry is not None:
+            custom_layout[node.id] = custom_layout_entry
+
     source_payload = {
         "schema_version": FLOW_SOURCE_SCHEMA_VERSION,
         "graph_id": graph_id,
@@ -428,10 +476,7 @@ def flow_source_payload_from_editable_payload(
             for responsible_id, style in document.responsibles.items()
         },
         "sections": sections,
-        "nodes": {
-            node.id: editable_node_source_payload(node, transitions_by_source[node.id])
-            for node in document.nodes
-        },
+        "nodes": nodes_payload,
         "layout": {
             node.id: {
                 "x": round(float(node.position.x), 2),
@@ -441,6 +486,7 @@ def flow_source_payload_from_editable_payload(
             }
             for node in document.nodes
         },
+        "custom_layout": custom_layout,
     }
     FlowSourceDocument.model_validate(source_payload, strict=True)
     return source_payload
@@ -451,6 +497,35 @@ def update_flow_source_payload_layout(
     *,
     positions: dict[str, tuple[float, float]],
     expected_version: int,
+) -> dict[str, Any]:
+    return update_flow_source_payload_layout_bucket(
+        payload,
+        positions=positions,
+        expected_version=expected_version,
+        use_custom_layout=False,
+    )
+
+
+def update_flow_source_payload_custom_layout(
+    payload: object,
+    *,
+    positions: dict[str, tuple[float, float]],
+    expected_version: int,
+) -> dict[str, Any]:
+    return update_flow_source_payload_layout_bucket(
+        payload,
+        positions=positions,
+        expected_version=expected_version,
+        use_custom_layout=True,
+    )
+
+
+def update_flow_source_payload_layout_bucket(
+    payload: object,
+    *,
+    positions: dict[str, tuple[float, float]],
+    expected_version: int,
+    use_custom_layout: bool,
 ) -> dict[str, Any]:
     document = FlowSourceDocument.model_validate(payload, strict=True)
     if document.version != expected_version:
@@ -465,19 +540,138 @@ def update_flow_source_payload_layout(
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
     node_indexes = {node_id: index for index, node_id in enumerate(document.nodes)}
+    bucket = updated.custom_layout if use_custom_layout else updated.layout
     for node_id, position in positions.items():
-        existing = updated.layout.get(node_id)
+        existing = updated.layout.get(node_id) if use_custom_layout else bucket.get(node_id)
+        if existing is None and use_custom_layout:
+            existing = bucket.get(node_id)
         if existing is None:
-            existing = auto_layout_entry(
-                updated.nodes[node_id].kind,
-                node_indexes[node_id],
-            )
-        updated.layout[node_id] = FlowSourceLayoutEntry(
-            x=round(float(position[0]), 2),
-            y=round(float(position[1]), 2),
+            existing = auto_layout_entry(updated.nodes[node_id].kind, node_indexes[node_id])
+        normalized_x = round(float(position[0]), 2)
+        normalized_y = round(float(position[1]), 2)
+        if not math.isfinite(normalized_x) or not math.isfinite(normalized_y):
+            raise ValueError("Layout coordinates must be finite numbers")
+        bucket[node_id] = FlowSourceLayoutEntry(
+            x=normalized_x,
+            y=normalized_y,
             w=int(existing.w),
             h=int(existing.h),
         )
+    return updated.model_dump(mode="json")
+
+
+def graph_source_node_draft_from_payload(payload: object, node_id: str) -> GraphSourceNodeDraft:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if node_id not in document.nodes:
+        raise ValueError(f"Unknown graph node: {node_id}")
+    node = document.nodes[node_id]
+    node_index = list(document.nodes).index(node_id)
+    layout = document.layout.get(node_id) or auto_layout_entry(node.kind, node_index)
+    return GraphSourceNodeDraft(
+        node_id=node_id,
+        title=node.title,
+        kind=node.kind,
+        layout_x=round(float(layout.x), 2),
+        layout_y=round(float(layout.y), 2),
+        layout_w=int(layout.w),
+        layout_h=int(layout.h),
+        responsible=node.responsible,
+        participants=tuple(node.participants),
+        approvers=tuple(node.approvers),
+        duration=node.duration,
+        note=node.note,
+    )
+
+
+def graph_source_edge_draft_from_payload(payload: object, edge_id: str) -> GraphSourceEdgeDraft:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    source_node_id, transition_index = find_transition_location(document, edge_id)
+    transition = document.nodes[source_node_id].transitions[transition_index]
+    return GraphSourceEdgeDraft(
+        edge_id=edge_id,
+        source=source_node_id,
+        target=transition.to,
+        kind=transition.kind,
+        label=transition.label,
+        condition=transition.condition,
+        note=transition.note,
+    )
+
+
+def update_flow_source_payload_node(
+    payload: object,
+    *,
+    command: UpdateGraphSourceNodeCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    if command.node_id not in document.nodes:
+        raise ValueError(f"Unknown graph node: {command.node_id}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    current = updated.nodes[command.node_id]
+    updated.nodes[command.node_id] = current.model_copy(
+        update={
+            "title": command.title,
+            "kind": command.kind,
+            "responsible": command.responsible,
+            "participants": list(command.participants),
+            "approvers": list(command.approvers),
+            "duration": command.duration,
+            "note": command.note,
+        }
+    )
+    updated.layout[command.node_id] = FlowSourceLayoutEntry(
+        x=round(float(command.layout_x), 2),
+        y=round(float(command.layout_y), 2),
+        w=int(command.layout_w),
+        h=int(command.layout_h),
+    )
+    return updated.model_dump(mode="json")
+
+
+def update_flow_source_payload_edge(
+    payload: object,
+    *,
+    command: UpdateGraphSourceEdgeCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    if command.source not in document.nodes:
+        raise ValueError(f"Unknown edge source node: {command.source}")
+    if command.target not in document.nodes:
+        raise ValueError(f"Unknown edge target node: {command.target}")
+
+    source_node_id, transition_index = find_transition_location(document, command.edge_id)
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+
+    current_transition = updated.nodes[source_node_id].transitions[transition_index]
+    replacement = current_transition.model_copy(
+        update={
+            "to": command.target,
+            "kind": command.kind,
+            "label": command.label,
+            "condition": command.condition,
+            "note": command.note,
+            "id": command.edge_id,
+        }
+    )
+    if source_node_id == command.source:
+        updated.nodes[source_node_id].transitions[transition_index] = replacement
+        return updated.model_dump(mode="json")
+
+    del updated.nodes[source_node_id].transitions[transition_index]
+    updated.nodes[command.source].transitions.append(replacement)
     return updated.model_dump(mode="json")
 
 
@@ -497,7 +691,11 @@ def dump_structured_yaml_payload(payload: object) -> str:
     return rendered.rstrip() + "\n"
 
 
-def editable_node_metadata(node: FlowSourceNode) -> dict[str, MetaValue]:
+def editable_node_metadata(
+    node: FlowSourceNode,
+    *,
+    custom_layout: FlowSourceLayoutEntry | None = None,
+) -> dict[str, MetaValue]:
     metadata = dict(node.metadata)
     if node.section is not None:
         metadata.setdefault("source_section", node.section)
@@ -505,6 +703,9 @@ def editable_node_metadata(node: FlowSourceNode) -> dict[str, MetaValue]:
         metadata.setdefault("source_tags", ", ".join(node.tags))
     for key, value in node.source_ref.items():
         metadata.setdefault(f"source_ref:{key}", value)
+    if custom_layout is not None:
+        metadata.setdefault(CUSTOM_LAYOUT_X_META, round(float(custom_layout.x), 2))
+        metadata.setdefault(CUSTOM_LAYOUT_Y_META, round(float(custom_layout.y), 2))
     return metadata
 
 
@@ -545,6 +746,28 @@ def auto_layout_entry(kind: EditableNodeKind, index: int) -> FlowSourceLayoutEnt
         w=width,
         h=height,
     )
+
+
+def find_transition_location(
+    document: FlowSourceDocument,
+    edge_id: str,
+) -> tuple[str, int]:
+    used_edge_ids: set[str] = set()
+    for node_id, node in document.nodes.items():
+        for transition_index, transition in enumerate(node.transitions):
+            runtime_edge_id = unique_edge_id(
+                transition.id,
+                source=node_id,
+                target=transition.to,
+                kind=transition.kind,
+                label=transition.label,
+                index=transition_index,
+                used_ids=used_edge_ids,
+            )
+            used_edge_ids.add(runtime_edge_id)
+            if runtime_edge_id == edge_id:
+                return node_id, transition_index
+    raise ValueError(f"Unknown graph edge: {edge_id}")
 
 
 def unique_edge_id(
@@ -601,25 +824,33 @@ def prune_empty_yaml_value(value: object) -> object:
 def editable_node_source_payload(
     node: EditableFlowGraphNode,
     transitions: list[dict[str, Any]],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     metadata = dict(node.metadata)
     source_ref = extract_prefixed_metadata(metadata, "source_ref:")
     section = metadata.pop("source_section", None)
     tags = source_tags_from_metadata(metadata.pop("source_tags", None))
-    return {
-        "title": node.title,
-        "kind": node.kind,
-        "section": section if isinstance(section, str) else None,
-        "responsible": node.responsible,
-        "participants": list(node.participants),
-        "approvers": list(node.approvers),
-        "duration": node.duration,
-        "note": node.note,
-        "tags": tags,
-        "source_ref": source_ref,
-        "transitions": transitions,
-        "metadata": metadata,
-    }
+    custom_layout = extract_custom_layout_entry(
+        metadata,
+        width=int(node.size.w),
+        height=int(node.size.h),
+    )
+    return (
+        {
+            "title": node.title,
+            "kind": node.kind,
+            "section": section if isinstance(section, str) else None,
+            "responsible": node.responsible,
+            "participants": list(node.participants),
+            "approvers": list(node.approvers),
+            "duration": node.duration,
+            "note": node.note,
+            "tags": tags,
+            "source_ref": source_ref,
+            "transitions": transitions,
+            "metadata": metadata,
+        },
+        custom_layout,
+    )
 
 
 def editable_sections_payload(
@@ -653,6 +884,32 @@ def source_tags_from_metadata(value: MetaValue) -> list[str]:
     if not isinstance(value, str):
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def extract_custom_layout_entry(
+    metadata: dict[str, MetaValue],
+    *,
+    width: int,
+    height: int,
+) -> dict[str, Any] | None:
+    raw_x = metadata.get(CUSTOM_LAYOUT_X_META)
+    raw_y = metadata.get(CUSTOM_LAYOUT_Y_META)
+    if not isinstance(raw_x, int | float) or not isinstance(raw_y, int | float):
+        return None
+
+    x = round(float(raw_x), 2)
+    y = round(float(raw_y), 2)
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None
+
+    metadata.pop(CUSTOM_LAYOUT_X_META, None)
+    metadata.pop(CUSTOM_LAYOUT_Y_META, None)
+    return {
+        "x": x,
+        "y": y,
+        "w": int(width),
+        "h": int(height),
+    }
 
 
 def render_yaml_mapping(mapping: dict[str, object], *, indent: int) -> str:

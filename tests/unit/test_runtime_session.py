@@ -41,10 +41,17 @@ class FakeDocumentsGateway:
         positions,
         *,
         expected_version: int,
+        layout_mode: str = "manual",
         graph_version_id: str | None = None,
     ):
         self.calls.append(
-            ("save_graph_positions", positions, expected_version, graph_version_id),
+            (
+                "save_graph_positions",
+                positions,
+                expected_version,
+                layout_mode,
+                graph_version_id,
+            ),
         )
         return self.graph
 
@@ -280,6 +287,28 @@ def test_session_coordinator_save_wells_runs_storage_workflow(monkeypatch, docum
     assert st_module.reruns == 1
 
 
+def test_session_coordinator_rejects_wells_update_for_archived_source_version(
+    documents,
+) -> None:
+    graph, wells = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway()
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+    st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+
+    coordinator.save_wells(
+        wells,
+        graph=graph,
+        expected_version=wells.version,
+        success_message="saved",
+    )
+
+    assert gateway.calls == []
+    assert st_module.messages == [
+        ("error", "Изменение скважин доступно только для текущего source YAML."),
+    ]
+
+
 def test_session_coordinator_save_graph_positions_runs_storage_workflow(
     monkeypatch,
     documents,
@@ -312,7 +341,11 @@ def test_session_coordinator_save_graph_positions_runs_storage_workflow(
     st_module.session_state["position_edit_signature"] = ("sig",)
     st_module.session_state["position_edit_positions"] = {"proc_initial_review": (1.0, 2.0)}
 
-    coordinator.save_graph_positions(graph, {"proc_initial_review": (5.0, 6.0)})
+    coordinator.save_graph_positions(
+        graph,
+        {"proc_initial_review": (5.0, 6.0)},
+        layout_mode="manual",
+    )
 
     assert ("persist", "Расположение карточек сохранено") in calls
     assert gateway.calls == [
@@ -320,11 +353,30 @@ def test_session_coordinator_save_graph_positions_runs_storage_workflow(
             "save_graph_positions",
             {"proc_initial_review": (5.0, 6.0)},
             graph.version,
+            "manual",
             None,
         ),
     ]
     assert "position_edit_signature" not in st_module.session_state
     assert st_module.messages == [("error", "cannot-save")]
+
+
+def test_session_coordinator_rejects_saving_drag_positions_for_snake_layout(documents) -> None:
+    graph, _ = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph)
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+
+    coordinator.save_graph_positions(
+        graph,
+        {"proc_initial_review": (5.0, 6.0)},
+        layout_mode="snake",
+    )
+
+    assert gateway.calls == []
+    assert st_module.messages == [
+        ("error", "Перетаскивание можно сохранять только для layout source или custom."),
+    ]
 
 
 def test_session_coordinator_switches_selected_graph_version(monkeypatch, documents) -> None:

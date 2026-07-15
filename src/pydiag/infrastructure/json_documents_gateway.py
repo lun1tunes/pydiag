@@ -16,8 +16,12 @@ from .graph_versions import (
 )
 from .storage import (
     graph_path,
+    load_graph_source_edge_draft,
+    load_graph_source_node_draft,
     load_documents,
     preferred_graph_source_path,
+    save_graph_source_edge_with_version_check,
+    save_graph_source_node_with_version_check,
     save_graph_positions_with_version_check,
     save_wells_with_version_check,
     wells_path,
@@ -41,6 +45,14 @@ class JsonDocumentsGateway:
     wells_path_fn: Callable[[], Path] = wells_path
     save_graph_positions_fn: Callable[..., FlowGraphDocument] = (
         save_graph_positions_with_version_check
+    )
+    load_graph_source_node_fn: Callable[..., object] = load_graph_source_node_draft
+    load_graph_source_edge_fn: Callable[..., object] = load_graph_source_edge_draft
+    save_graph_source_node_fn: Callable[..., FlowGraphDocument] = (
+        save_graph_source_node_with_version_check
+    )
+    save_graph_source_edge_fn: Callable[..., FlowGraphDocument] = (
+        save_graph_source_edge_with_version_check
     )
     save_wells_fn: Callable[..., WellsDocument] = save_wells_with_version_check
 
@@ -76,6 +88,7 @@ class JsonDocumentsGateway:
         positions: dict[str, tuple[float, float]],
         *,
         expected_version: int,
+        layout_mode: str = "manual",
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument:
         if graph_version_id is None:
@@ -86,6 +99,55 @@ class JsonDocumentsGateway:
             positions,
             expected_version=expected_version,
             path=path,
+            layout_mode=layout_mode,
+        )
+
+    def load_graph_source_node(
+        self,
+        node_id: str,
+        *,
+        graph_version_id: str | None = None,
+    ) -> object:
+        return self.load_graph_source_node_fn(
+            self._graph_source_path(graph_version_id),
+            node_id,
+        )
+
+    def load_graph_source_edge(
+        self,
+        edge_id: str,
+        *,
+        graph_version_id: str | None = None,
+    ) -> object:
+        return self.load_graph_source_edge_fn(
+            self._graph_source_path(graph_version_id),
+            edge_id,
+        )
+
+    def save_graph_source_node(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.save_graph_source_node_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
+        )
+
+    def save_graph_source_edge(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.save_graph_source_edge_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
         )
 
     def list_graph_versions(self) -> list[GraphVersionInfo]:
@@ -96,3 +158,8 @@ class JsonDocumentsGateway:
 
     def materialize_graph_version(self) -> GraphVersionInfo:
         return self.materialize_graph_version_fn()
+
+    def _graph_source_path(self, graph_version_id: str | None) -> Path:
+        if graph_version_id is None:
+            return self.ensure_live_graph_source_fn()
+        return self.resolve_graph_version_path_fn(graph_version_id)

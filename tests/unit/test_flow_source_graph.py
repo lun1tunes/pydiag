@@ -162,6 +162,40 @@ def test_editable_flow_graph_payload_converts_back_to_flow_source_payload() -> N
     assert no_transition["note"] == "вернуть на доработку"
 
 
+def test_editable_flow_graph_payload_roundtrips_custom_layout_without_metadata_leaks() -> None:
+    payload = valid_flow_source_payload()
+    payload["custom_layout"] = {
+        "review_data": {
+            "x": 811.25,
+            "y": 455.5,
+            "w": 320,
+            "h": 120,
+        }
+    }
+
+    editable_payload = editable_flow_graph_payload_from_source_payload(payload)
+    review_node = next(
+        node for node in editable_payload["nodes"] if node["id"] == "review_data"
+    )
+    assert review_node["metadata"]["_pydiag_custom_layout_x"] == 811.25
+    assert review_node["metadata"]["_pydiag_custom_layout_y"] == 455.5
+
+    source_payload = flow_source_payload_from_editable_payload(
+        editable_payload,
+        graph_id="pilot-drilling",
+        title="Pilot drilling flow",
+    )
+
+    assert source_payload["custom_layout"]["review_data"] == {
+        "x": 811.25,
+        "y": 455.5,
+        "w": 320,
+        "h": 120,
+    }
+    assert "_pydiag_custom_layout_x" not in source_payload["nodes"]["review_data"]["metadata"]
+    assert "_pydiag_custom_layout_y" not in source_payload["nodes"]["review_data"]["metadata"]
+
+
 def test_flow_source_document_rejects_unknown_transition_target() -> None:
     payload = valid_flow_source_payload()
     payload["nodes"]["review_data"]["transitions"] = [{"to": "missing_node"}]

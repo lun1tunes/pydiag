@@ -6,7 +6,12 @@ from typing import Any
 
 from pydiag.application import (
     DocumentsGateway,
+    GraphSourceEdgeDraft,
+    GraphSourceNodeDraft,
+    UpdateGraphSourceEdgeCommand,
+    UpdateGraphSourceNodeCommand,
     pop_flash,
+    persist_graph_document_update,
     position_edit_positions_from_state,
     reset_position_edit_state,
 )
@@ -157,6 +162,13 @@ class StreamlitSessionCoordinator:
         expected_version: int,
         success_message: str,
     ) -> None:
+        if not self.wells_edit_available():
+            self.st_module.error(
+                self.wells_edit_block_reason()
+                or "Изменение скважин сейчас недоступно."
+            )
+            return
+
         result = persist_wells(
             self.session_state,
             updated,
@@ -174,6 +186,8 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         positions: dict[str, tuple[float, float]],
+        *,
+        layout_mode: str,
     ) -> None:
         selected_version_id = self.selected_graph_version_id()
         if selected_version_id is not None:
@@ -181,11 +195,17 @@ class StreamlitSessionCoordinator:
                 "Версии source YAML доступны только для просмотра. Переключитесь на текущий source YAML."
             )
             return
+        if layout_mode not in {"manual", "custom"}:
+            self.st_module.error(
+                "Перетаскивание можно сохранять только для layout source или custom."
+            )
+            return
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.save_graph_positions(
                 positions,
                 expected_version=graph.version,
+                layout_mode=layout_mode,
             )
 
         result = persist_graph_positions(
@@ -199,6 +219,64 @@ class StreamlitSessionCoordinator:
         )
         self.finalize_persistence(result.should_rerun, result.error_message)
 
+    def load_graph_source_node(self, node_id: str) -> GraphSourceNodeDraft:
+        return self.documents_gateway.load_graph_source_node(
+            node_id,
+            graph_version_id=self.selected_graph_version_id(),
+        )
+
+    def load_graph_source_edge(self, edge_id: str) -> GraphSourceEdgeDraft:
+        return self.documents_gateway.load_graph_source_edge(
+            edge_id,
+            graph_version_id=self.selected_graph_version_id(),
+        )
+
+    def save_graph_source_node(
+        self,
+        graph: FlowGraphDocument,
+        command: UpdateGraphSourceNodeCommand,
+    ) -> None:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование source YAML сейчас недоступно."
+            )
+            return
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=lambda: self.documents_gateway.save_graph_source_node(
+                command,
+                expected_version=graph.version,
+            ),
+            reload_data=self.load_app_data,
+            success_message="Карточка схемы обновлена",
+        )
+        self.finalize_persistence(result.should_rerun, result.error_message)
+
+    def save_graph_source_edge(
+        self,
+        graph: FlowGraphDocument,
+        command: UpdateGraphSourceEdgeCommand,
+    ) -> None:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование source YAML сейчас недоступно."
+            )
+            return
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=lambda: self.documents_gateway.save_graph_source_edge(
+                command,
+                expected_version=graph.version,
+            ),
+            reload_data=self.load_app_data,
+            success_message="Связь схемы обновлена",
+        )
+        self.finalize_persistence(result.should_rerun, result.error_message)
+
     def position_edit_available(self) -> bool:
         return self.selected_graph_version_id() is None
 
@@ -206,6 +284,22 @@ class StreamlitSessionCoordinator:
         if self.position_edit_available():
             return None
         return "Редактирование layout доступно только для текущего source YAML."
+
+    def wells_edit_available(self) -> bool:
+        return self.selected_graph_version_id() is None
+
+    def wells_edit_block_reason(self) -> str | None:
+        if self.wells_edit_available():
+            return None
+        return "Изменение скважин доступно только для текущего source YAML."
+
+    def graph_source_edit_available(self) -> bool:
+        return self.selected_graph_version_id() is None
+
+    def graph_source_edit_block_reason(self) -> str | None:
+        if self.graph_source_edit_available():
+            return None
+        return "Редактирование карточек и связей доступно только для текущего source YAML."
 
     def finalize_persistence(
         self, should_rerun: bool, error_message: str | None

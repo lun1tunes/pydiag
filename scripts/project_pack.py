@@ -134,6 +134,10 @@ def is_excluded_path(path: Path, root: Path) -> bool:
 
 def should_include_path(path: Path, root: Path) -> bool:
     rel = relative_posix_path(path, root)
+    return should_include_rel_path(rel)
+
+
+def should_include_rel_path(rel: str) -> bool:
     if rel in RUNTIME_INCLUDED_FILE_PATHS:
         return True
     return any(rel.startswith(prefix) for prefix in RUNTIME_INCLUDED_DIR_PREFIXES)
@@ -154,6 +158,21 @@ def bundle_input_violation(path: Path, root: Path) -> str | None:
         label = suffix if suffix else "<no suffix>"
         return (
             f"{rel}: unsupported runtime bundle file type {label}; "
+            "extend the allowlist explicitly if this asset is required"
+        )
+    return None
+
+
+def bundle_output_violation(rel_path: str) -> str | None:
+    if is_confidential_rel_path(rel_path):
+        return f"{rel_path}: confidential runtime files are not allowed in unpacked bundles"
+    if not should_include_rel_path(rel_path):
+        return f"{rel_path}: unexpected runtime bundle path"
+    suffix = Path(rel_path).suffix.lower()
+    if rel_path not in RUNTIME_INCLUDED_FILE_PATHS and suffix not in SUPPORTED_BUNDLE_SUFFIXES:
+        label = suffix if suffix else "<no suffix>"
+        return (
+            f"{rel_path}: unsupported runtime bundle file type {label}; "
             "extend the allowlist explicitly if this asset is required"
         )
     return None
@@ -264,6 +283,9 @@ def unpack(root: Path, input_file: Path) -> None:
                 raise ValueError(
                     f"Invalid archive format: unsafe target path {rel_path!r}"
                 )
+            violation = bundle_output_violation(rel_path)
+            if violation is not None:
+                raise ValueError(f"Invalid archive format: {violation}")
 
             target = (root / Path(*rel_target.parts)).resolve()
             if target != root_resolved and root_resolved not in target.parents:

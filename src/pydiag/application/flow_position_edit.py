@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 
+from pydiag.common.layout_metadata import CUSTOM_LAYOUT_X_META, CUSTOM_LAYOUT_Y_META
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 from pydiag.rendering import (
     build_node_render_specs,
@@ -16,6 +17,7 @@ POSITION_EDIT_POSITIONS_KEY = "position_edit_positions"
 POSITION_EDIT_DIRTY_KEY = "position_edit_dirty"
 
 __all__ = [
+    "custom_layout_positions_for_graph",
     "ensure_position_edit_positions",
     "graph_with_positions",
     "initial_position_edit_positions",
@@ -143,3 +145,17 @@ def reset_position_edit_state(session_state: MutableMapping[str, Any]) -> None:
 
 def graph_node_positions(graph: FlowGraphDocument) -> dict[str, tuple[float, float]]:
     return {node.id: (node.position.x, node.position.y) for node in graph.nodes}
+
+
+def custom_layout_positions_for_graph(
+    graph: FlowGraphDocument,
+) -> dict[str, tuple[float, float]]:
+    positions: dict[str, tuple[float, float]] = {}
+    for node in graph.nodes:
+        x = node.metadata.get(CUSTOM_LAYOUT_X_META)
+        y = node.metadata.get(CUSTOM_LAYOUT_Y_META)
+        if isinstance(x, int | float) and isinstance(y, int | float):
+            positions[node.id] = (round(float(x), 2), round(float(y), 2))
+        else:
+            positions[node.id] = (node.position.x, node.position.y)
+    return positions

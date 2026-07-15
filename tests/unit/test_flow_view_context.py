@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydiag.common.layout_metadata import CUSTOM_LAYOUT_X_META, CUSTOM_LAYOUT_Y_META
 from pydiag.application.flow_view_context import prepare_render_context
 
 
@@ -70,3 +71,23 @@ def test_prepare_render_context_switches_to_manual_and_uses_component_positions(
         "y": moved_node.position.y + 6.25,
     }
     assert session_state["position_edit_dirty"] is True
+
+
+def test_prepare_render_context_applies_custom_layout_from_metadata(documents) -> None:
+    graph, wells = documents
+    session_state = FakeSessionState()
+    graph.nodes[0].metadata[CUSTOM_LAYOUT_X_META] = 777.0
+    graph.nodes[0].metadata[CUSTOM_LAYOUT_Y_META] = 555.5
+
+    context = prepare_render_context(
+        session_state,
+        graph=graph,
+        wells=wells,
+        layout_mode="custom",
+        position_edit_enabled=False,
+        component_state=None,
+    )
+
+    assert context.layout_mode == "custom"
+    assert context.graph.nodes[0].position.x == 777.0
+    assert context.graph.nodes[0].position.y == 555.5

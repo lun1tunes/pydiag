@@ -7,6 +7,7 @@ from typing import Any
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 from .flow_position_edit import (
+    custom_layout_positions_for_graph,
     ensure_position_edit_positions,
     graph_with_positions,
     position_edit_positions_from_state,
@@ -32,22 +33,29 @@ def prepare_render_context(
     position_edit_enabled: bool,
     component_state: Mapping[str, object] | None,
 ) -> FlowRenderContext:
-    if not position_edit_enabled:
-        return FlowRenderContext(
-            graph=graph,
-            layout_mode=layout_mode,
-            default_positions=default_positions_for_graph(graph),
+    base_graph = graph
+    if layout_mode == "custom":
+        base_graph = graph_with_positions(
+            graph,
+            custom_layout_positions_for_graph(graph),
         )
 
-    ensure_position_edit_positions(session_state, graph, wells, layout_mode)
-    update_position_edit_positions_from_component(session_state, graph, component_state)
+    if not position_edit_enabled:
+        return FlowRenderContext(
+            graph=base_graph,
+            layout_mode=layout_mode,
+            default_positions=default_positions_for_graph(base_graph),
+        )
+
+    ensure_position_edit_positions(session_state, base_graph, wells, layout_mode)
+    update_position_edit_positions_from_component(session_state, base_graph, component_state)
     render_graph = graph_with_positions(
-        graph,
-        position_edit_positions_from_state(session_state, graph),
+        base_graph,
+        position_edit_positions_from_state(session_state, base_graph),
     )
     return FlowRenderContext(
         graph=render_graph,
-        layout_mode="manual",
+        layout_mode="manual" if layout_mode == "snake" else layout_mode,
         default_positions=default_positions_for_graph(render_graph),
     )
 

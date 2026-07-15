@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from pydiag.common.layout_metadata import CUSTOM_LAYOUT_X_META, CUSTOM_LAYOUT_Y_META
 from pydiag.application.flow_position_edit import (
+    custom_layout_positions_for_graph,
     ensure_position_edit_positions,
     graph_with_positions,
     initial_position_edit_positions,
@@ -92,3 +94,16 @@ def test_graph_with_positions_returns_new_graph_with_overridden_coordinates(docu
     assert moved.nodes[0].position.y == node.position.y + 8.0
     assert graph.nodes[0].position.x == node.position.x
     assert graph.nodes[0].position.y == node.position.y
+
+
+def test_custom_layout_positions_for_graph_prefers_metadata_when_available(
+    documents,
+) -> None:
+    graph, _ = documents
+    first_node = graph.nodes[0]
+    graph.nodes[0].metadata[CUSTOM_LAYOUT_X_META] = 901.25
+    graph.nodes[0].metadata[CUSTOM_LAYOUT_Y_META] = 444.5
+
+    positions = custom_layout_positions_for_graph(graph)
+
+    assert positions[first_node.id] == (901.25, 444.5)

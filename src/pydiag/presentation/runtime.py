@@ -36,10 +36,11 @@ class StreamlitAppRuntime:
         session = self.session
         graph_versions = session.list_graph_versions()
 
-        def save_positions() -> None:
+        def save_positions(layout_mode: str) -> None:
             session.save_graph_positions(
                 graph,
                 session.position_edit_positions(graph),
+                layout_mode=layout_mode,
             )
 
         state = render_sidebar(
@@ -92,6 +93,7 @@ class StreamlitAppRuntime:
         wells: WellsDocument,
         selected_id: str | None,
     ) -> None:
+        session = self.session
         render_admin_panel(
             self.st_module,
             graph,
@@ -100,6 +102,14 @@ class StreamlitAppRuntime:
             actions=AdminActions(
                 resolve_selection=resolve_selection,
                 persist_wells_update=self._persist_wells_update,
+                wells_edit_available=session.wells_edit_available,
+                wells_edit_block_reason=session.wells_edit_block_reason,
+                load_graph_source_node=session.load_graph_source_node,
+                load_graph_source_edge=session.load_graph_source_edge,
+                persist_graph_source_node_update=session.save_graph_source_node,
+                persist_graph_source_edge_update=session.save_graph_source_edge,
+                graph_source_edit_available=session.graph_source_edit_available,
+                graph_source_edit_block_reason=session.graph_source_edit_block_reason,
             ),
         )
 

@@ -105,9 +105,27 @@ def persist_graph_positions_update(
     reset_position_edit_state: Callable[[], None],
     success_message: str,
 ) -> PersistenceResult:
+    return persist_graph_document_update(
+        session_state,
+        save=save,
+        reload_data=reload_data,
+        reset_state=reset_position_edit_state,
+        success_message=success_message,
+    )
+
+
+def persist_graph_document_update(
+    session_state: MutableMapping[str, Any],
+    *,
+    save: Callable[[], FlowGraphDocument],
+    reload_data: Callable[..., object],
+    reset_state: Callable[[], None] | None = None,
+    success_message: str,
+) -> PersistenceResult:
     try:
         session_state["graph_doc"] = save()
-        reset_position_edit_state()
+        if reset_state is not None:
+            reset_state()
         flash(session_state, success_message)
         return PersistenceResult(should_rerun=True)
     except VersionConflictError as exc:

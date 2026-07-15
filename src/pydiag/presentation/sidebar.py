@@ -29,6 +29,7 @@ KIND_FILTER_LABELS = {
 LAYOUT_MODE_LABELS = {
     "snake": "Змейка",
     "manual": "Координаты из source",
+    "custom": "Кастомный layout",
 }
 
 
@@ -68,7 +69,7 @@ class SidebarState:
 @dataclass(frozen=True)
 class SidebarActions:
     render_legend: Callable[[], None]
-    save_positions: Callable[[], None]
+    save_positions: Callable[[str], None]
     reset_positions: Callable[[], None]
     reload_data: Callable[[], None]
     select_graph_version: Callable[[str | None], None]
@@ -125,6 +126,7 @@ def render_sidebar(
         position_edit_enabled = render_layout_section(
             st_module,
             auth=auth,
+            layout_mode=layout_mode,
             save_positions_enabled=actions.save_positions_enabled,
             save_positions=actions.save_positions,
             reset_positions=actions.reset_positions,
@@ -181,25 +183,29 @@ def build_login_state(
 
 def build_position_edit_state(
     *,
-    is_super_admin: bool,
+    is_admin: bool,
     enabled: bool,
     editable: bool,
+    layout_mode: str,
     save_positions_enabled: bool,
     block_reason: str | None,
 ) -> SidebarPositionEditState:
     helper_caption = None
-    if is_super_admin and not editable:
+    drag_enabled = editable and layout_mode in {"manual", "custom"}
+    if is_admin and not editable:
         helper_caption = block_reason
-    elif is_super_admin and enabled:
+    elif is_admin and layout_mode == "snake":
+        helper_caption = "Drag-and-drop доступен только для layout source или custom."
+    elif is_admin and enabled:
         helper_caption = (
             "Перетаскивание активно только для карточек схемы. Фишки скважин не двигаются."
         )
     return SidebarPositionEditState(
-        visible=is_super_admin,
-        enabled=enabled if is_super_admin and editable else False,
-        editable=editable,
+        visible=is_admin,
+        enabled=enabled if is_admin and drag_enabled else False,
+        editable=drag_enabled,
         helper_caption=helper_caption,
-        save_disabled=not save_positions_enabled,
+        save_disabled=not save_positions_enabled or not drag_enabled,
     )
 
 
@@ -228,6 +234,7 @@ def render_graph_version_section(
         options=options,
         index=index,
         format_func=lambda version_id: labels[version_id],
+        key="graph_version_mode",
     )
     next_version_id = None if selected == LIVE_GRAPH_OPTION else selected
     if next_version_id != selected_version_id:
@@ -322,23 +329,25 @@ def render_layout_section(
     st_module,
     *,
     auth: SidebarAuthContext,
+    layout_mode: str,
     save_positions_enabled: bool,
-    save_positions: Callable[[], None],
+    save_positions: Callable[[str], None],
     reset_positions: Callable[[], None],
     layout_editable: bool,
     layout_edit_block_reason: str | None,
 ) -> bool:
     position_edit_state = build_position_edit_state(
-        is_super_admin=auth.current_user_is_super_admin(),
+        is_admin=auth.current_user_is_admin(),
         enabled=False,
         editable=layout_editable,
+        layout_mode=layout_mode,
         save_positions_enabled=save_positions_enabled,
         block_reason=layout_edit_block_reason,
     )
     if not position_edit_state.visible:
         return False
 
-    if not layout_editable:
+    if not position_edit_state.editable:
         st_module.session_state["position_edit_enabled"] = False
 
     st_module.divider()
@@ -346,13 +355,14 @@ def render_layout_section(
     position_edit_enabled = st_module.toggle(
         "Редактировать положение",
         key="position_edit_enabled",
-        disabled=not layout_editable,
+        disabled=not position_edit_state.editable,
         help="Перетаскивайте карточки на схеме; связи перестраиваются после отпускания блока.",
     )
     position_edit_state = build_position_edit_state(
-        is_super_admin=True,
+        is_admin=auth.current_user_is_admin(),
         enabled=position_edit_enabled,
         editable=layout_editable,
+        layout_mode=layout_mode,
         save_positions_enabled=save_positions_enabled,
         block_reason=layout_edit_block_reason,
     )
@@ -366,7 +376,7 @@ def render_layout_section(
                 width="stretch",
                 disabled=position_edit_state.save_disabled,
             ):
-                save_positions()
+                save_positions(layout_mode)
         with col_b:
             if st_module.button("Сбросить", width="stretch"):
                 reset_positions()

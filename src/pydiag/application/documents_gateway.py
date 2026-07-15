@@ -29,6 +29,37 @@ class DocumentsGateway(Protocol):
         positions: dict[str, tuple[float, float]],
         *,
         expected_version: int,
+        layout_mode: str = "manual",
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
+    def load_graph_source_node(
+        self,
+        node_id: str,
+        *,
+        graph_version_id: str | None = None,
+    ) -> object: ...
+
+    def load_graph_source_edge(
+        self,
+        edge_id: str,
+        *,
+        graph_version_id: str | None = None,
+    ) -> object: ...
+
+    def save_graph_source_node(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
+    def save_graph_source_edge(
+        self,
+        command: object,
+        *,
+        expected_version: int,
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument: ...
 
