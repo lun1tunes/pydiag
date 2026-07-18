@@ -1,8 +1,13 @@
 .flow-canvas-root {
+  --flow-accent-rgb: 37, 99, 235;
+  --flow-accent-strong: #1d4ed8;
+  --flow-accent-mid: #2563eb;
+  --flow-accent-soft: rgba(var(--flow-accent-rgb), 0.18);
+  --flow-accent-glow: rgba(96, 165, 250, 0.32);
   position: relative;
   width: 100%;
-  height: clamp(500px, calc(100vh - 5rem), 720px);
-  height: clamp(500px, calc(100dvh - 5rem), 720px);
+  height: clamp(575px, calc(100vh - 5rem), 828px);
+  height: clamp(575px, calc(100dvh - 5rem), 828px);
   overflow: hidden;
   border-radius: 18px;
   color: #0f172a;
@@ -16,6 +21,14 @@
     linear-gradient(180deg, #fafaf8 0%, #f3f4f6 100%);
 }
 
+.flow-canvas-root.is-fullscreen,
+.flow-canvas-root:fullscreen,
+.flow-canvas-root:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+
 .flow-canvas-toolbar {
   position: absolute;
   top: 14px;
@@ -24,36 +37,6 @@
   display: flex;
   gap: 8px;
   align-items: center;
-}
-
-.flow-canvas-hint {
-  position: absolute;
-  top: 14px;
-  left: 14px;
-  z-index: 8;
-  display: grid;
-  gap: 2px;
-  max-width: min(360px, calc(100% - 124px));
-  padding: 10px 14px;
-  border: 1px solid rgba(100, 116, 139, 0.2);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.84);
-  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
-  backdrop-filter: blur(10px);
-}
-
-.flow-canvas-hint strong {
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #475569;
-}
-
-.flow-canvas-hint span {
-  font-size: 12px;
-  line-height: 1.35;
-  color: #0f172a;
 }
 
 .flow-canvas-toolbar__button {
@@ -74,6 +57,13 @@
 .flow-canvas-toolbar__button:hover {
   transform: translateY(-1px);
   box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
+}
+
+.flow-canvas-toolbar__button.is-active {
+  border-color: rgba(var(--flow-accent-rgb), 0.42);
+  background: rgba(219, 234, 254, 0.96);
+  color: var(--flow-accent-strong);
+  box-shadow: 0 14px 34px rgba(37, 99, 235, 0.16);
 }
 
 .flow-canvas-viewport {
@@ -162,7 +152,8 @@
 }
 
 .flow-canvas-minimap__node.is-selected {
-  stroke: rgba(20, 184, 166, 0.86);
+  stroke: rgba(var(--flow-accent-rgb), 0.92);
+  filter: drop-shadow(0 0 10px rgba(var(--flow-accent-rgb), 0.18));
 }
 
 .flow-canvas-minimap__viewport {
@@ -195,7 +186,9 @@
 }
 
 .flow-edge-path.is-selected {
-  filter: drop-shadow(0 0 10px rgba(15, 23, 42, 0.18));
+  filter:
+    drop-shadow(0 0 10px rgba(var(--flow-accent-rgb), 0.12))
+    drop-shadow(0 0 16px rgba(var(--flow-accent-rgb), 0.2));
 }
 
 .flow-edge-label {
@@ -222,6 +215,11 @@
 
 .flow-node-shell {
   position: absolute;
+  z-index: 2;
+}
+
+.flow-node-shell.is-selected {
+  z-index: 4;
 }
 
 .flow-node-card {
@@ -240,6 +238,11 @@
   touch-action: none;
 }
 
+.flow-node-card.is-selected {
+  overflow: visible !important;
+  transform: translateY(-2px);
+}
+
 .flow-node-card.is-draggable {
   cursor: grab;
 }
@@ -252,11 +255,64 @@
 .flow-token:focus-visible,
 .flow-edge-label:focus-visible,
 .flow-canvas-toolbar__button:focus-visible {
-  outline: 3px solid rgba(20, 184, 166, 0.38);
+  outline: 3px solid rgba(var(--flow-accent-rgb), 0.34);
   outline-offset: 3px;
 }
 
+.flow-node-selection {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.flow-node-selection__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+.flow-node-selection__glow,
+.flow-node-selection__stroke,
+.flow-node-selection__sheen {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.flow-node-selection__glow {
+  stroke: var(--flow-accent-glow);
+  stroke-width: 7;
+}
+
+.flow-node-selection__stroke {
+  stroke: var(--flow-accent-strong);
+  stroke-width: 2.7;
+}
+
+.flow-node-selection__sheen {
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.1;
+  opacity: 0.82;
+}
+
+.flow-node-content {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
 .flow-node-text {
+  position: relative;
+  z-index: 1;
   width: 100%;
   min-width: 0;
   display: flex;
@@ -333,8 +389,4 @@
     padding: 8px;
   }
 
-  .flow-canvas-hint {
-    max-width: calc(100% - 104px);
-    padding: 8px 12px;
-  }
 }

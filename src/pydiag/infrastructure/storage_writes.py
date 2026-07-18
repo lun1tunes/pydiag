@@ -33,8 +33,7 @@ from .flow_source_graph import (
 )
 from .storage_io import json_file_lock, save_json_atomic, save_text_atomic
 from .storage_loading import load_graph_doc, load_wells_doc
-from .storage_materialization import materialize_flow_graph_from_source
-from .storage_paths import graph_path, preferred_graph_source_path, wells_path
+from .storage_paths import graph_path, source_graph_path, wells_path
 
 __all__ = [
     "load_graph_source_edge_draft",
@@ -104,12 +103,6 @@ def save_graph_positions_with_version_check(
             except RuntimeError as exc:
                 raise VersionConflictError(str(exc)) from exc
             save_text_atomic(target, dump_flow_source_payload(payload))
-            live_source = preferred_graph_source_path()
-            if live_source is not None and target.resolve() == live_source.resolve():
-                materialize_flow_graph_from_source(
-                    source_path=target,
-                    target_path=graph_path(),
-                )
             return load_graph_doc(target)
 
         if is_figma_skeleton_payload(raw_payload):
@@ -228,12 +221,8 @@ def save_flow_source_payload(target: Path, payload: object) -> FlowGraphDocument
         editable_payload,
         strict=True,
     )
-    editable_flow_graph_to_runtime(editable_document)
+    runtime_graph = editable_flow_graph_to_runtime(editable_document)
+    if target.resolve() == source_graph_path().resolve():
+        validate_wells_against_graph(runtime_graph, load_wells_doc(wells_path()))
     save_text_atomic(target, dump_flow_source_payload(payload))
-    live_source = preferred_graph_source_path()
-    if live_source is not None and target.resolve() == live_source.resolve():
-        return materialize_flow_graph_from_source(
-            source_path=target,
-            target_path=graph_path(),
-        )
     return load_graph_doc(target)

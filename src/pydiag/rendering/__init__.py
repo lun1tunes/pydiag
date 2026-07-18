@@ -31,6 +31,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_canvas_adapter",
         "component_selected_id_from_state",
     ),
+    "component_view_state_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_view_state_from_state",
+    ),
     "flow_canvas_height": ("pydiag.rendering.flow_render_metrics", "flow_canvas_height"),
     "layout_positions": ("pydiag.rendering.flow_layout_routing", "layout_positions"),
     "render_flow_canvas": (

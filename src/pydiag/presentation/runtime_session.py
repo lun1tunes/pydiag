@@ -6,6 +6,7 @@ from typing import Any
 
 from pydiag.application import (
     DocumentsGateway,
+    FLOW_SELECTION_RERUN_REQUEST_KEY,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
@@ -29,7 +30,7 @@ from pydiag.application import (
 from pydiag.application import (
     persist_wells_update as persist_wells,
 )
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
@@ -76,6 +77,9 @@ class StreamlitSessionCoordinator:
     def can_materialize_graph_version(self) -> bool:
         return self.documents_gateway.can_materialize_graph_version()
 
+    def can_import_raw_graph_source(self) -> bool:
+        return self.documents_gateway.can_import_raw_graph_source()
+
     def selected_graph_version_id(self) -> str | None:
         value = self.session_state.get(SELECTED_GRAPH_VERSION_KEY)
         return value if isinstance(value, str) and value else None
@@ -113,9 +117,22 @@ class StreamlitSessionCoordinator:
             self.load_app_data(force=True)
         except Exception as exc:
             self._set_selected_graph_version(previous_version_id)
-            self.st_module.error(f"Не удалось сохранить версию source YAML: {exc}")
+            self.st_module.error(f"Не удалось создать версию схемы: {exc}")
             return
-        self.flash(f"Создана новая версия source YAML: {version.label}")
+        self.flash(f"Создана версия схемы: {version.label}")
+        self.st_module.rerun()
+
+    def import_live_graph_source_from_raw(self) -> None:
+        previous_version_id = self.selected_graph_version_id()
+        try:
+            result = self.documents_gateway.import_live_graph_source_from_raw()
+            self._set_selected_graph_version(None)
+            self.load_app_data(force=True)
+        except Exception as exc:
+            self._set_selected_graph_version(previous_version_id)
+            self.st_module.error(f"Не удалось импортировать фактические данные: {exc}")
+            return
+        self.flash(self._raw_import_success_message(result))
         self.st_module.rerun()
 
     def flash(self, message: str, level: str = "success") -> None:
@@ -134,13 +151,11 @@ class StreamlitSessionCoordinator:
 
     def reload_data(self) -> None:
         try:
-            if self.selected_graph_version_id() is None:
-                self.documents_gateway.ensure_live_graph_source()
             self.load_app_data(force=True)
         except Exception as exc:
-            self.st_module.error(f"Не удалось перечитать данные: {exc}")
+            self.st_module.error(f"Не удалось обновить данные: {exc}")
             return
-        self.flash("Данные перечитаны")
+        self.flash("Данные обновлены")
         self.st_module.rerun()
 
     def reset_position_draft(self) -> None:
@@ -188,6 +203,9 @@ class StreamlitSessionCoordinator:
     def consume_position_edit_rerun_request(self) -> bool:
         return bool(self.session_state.pop(POSITION_EDIT_RERUN_REQUEST_KEY, False))
 
+    def consume_flow_selection_rerun_request(self) -> bool:
+        return bool(self.session_state.pop(FLOW_SELECTION_RERUN_REQUEST_KEY, False))
+
     def save_wells(
         self,
         updated: WellsDocument,
@@ -220,8 +238,6 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         positions: dict[str, tuple[float, float]],
-        *,
-        layout_mode: str,
     ) -> None:
         selected_version_id = self.selected_graph_version_id()
         if selected_version_id is not None:
@@ -229,17 +245,11 @@ class StreamlitSessionCoordinator:
                 "Версии source YAML доступны только для просмотра. Переключитесь на текущий source YAML."
             )
             return
-        if layout_mode not in {"manual", "custom"}:
-            self.st_module.error(
-                "Перетаскивание можно сохранять только для layout source или custom."
-            )
-            return
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.save_graph_positions(
                 positions,
                 expected_version=graph.version,
-                layout_mode=layout_mode,
             )
 
         result = persist_graph_positions(
@@ -284,7 +294,11 @@ class StreamlitSessionCoordinator:
                 expected_version=graph.version,
             ),
             reload_data=self.load_app_data,
-            success_message="Карточка схемы обновлена",
+            success_message=(
+                "Карточка схемы удалена"
+                if command.deleted is True
+                else "Карточка схемы обновлена"
+            ),
         )
         self.finalize_persistence(result.should_rerun, result.error_message)
 
@@ -349,3 +363,13 @@ class StreamlitSessionCoordinator:
             self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
             return
         self.session_state[SELECTED_GRAPH_VERSION_KEY] = version_id
+
+    def _raw_import_success_message(self, result: RawImportResult) -> str:
+        if not result.changed:
+            return "Фактические данные уже совпадают с текущей схемой"
+        if result.backup_version is None:
+            return "Фактические данные импортированы в текущую схему"
+        return (
+            "Фактические данные импортированы в текущую схему. "
+            f"Предыдущая версия сохранена как {result.backup_version.label}"
+        )

@@ -32,6 +32,9 @@ SHORT_DURATION_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>[mhd])$")
 AUTO_LAYOUT_COLUMNS = 4
 AUTO_LAYOUT_HORIZONTAL_STEP = 420
 AUTO_LAYOUT_VERTICAL_STEP = 240
+FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
+    {"figma_source_id", "figma_parent_id", "figma_source_type"}
+)
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
     "process": (320, 120),
     "decision_diamond": (360, 220),
@@ -152,6 +155,7 @@ class FlowSourceTransition(FlowSourceStrictModel):
 class FlowSourceNode(FlowSourceStrictModel):
     title: str = Field(min_length=1)
     kind: EditableNodeKind
+    deleted: bool | None = None
     section: str | None = None
     responsible: str | None = None
     participants: list[str] = Field(default_factory=list)
@@ -269,8 +273,15 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
     nodes_payload: list[dict[str, Any]] = []
     edges_payload: list[dict[str, Any]] = []
     used_edge_ids: set[str] = set()
+    active_node_ids = [
+        node_id
+        for node_id, node in document.nodes.items()
+        if not flow_source_node_deleted(node)
+    ]
+    active_node_id_set = set(active_node_ids)
 
-    for node_index, (node_id, node) in enumerate(document.nodes.items()):
+    for node_index, node_id in enumerate(active_node_ids):
+        node = document.nodes[node_id]
         layout = document.layout.get(node_id) or auto_layout_entry(node.kind, node_index)
         custom_layout = document.custom_layout.get(node_id)
         nodes_payload.append(
@@ -298,6 +309,8 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
             }
         )
         for transition_index, transition in enumerate(node.transitions):
+            if transition.to not in active_node_id_set:
+                continue
             edge_id = unique_edge_id(
                 transition.id,
                 source=node_id,
@@ -350,6 +363,7 @@ def flow_source_payload_from_runtime_payload(
         node.id: [] for node in document.nodes
     }
     for edge in document.edges:
+        metadata = sanitize_flow_source_metadata(dict(edge.metadata))
         transitions_by_source[edge.source].append(
             {
                 "to": edge.target,
@@ -364,14 +378,14 @@ def flow_source_payload_from_runtime_payload(
                     else edge.label
                 ),
                 "id": edge.id,
-                "metadata": dict(edge.metadata),
+                "metadata": metadata,
             }
         )
 
     nodes_payload: dict[str, dict[str, Any]] = {}
     custom_layout: dict[str, dict[str, Any]] = {}
     for node in document.nodes:
-        metadata = dict(node.metadata)
+        metadata = sanitize_flow_source_metadata(dict(node.metadata))
         custom_layout_entry = extract_custom_layout_entry(
             metadata,
             width=int(node.size.w),
@@ -432,7 +446,7 @@ def flow_source_payload_from_editable_payload(
         node.id: [] for node in document.nodes
     }
     for edge in document.edges:
-        metadata = dict(edge.metadata)
+        metadata = sanitize_flow_source_metadata(dict(edge.metadata))
         condition = metadata.pop("condition", None)
         note = metadata.pop("note", None)
         transitions_by_source[edge.source].append(
@@ -624,6 +638,7 @@ def update_flow_source_payload_node(
             "approvers": list(command.approvers),
             "duration": command.duration,
             "note": command.note,
+            "deleted": current.deleted if command.deleted is None else command.deleted,
         }
     )
     updated.layout[command.node_id] = FlowSourceLayoutEntry(
@@ -633,6 +648,10 @@ def update_flow_source_payload_node(
         h=int(command.layout_h),
     )
     return updated.model_dump(mode="json")
+
+
+def flow_source_node_deleted(node: FlowSourceNode) -> bool:
+    return node.deleted is True
 
 
 def update_flow_source_payload_edge(
@@ -677,7 +696,8 @@ def update_flow_source_payload_edge(
 
 def dump_flow_source_payload(payload: object) -> str:
     document = FlowSourceDocument.model_validate(payload, strict=True)
-    normalized = prune_empty_yaml_value(document.model_dump(mode="json"))
+    normalized = sanitize_flow_source_document_payload(document.model_dump(mode="json"))
+    normalized = prune_empty_yaml_value(normalized)
     return dump_structured_yaml_payload(normalized)
 
 
@@ -825,7 +845,7 @@ def editable_node_source_payload(
     node: EditableFlowGraphNode,
     transitions: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    metadata = dict(node.metadata)
+    metadata = sanitize_flow_source_metadata(dict(node.metadata))
     source_ref = extract_prefixed_metadata(metadata, "source_ref:")
     section = metadata.pop("source_section", None)
     tags = source_tags_from_metadata(metadata.pop("source_tags", None))
@@ -884,6 +904,44 @@ def source_tags_from_metadata(value: MetaValue) -> list[str]:
     if not isinstance(value, str):
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def sanitize_flow_source_metadata(
+    metadata: dict[str, MetaValue],
+) -> dict[str, MetaValue]:
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in FLOW_SOURCE_STRIPPED_METADATA_KEYS
+    }
+
+
+def sanitize_flow_source_document_payload(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, dict):
+        return payload
+
+    for node_payload in nodes.values():
+        if not isinstance(node_payload, dict):
+            continue
+        metadata = node_payload.get("metadata")
+        if isinstance(metadata, dict):
+            node_payload["metadata"] = sanitize_flow_source_metadata(metadata)
+
+        transitions = node_payload.get("transitions")
+        if not isinstance(transitions, list):
+            continue
+        for transition_payload in transitions:
+            if not isinstance(transition_payload, dict):
+                continue
+            transition_metadata = transition_payload.get("metadata")
+            if isinstance(transition_metadata, dict):
+                transition_payload["metadata"] = sanitize_flow_source_metadata(
+                    transition_metadata
+                )
+    return payload
 
 
 def extract_custom_layout_entry(

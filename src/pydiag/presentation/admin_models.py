@@ -101,3 +101,28 @@ def suggest_well_id(wells: WellsDocument) -> str:
         if match:
             max_number = max(max_number, int(match.group(1)))
     return f"well_{max_number + 1}"
+
+
+def graph_source_node_delete_block_reason(
+    node_id: str,
+    wells: WellsDocument,
+) -> str | None:
+    referenced_by = sorted(
+        {
+            well.id
+            for well in wells.wells
+            if well.current_node_id == node_id
+            or any(
+                item.node_id == node_id
+                or item.from_node_id == node_id
+                or item.to_node_id == node_id
+                for item in well.history
+            )
+        }
+    )
+    if not referenced_by:
+        return None
+    return (
+        "Карточку нельзя удалить: она используется в текущем состоянии "
+        f"или истории скважин {', '.join(referenced_by)}."
+    )

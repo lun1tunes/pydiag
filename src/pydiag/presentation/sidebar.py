@@ -17,6 +17,13 @@ __all__ = [
 ]
 
 LIVE_GRAPH_OPTION = "__live__"
+SOURCE_LAYOUT_MODE = "manual"
+DATA_CONTROLS_TITLE = "### Схема и данные"
+GRAPH_VERSION_LABEL = "Версия схемы"
+LIVE_GRAPH_LABEL = "Текущая схема"
+REFRESH_DATA_BUTTON_LABEL = "Обновить данные"
+CREATE_VERSION_BUTTON_LABEL = "Создать версию"
+IMPORT_ACTUAL_DATA_BUTTON_LABEL = "Импортировать факт"
 KIND_FILTER_LABELS = {
     "process": "Процесс",
     "decision_diamond": "Решение (ромб)",
@@ -25,11 +32,6 @@ KIND_FILTER_LABELS = {
     "input_data": "Входные данные",
     "event": "Событие",
     "figma_text": "Текст Figma",
-}
-LAYOUT_MODE_LABELS = {
-    "snake": "Змейка",
-    "manual": "Координаты из source",
-    "custom": "Кастомный layout",
 }
 
 
@@ -53,7 +55,6 @@ class SidebarPositionEditState:
     visible: bool
     enabled: bool
     editable: bool
-    helper_caption: str | None
     save_disabled: bool
 
 
@@ -69,12 +70,14 @@ class SidebarState:
 @dataclass(frozen=True)
 class SidebarActions:
     render_legend: Callable[[], None]
-    save_positions: Callable[[str], None]
+    save_positions: Callable[[], None]
     reset_positions: Callable[[], None]
     reload_data: Callable[[], None]
     select_graph_version: Callable[[str | None], None]
     materialize_graph_version: Callable[[], None]
+    import_live_graph_source_from_raw: Callable[[], None]
     can_materialize_graph_version: bool
+    can_import_raw_graph_source: bool
     save_positions_enabled: bool
     graph_versions: list[GraphVersionInfo]
     selected_graph_version_id: str | None
@@ -104,21 +107,22 @@ def render_sidebar(
     with st_module.sidebar:
         render_access_section(st_module, auth=auth)
 
-        if actions.graph_versions or auth.current_user_is_admin():
-            st_module.divider()
-            render_graph_version_section(
-                st_module,
-                versions=actions.graph_versions,
-                selected_version_id=actions.selected_graph_version_id,
-                select_graph_version=actions.select_graph_version,
-                materialize_graph_version=actions.materialize_graph_version,
-                can_materialize=(
-                    auth.current_user_is_admin() and actions.can_materialize_graph_version
-                ),
-            )
+        st_module.divider()
+        render_data_controls_section(
+            st_module,
+            auth=auth,
+            versions=actions.graph_versions,
+            selected_version_id=actions.selected_graph_version_id,
+            select_graph_version=actions.select_graph_version,
+            materialize_graph_version=actions.materialize_graph_version,
+            reload_data=actions.reload_data,
+            can_materialize=auth.current_user_is_admin() and actions.can_materialize_graph_version,
+            import_live_graph_source_from_raw=actions.import_live_graph_source_from_raw,
+            can_import_raw_graph_source=actions.can_import_raw_graph_source,
+        )
 
         st_module.divider()
-        search, responsible_filter, kind_filter, layout_mode = render_filter_section(
+        search, responsible_filter, kind_filter = render_filter_section(
             st_module,
             graph,
         )
@@ -126,7 +130,6 @@ def render_sidebar(
         position_edit_enabled = render_layout_section(
             st_module,
             auth=auth,
-            layout_mode=layout_mode,
             save_positions_enabled=actions.save_positions_enabled,
             save_positions=actions.save_positions,
             reset_positions=actions.reset_positions,
@@ -137,15 +140,11 @@ def render_sidebar(
         st_module.divider()
         actions.render_legend()
 
-        st_module.divider()
-        if st_module.button("Перечитать данные", width="stretch"):
-            actions.reload_data()
-
     return SidebarState(
         search=search,
         responsible_filter=responsible_filter,
         kind_filter=kind_filter,
-        layout_mode=layout_mode,
+        layout_mode=SOURCE_LAYOUT_MODE,
         position_edit_enabled=position_edit_enabled,
     )
 
@@ -186,70 +185,66 @@ def build_position_edit_state(
     is_admin: bool,
     enabled: bool,
     editable: bool,
-    layout_mode: str,
     save_positions_enabled: bool,
-    block_reason: str | None,
 ) -> SidebarPositionEditState:
-    helper_caption = None
-    drag_enabled = editable and layout_mode in {"manual", "custom"}
-    if is_admin and not editable:
-        helper_caption = block_reason
-    elif is_admin and layout_mode == "snake":
-        helper_caption = "Drag-and-drop доступен только для layout source или custom."
-    elif is_admin and enabled:
-        helper_caption = (
-            "Перетаскивание активно только для карточек схемы. Фишки скважин не двигаются."
-        )
+    drag_enabled = editable
     return SidebarPositionEditState(
         visible=is_admin,
         enabled=enabled if is_admin and drag_enabled else False,
         editable=drag_enabled,
-        helper_caption=helper_caption,
         save_disabled=not save_positions_enabled or not drag_enabled,
     )
 
 
-def render_graph_version_section(
+def render_data_controls_section(
     st_module,
     *,
+    auth: SidebarAuthContext,
     versions: list[GraphVersionInfo],
     selected_version_id: str | None,
     select_graph_version: Callable[[str | None], None],
     materialize_graph_version: Callable[[], None],
+    reload_data: Callable[[], None],
+    import_live_graph_source_from_raw: Callable[[], None],
     can_materialize: bool,
+    can_import_raw_graph_source: bool,
 ) -> None:
-    if not versions and not can_materialize:
-        return
-
-    st_module.markdown("### Версия source")
-    options = [LIVE_GRAPH_OPTION, *(version.id for version in versions)]
-    labels = {
-        LIVE_GRAPH_OPTION: "Текущий source YAML",
-        **{version.id: version.label for version in versions},
-    }
-    selected_option = selected_version_id or LIVE_GRAPH_OPTION
-    index = options.index(selected_option) if selected_option in options else 0
-    selected = st_module.selectbox(
-        "Режим просмотра",
-        options=options,
-        index=index,
-        format_func=lambda version_id: labels[version_id],
-        key="graph_version_mode",
+    can_import_raw = can_import_raw_graph_source and (
+        auth.current_user_is_admin() or not auth.configured_auth_users()
     )
-    next_version_id = None if selected == LIVE_GRAPH_OPTION else selected
-    if next_version_id != selected_version_id:
-        select_graph_version(next_version_id)
+    st_module.markdown(DATA_CONTROLS_TITLE)
 
-    if next_version_id is None:
-        st_module.caption("Live режим: layout сохраняется обратно в source YAML.")
-    else:
-        st_module.caption("Архивная версия source YAML доступна только для просмотра.")
+    if versions:
+        options = [LIVE_GRAPH_OPTION, *(version.id for version in versions)]
+        labels = {
+            LIVE_GRAPH_OPTION: LIVE_GRAPH_LABEL,
+            **{version.id: version.label for version in versions},
+        }
+        selected_option = selected_version_id or LIVE_GRAPH_OPTION
+        index = options.index(selected_option) if selected_option in options else 0
+        selected = st_module.selectbox(
+            GRAPH_VERSION_LABEL,
+            options=options,
+            index=index,
+            format_func=lambda version_id: labels[version_id],
+            key="graph_version_mode",
+        )
+        next_version_id = None if selected == LIVE_GRAPH_OPTION else selected
+        if next_version_id != selected_version_id:
+            select_graph_version(next_version_id)
 
+    if st_module.button(REFRESH_DATA_BUTTON_LABEL, width="stretch"):
+        reload_data()
     if can_materialize and st_module.button(
-        "Сохранить версию source YAML",
+        CREATE_VERSION_BUTTON_LABEL,
         width="stretch",
     ):
         materialize_graph_version()
+    if can_import_raw and st_module.button(
+        IMPORT_ACTUAL_DATA_BUTTON_LABEL,
+        width="stretch",
+    ):
+        import_live_graph_source_from_raw()
 
 
 def render_access_section(st_module, *, auth: SidebarAuthContext) -> None:
@@ -304,7 +299,7 @@ def render_access_section(st_module, *, auth: SidebarAuthContext) -> None:
 def render_filter_section(
     st_module,
     graph: FlowGraphDocument,
-) -> tuple[str, list[str], list[str], str]:
+) -> tuple[str, list[str], list[str]]:
     st_module.markdown("### Фильтры")
     search = st_module.text_input("Поиск", placeholder="узел, скважина, ответственный")
     responsible_filter = st_module.multiselect(
@@ -317,21 +312,15 @@ def render_filter_section(
         options=list(KIND_LABELS.keys()),
         format_func=lambda key: KIND_FILTER_LABELS[key],
     )
-    layout_mode = st_module.selectbox(
-        "Расположение",
-        options=list(LAYOUT_MODE_LABELS.keys()),
-        format_func=lambda key: LAYOUT_MODE_LABELS[key],
-    )
-    return search, responsible_filter, kind_filter, layout_mode
+    return search, responsible_filter, kind_filter
 
 
 def render_layout_section(
     st_module,
     *,
     auth: SidebarAuthContext,
-    layout_mode: str,
     save_positions_enabled: bool,
-    save_positions: Callable[[str], None],
+    save_positions: Callable[[], None],
     reset_positions: Callable[[], None],
     layout_editable: bool,
     layout_edit_block_reason: str | None,
@@ -340,9 +329,7 @@ def render_layout_section(
         is_admin=auth.current_user_is_admin(),
         enabled=False,
         editable=layout_editable,
-        layout_mode=layout_mode,
         save_positions_enabled=save_positions_enabled,
-        block_reason=layout_edit_block_reason,
     )
     if not position_edit_state.visible:
         return False
@@ -351,23 +338,18 @@ def render_layout_section(
         st_module.session_state["position_edit_enabled"] = False
 
     st_module.divider()
-    st_module.markdown("### Layout")
+    st_module.markdown("### Положение")
     position_edit_enabled = st_module.toggle(
         "Редактировать положение",
         key="position_edit_enabled",
         disabled=not position_edit_state.editable,
-        help="Перетаскивайте карточки на схеме; связи перестраиваются после отпускания блока.",
     )
     position_edit_state = build_position_edit_state(
         is_admin=auth.current_user_is_admin(),
         enabled=position_edit_enabled,
         editable=layout_editable,
-        layout_mode=layout_mode,
         save_positions_enabled=save_positions_enabled,
-        block_reason=layout_edit_block_reason,
     )
-    if position_edit_state.helper_caption is not None:
-        st_module.caption(position_edit_state.helper_caption)
     if position_edit_state.enabled:
         col_a, col_b = st_module.columns(2)
         with col_a:
@@ -376,7 +358,7 @@ def render_layout_section(
                 width="stretch",
                 disabled=position_edit_state.save_disabled,
             ):
-                save_positions(layout_mode)
+                save_positions()
         with col_b:
             if st_module.button("Сбросить", width="stretch"):
                 reset_positions()

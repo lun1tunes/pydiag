@@ -24,6 +24,7 @@ from pydiag.presentation.admin_models import (
     admin_panel_defaults,
     build_create_well_command,
     default_option_index,
+    graph_source_node_delete_block_reason,
     normalized_optional_text,
     suggest_well_id,
     transition_ids_for_well,
@@ -223,6 +224,7 @@ def render_admin_panel(
     render_graph_source_editor(
         st_module,
         graph,
+        wells,
         selected_kind,
         selected,
         actions=actions,
@@ -232,6 +234,7 @@ def render_admin_panel(
 def render_graph_source_editor(
     st_module,
     graph: FlowGraphDocument,
+    wells: WellsDocument,
     selected_kind: str,
     selected: FlowNode | FlowEdge | Well | None,
     *,
@@ -252,6 +255,7 @@ def render_graph_source_editor(
             render_graph_source_node_editor(
                 st_module,
                 graph,
+                wells,
                 selected,
                 actions=actions,
             )
@@ -266,12 +270,11 @@ def render_graph_source_editor(
             )
             return
 
-        st_module.caption("Выберите карточку или связь на схеме, чтобы изменить source YAML.")
-
 
 def render_graph_source_node_editor(
     st_module,
     graph: FlowGraphDocument,
+    wells: WellsDocument,
     node: FlowNode,
     *,
     actions: AdminActions,
@@ -281,11 +284,6 @@ def render_graph_source_node_editor(
     except Exception as exc:
         st_module.error(f"Не удалось загрузить карточку из source YAML: {exc}")
         return
-
-    st_module.caption(
-        "Эти поля меняют канонический source YAML. "
-        "Для черновика текущего layout используйте блок 'Положение на холсте' выше."
-    )
 
     responsible_ids = list(graph.responsibles.keys())
     primary_options = [EMPTY_RESPONSIBLE_OPTION, *responsible_ids]
@@ -371,6 +369,43 @@ def render_graph_source_node_editor(
         )
         submitted = st_module.form_submit_button("Сохранить карточку", width="stretch")
 
+    delete_block_reason = graph_source_node_delete_block_reason(node.id, wells)
+    if delete_block_reason is not None:
+        st_module.caption(delete_block_reason)
+    else:
+        st_module.caption(
+            "Soft delete скроет карточку из графа. Вернуть её можно через deleted: false в flow source YAML."
+        )
+    confirm_delete = st_module.checkbox(
+        "Подтвердить удаление карточки",
+        key=f"confirm_delete_graph_source_node::{node.id}",
+        disabled=delete_block_reason is not None,
+    )
+    if st_module.button(
+        "Удалить карточку",
+        key=f"delete_graph_source_node::{node.id}",
+        disabled=delete_block_reason is not None or not confirm_delete,
+        width="stretch",
+    ):
+        actions.persist_graph_source_node_update(
+            graph,
+            UpdateGraphSourceNodeCommand(
+                node_id=node.id,
+                title=draft.title,
+                kind=draft.kind,
+                layout_x=draft.layout_x,
+                layout_y=draft.layout_y,
+                layout_w=draft.layout_w,
+                layout_h=draft.layout_h,
+                responsible=draft.responsible,
+                participants=draft.participants,
+                approvers=draft.approvers,
+                duration=draft.duration,
+                note=draft.note,
+                deleted=True,
+            ),
+        )
+
     render_related_graph_source_edges_for_node(
         st_module,
         graph,
@@ -416,6 +451,7 @@ def render_graph_source_node_editor(
             approvers=tuple(approvers),
             duration=normalized_optional_text(duration),
             note=normalized_optional_text(note),
+            deleted=None,
         ),
     )
 
@@ -512,9 +548,6 @@ def render_related_graph_source_edges_for_node(
         st_module.caption("У карточки пока нет связанных переходов.")
         return
 
-    st_module.caption(
-        "Связи этой карточки можно править прямо отсюда, не переключаясь на отдельную линию."
-    )
     node_map = node_by_id(graph)
     for edge in related_edges:
         edge_kind = "default" if edge.kind == "usual" else edge.kind

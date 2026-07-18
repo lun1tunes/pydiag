@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydiag.rendering.flow_canvas_state import (
     component_positions_from_state,
     component_selected_id_from_state,
+    component_view_state_from_state,
 )
 
 
@@ -42,3 +43,22 @@ def test_component_selected_id_from_state_accepts_domain_edge_and_well(documents
         == "well::well_1001"
     )
     assert component_selected_id_from_state(graph, wells, {"selected_id": "unknown"}) is None
+
+
+def test_component_view_state_from_state_extracts_viewport() -> None:
+    assert component_view_state_from_state(
+        {
+            "view": {"x": 12.34567, "y": -45.67891, "scale": 0.87543},
+            "user_moved_view": True,
+        }
+    ) == {
+        "x": 12.3457,
+        "y": -45.6789,
+        "scale": 0.8754,
+        "user_moved_view": True,
+    }
+
+
+def test_component_view_state_from_state_rejects_invalid_payload() -> None:
+    assert component_view_state_from_state({"view": {"x": "12", "y": 3, "scale": 1}}) is None
+    assert component_view_state_from_state({"view": {"x": 1, "y": 3, "scale": 0}}) is None

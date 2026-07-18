@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 __all__ = ["DocumentsGateway"]
@@ -29,7 +29,6 @@ class DocumentsGateway(Protocol):
         positions: dict[str, tuple[float, float]],
         *,
         expected_version: int,
-        layout_mode: str = "manual",
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument: ...
 
@@ -68,3 +67,7 @@ class DocumentsGateway(Protocol):
     def can_materialize_graph_version(self) -> bool: ...
 
     def materialize_graph_version(self) -> GraphVersionInfo: ...
+
+    def can_import_raw_graph_source(self) -> bool: ...
+
+    def import_live_graph_source_from_raw(self) -> RawImportResult: ...

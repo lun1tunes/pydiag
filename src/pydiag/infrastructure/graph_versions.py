@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.domain.models import FlowGraphDocument
 
 from .editable_flow_graph import is_editable_flow_graph_payload
@@ -24,13 +25,16 @@ from .storage_paths import (
     graph_version_paths,
     next_graph_version_path,
     preferred_graph_source_path,
+    raw_graph_path,
     source_graph_path,
 )
 
 __all__ = [
     "can_materialize_graph_version",
+    "can_import_raw_graph_source",
     "ensure_live_graph_source",
     "GraphVersionInfo",
+    "import_live_graph_source_from_raw",
     "list_graph_versions",
     "materialize_new_graph_version_from_raw_source",
     "resolve_graph_version_path",
@@ -41,6 +45,10 @@ GRAPH_ID_SANITIZE_RE = re.compile(r"[^a-z0-9_]+")
 
 def can_materialize_graph_version() -> bool:
     return preferred_graph_source_path() is not None
+
+
+def can_import_raw_graph_source() -> bool:
+    return raw_graph_path().exists()
 
 
 def list_graph_versions() -> list[GraphVersionInfo]:
@@ -133,6 +141,49 @@ def ensure_live_graph_source(
     return target
 
 
+def import_live_graph_source_from_raw(
+    source_path: str | Path | None = None,
+    target_path: str | Path | None = None,
+) -> RawImportResult:
+    source = Path(source_path or raw_graph_path())
+    if not source.exists():
+        raise FileNotFoundError(f"Raw graph source not found: {source}")
+
+    target = Path(target_path or source_graph_path())
+    imported_payload = materialized_flow_source_payload(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if not target.exists():
+        save_text_atomic(target, dump_flow_source_payload(imported_payload))
+        return RawImportResult(live_path=target, changed=True)
+
+    current_payload = materialized_flow_source_payload(target)
+    if _payloads_equal_ignoring_version(current_payload, imported_payload):
+        return RawImportResult(live_path=target, changed=False)
+
+    backup_path = next_graph_version_path()
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    save_text_atomic(
+        backup_path,
+        dump_flow_source_payload(current_payload),
+    )
+    imported_payload["version"] = max(
+        int(imported_payload.get("version", 1)),
+        int(current_payload.get("version", 1)) + 1,
+    )
+    save_text_atomic(target, dump_flow_source_payload(imported_payload))
+    return RawImportResult(
+        live_path=target,
+        changed=True,
+        backup_version=GraphVersionInfo(
+            id=backup_path.name,
+            label=backup_path.name,
+            path=backup_path,
+            is_versioned=True,
+        ),
+    )
+
+
 def materialize_new_graph_version_from_raw_source(
     source_path: str | Path | None = None,
 ) -> GraphVersionInfo:
@@ -152,3 +203,20 @@ def materialize_new_graph_version_from_raw_source(
         path=target,
         is_versioned=True,
     )
+
+
+def _payloads_equal_ignoring_version(
+    current_payload: dict[str, object],
+    imported_payload: dict[str, object],
+) -> bool:
+    current = load_structured_payload(
+        dump_flow_source_payload(deepcopy(current_payload))
+    )
+    imported = load_structured_payload(
+        dump_flow_source_payload(deepcopy(imported_payload))
+    )
+    if not isinstance(current, dict) or not isinstance(imported, dict):
+        return False
+    current.pop("version", None)
+    imported.pop("version", None)
+    return current == imported

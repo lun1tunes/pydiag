@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from math import hypot
 
-from .flow_layout_positions import node_ports
 from .flow_route_geometry import EdgeRoute, NodeGeometry, Point, port_point
 
 EDGE_LABEL_GAP = 12
@@ -24,11 +23,7 @@ def edge_label_position(
     label_width: int,
     layout_mode: str,
 ) -> tuple[float, float]:
-    source_side = (
-        route.source_anchor.source_position
-        if route.source_anchor is not None
-        else node_ports(source.index, layout_mode)[0]
-    )
+    source_side = route.source_side
     if route.edge.kind in {"yes", "no"} and (route.source_anchor is not None or route.anchors):
         return fallback_edge_label_position(
             source,
@@ -38,7 +33,7 @@ def edge_label_position(
             source_side,
         )
 
-    _, target_side = node_ports(target.index, layout_mode)
+    target_side = route.target_side
     points = (
         route.source_anchor.pos
         if route.source_anchor is not None

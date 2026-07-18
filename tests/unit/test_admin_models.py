@@ -5,6 +5,7 @@ from pydiag.presentation.admin_models import (
     admin_panel_defaults,
     build_create_well_command,
     default_option_index,
+    graph_source_node_delete_block_reason,
     normalized_optional_text,
     suggest_well_id,
     transition_ids_for_well,
@@ -80,3 +81,13 @@ def test_normalized_optional_text_and_suggest_well_id(documents) -> None:
     assert normalized_optional_text("   ") is None
     assert normalized_optional_text("  note ") == "note"
     assert suggest_well_id(wells) == "well_1005"
+
+
+def test_graph_source_node_delete_block_reason_reports_referenced_wells(documents) -> None:
+    _, wells = documents
+
+    assert graph_source_node_delete_block_reason("db_offset_wells", wells) is None
+    assert graph_source_node_delete_block_reason("proc_initial_review", wells) == (
+        "Карточку нельзя удалить: она используется в текущем состоянии "
+        "или истории скважин well_1001, well_1004."
+    )

@@ -70,6 +70,8 @@ class RouteAnchor:
 @dataclass(frozen=True)
 class EdgeRoute:
     edge: FlowEdge
+    source_side: str
+    target_side: str
     anchors: tuple[RouteAnchor, ...]
     source_anchor: RouteAnchor | None = None
 

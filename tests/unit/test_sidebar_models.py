@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydiag.presentation.sidebar import (
     KIND_FILTER_LABELS,
-    LAYOUT_MODE_LABELS,
     build_authenticated_user_state,
     build_login_state,
     build_position_edit_state,
@@ -52,36 +51,28 @@ def test_position_edit_state_controls_visibility_caption_and_save_button() -> No
         is_admin=False,
         enabled=True,
         editable=True,
-        layout_mode="manual",
         save_positions_enabled=True,
-        block_reason=None,
     )
     visible = build_position_edit_state(
         is_admin=True,
         enabled=True,
         editable=True,
-        layout_mode="custom",
         save_positions_enabled=False,
-        block_reason=None,
     )
-    snake = build_position_edit_state(
+    blocked = build_position_edit_state(
         is_admin=True,
-        enabled=True,
-        editable=True,
-        layout_mode="snake",
+        enabled=False,
+        editable=False,
         save_positions_enabled=True,
-        block_reason=None,
     )
 
     assert hidden.visible is False
     assert hidden.enabled is False
-    assert hidden.helper_caption is None
     assert visible.visible is True
     assert visible.enabled is True
-    assert "Фишки скважин" in str(visible.helper_caption)
     assert visible.save_disabled is True
-    assert snake.enabled is False
-    assert "custom" in str(snake.helper_caption)
+    assert blocked.enabled is False
+    assert blocked.editable is False
 
 
 def test_sidebar_labels_expose_expected_public_values() -> None:
@@ -92,8 +83,3 @@ def test_sidebar_labels_expose_expected_public_values() -> None:
     assert KIND_FILTER_LABELS["decision_card"] == "Решение (карточка)"
     assert KIND_FILTER_LABELS["event"] == "Событие"
     assert KIND_FILTER_LABELS["figma_text"] == "Текст Figma"
-    assert LAYOUT_MODE_LABELS == {
-        "snake": "Змейка",
-        "manual": "Координаты из source",
-        "custom": "Кастомный layout",
-    }

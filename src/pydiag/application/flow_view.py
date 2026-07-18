@@ -4,7 +4,7 @@ from collections.abc import MutableMapping
 from typing import Any
 
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
-from pydiag.rendering import build_flow_canvas_payload
+from pydiag.rendering import build_flow_canvas_payload, component_view_state_from_state
 
 from .flow_view_context import prepare_render_context
 from .flow_view_selection import (
@@ -15,9 +15,11 @@ from .flow_view_selection import (
 from .flow_view_state import flow_state_timestamp
 
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
+FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 
 __all__ = [
     "FLOW_CANVAS_COMPONENT_KEY",
+    "FLOW_SELECTION_RERUN_REQUEST_KEY",
     "flow_state_timestamp",
     "render_flow",
 ]
@@ -36,6 +38,7 @@ def render_flow(
     render_canvas,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> str | None:
+    previous_selected_id = normalized_selected_id(session_state.get("selected_id"))
     component_state = component_state_from_session(session_state, component_key)
     selected_id = resolve_selected_id(session_state, graph, wells, component_state)
     render_context = prepare_render_context(
@@ -72,5 +75,15 @@ def render_flow(
         key=component_key,
         default_selected_id=selected_id,
         default_positions=render_context.default_positions,
+        persisted_view_state=component_view_state_from_state(component_state),
     )
-    return sync_returned_selected_id(session_state, graph, wells, selected_id, returned)
+    selected_id = sync_returned_selected_id(session_state, graph, wells, selected_id, returned)
+    if selected_id != previous_selected_id:
+        session_state[FLOW_SELECTION_RERUN_REQUEST_KEY] = True
+    return selected_id
+
+
+def normalized_selected_id(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None

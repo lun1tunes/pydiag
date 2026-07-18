@@ -4,12 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 from .graph_versions import (
     can_materialize_graph_version,
+    can_import_raw_graph_source,
     ensure_live_graph_source,
+    import_live_graph_source_from_raw,
     list_graph_versions,
     materialize_new_graph_version_from_raw_source,
     resolve_graph_version_path,
@@ -36,9 +38,13 @@ class JsonDocumentsGateway:
     resolve_graph_version_path_fn: Callable[[str | None], Path] = resolve_graph_version_path
     list_graph_versions_fn: Callable[[], list[GraphVersionInfo]] = list_graph_versions
     can_materialize_graph_version_fn: Callable[[], bool] = can_materialize_graph_version
+    can_import_raw_graph_source_fn: Callable[[], bool] = can_import_raw_graph_source
     ensure_live_graph_source_fn: Callable[[], Path] = ensure_live_graph_source
     materialize_graph_version_fn: Callable[[], GraphVersionInfo] = (
         materialize_new_graph_version_from_raw_source
+    )
+    import_live_graph_source_from_raw_fn: Callable[[], RawImportResult] = (
+        import_live_graph_source_from_raw
     )
     graph_path_fn: Callable[[], Path] = graph_path
     preferred_graph_source_path_fn: Callable[[], Path | None] = preferred_graph_source_path
@@ -88,7 +94,6 @@ class JsonDocumentsGateway:
         positions: dict[str, tuple[float, float]],
         *,
         expected_version: int,
-        layout_mode: str = "manual",
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument:
         if graph_version_id is None:
@@ -99,7 +104,7 @@ class JsonDocumentsGateway:
             positions,
             expected_version=expected_version,
             path=path,
-            layout_mode=layout_mode,
+            layout_mode="manual",
         )
 
     def load_graph_source_node(
@@ -158,6 +163,12 @@ class JsonDocumentsGateway:
 
     def materialize_graph_version(self) -> GraphVersionInfo:
         return self.materialize_graph_version_fn()
+
+    def can_import_raw_graph_source(self) -> bool:
+        return self.can_import_raw_graph_source_fn()
+
+    def import_live_graph_source_from_raw(self) -> RawImportResult:
+        return self.import_live_graph_source_from_raw_fn()
 
     def _graph_source_path(self, graph_version_id: str | None) -> Path:
         if graph_version_id is None:

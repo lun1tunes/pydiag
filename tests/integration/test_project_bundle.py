@@ -113,7 +113,9 @@ def run_restore_script(restore: Path, script: str) -> None:
     )
 
 
-def test_downloaded_bundle_cli_materializes_live_source_after_reload(tmp_path: Path) -> None:
+def test_downloaded_bundle_cli_imports_live_source_from_raw_on_explicit_action(
+    tmp_path: Path,
+) -> None:
     restore = restore_from_downloaded_bundle(tmp_path)
 
     raw_path = restore / "data" / "real_true_data.json"
@@ -137,33 +139,27 @@ app.run(timeout=30)
 if app.exception:
     raise SystemExit(f"app exception: {{app.exception!r}}")
 
-graph_path = Path({str(restore / "data" / "flow_graph.json")!r})
 wells_path = Path({str(restore / "data" / "wells.yaml")!r})
 wells_example_path = Path({str(restore / "data" / "wells.example.yaml")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
-if not graph_path.exists():
-    raise SystemExit("missing flow_graph.json")
 if not wells_path.exists():
     raise SystemExit("missing wells.yaml")
 if not wells_example_path.exists():
     raise SystemExit("missing wells.example.yaml")
 if source_path.exists():
-    raise SystemExit("flow_source.yaml should not exist before explicit reload")
+    raise SystemExit("flow_source.yaml should not exist before explicit import")
 
-graph_payload = json.loads(graph_path.read_text(encoding="utf-8"))
 wells_text = wells_path.read_text(encoding="utf-8")
-if [node["id"] for node in graph_payload["nodes"]] != ["start", "end"]:
-    raise SystemExit(f"unexpected graph nodes: {{[node['id'] for node in graph_payload['nodes']]}}")
 if "wells: []" not in wells_text:
     raise SystemExit("empty wells bootstrap was not created")
 if not any("Пользователи не настроены" in item.value for item in app.warning):
     raise SystemExit("expected missing-users warning was not rendered")
 
-click_button(app, "Перечитать данные")
+click_button(app, "Импортировать факт")
 if app.exception:
-    raise SystemExit(f"app exception after reload: {{app.exception!r}}")
+    raise SystemExit(f"app exception after import: {{app.exception!r}}")
 if not source_path.exists():
-    raise SystemExit("missing flow_source.yaml after reload")
+    raise SystemExit("missing flow_source.yaml after import")
 
 source_text = source_path.read_text(encoding="utf-8")
 if 'schema_version: "flow-source/1.0"' not in source_text:
@@ -175,7 +171,9 @@ if 'version: 3' not in source_text:
     run_restore_script(restore, script)
 
 
-def test_unpacked_bundle_reload_preserves_existing_live_source(tmp_path: Path) -> None:
+def test_unpacked_bundle_import_from_raw_creates_backup_for_existing_live_source(
+    tmp_path: Path,
+) -> None:
     restore = restore_from_downloaded_bundle(tmp_path)
 
     raw_path = restore / "data" / "real_true_data.json"
@@ -203,15 +201,15 @@ app.run(timeout=30)
 if app.exception:
     raise SystemExit(f"app exception: {{app.exception!r}}")
 
-graph_path = Path({str(restore / "data" / "flow_graph.json")!r})
 raw_path = Path({str(restore / "data" / "real_true_data.json")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
+backup_path = Path({str(restore / "data" / "flow_sources" / "flow_source.v0001.yaml")!r})
 
-click_button(app, "Перечитать данные")
+click_button(app, "Импортировать факт")
 if app.exception:
-    raise SystemExit(f"app exception after first reload: {{app.exception!r}}")
+    raise SystemExit(f"app exception after first import: {{app.exception!r}}")
 if not source_path.exists():
-    raise SystemExit("missing flow_source.yaml after first reload")
+    raise SystemExit("missing flow_source.yaml after first import")
 
 source_payload = load_structured_payload(source_path.read_bytes())
 source_payload["nodes"]["start"]["title"] = "Manual Start"
@@ -223,18 +221,21 @@ for element in raw_payload["elements"]:
         element["characters"] = "Raw Start Updated"
 raw_path.write_text(json.dumps(raw_payload), encoding="utf-8")
 
-click_button(app, "Перечитать данные")
+click_button(app, "Импортировать факт")
 if app.exception:
-    raise SystemExit(f"app exception after second reload: {{app.exception!r}}")
+    raise SystemExit(f"app exception after second import: {{app.exception!r}}")
+
+if not backup_path.exists():
+    raise SystemExit("missing backup version after second import")
 
 source_payload = load_structured_payload(source_path.read_bytes())
-if source_payload["nodes"]["start"]["title"] != "Manual Start":
-    raise SystemExit("existing live source was overwritten on reload")
-
-graph_payload = json.loads(graph_path.read_text(encoding="utf-8"))
-start_node = next(node for node in graph_payload["nodes"] if node["id"] == "start")
-if start_node["title"] != "Manual Start":
-    raise SystemExit("materialized graph did not follow preserved live source")
+backup_payload = load_structured_payload(backup_path.read_bytes())
+if source_payload["nodes"]["start"]["title"] != "Raw Start Updated":
+    raise SystemExit("live source was not refreshed from raw payload")
+if backup_payload["nodes"]["start"]["title"] != "Manual Start":
+    raise SystemExit("previous live source was not preserved in backup version")
+if source_payload["version"] != 4:
+    raise SystemExit(f"unexpected imported source version: {{source_payload['version']}}")
 """
 
     run_restore_script(restore, script)
@@ -267,21 +268,16 @@ if app.exception:
 graph_path = Path({str(restore / "data" / "flow_graph.json")!r})
 raw_path = Path({str(restore / "data" / "real_true_data.json")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
-initial_graph = json.loads(graph_path.read_text(encoding="utf-8"))
 
 raw_path.write_text("{{broken json", encoding="utf-8")
-click_button(app, "Перечитать данные")
+click_button(app, "Импортировать факт")
 
 if app.exception:
-    raise SystemExit(f"app exception after reload failure: {{app.exception!r}}")
+    raise SystemExit(f"app exception after import failure: {{app.exception!r}}")
 if source_path.exists():
     raise SystemExit("live source should not be created from invalid raw payload")
-if not any("Не удалось перечитать данные" in item.value for item in app.error):
-    raise SystemExit("reload failure was not rendered as a user-facing error")
-
-current_graph = json.loads(graph_path.read_text(encoding="utf-8"))
-if current_graph != initial_graph:
-    raise SystemExit("materialized flow graph changed after failed reload")
+if not any("Не удалось импортировать фактические данные" in item.value for item in app.error):
+    raise SystemExit("import failure was not rendered as a user-facing error")
 """
 
     run_restore_script(restore, script)

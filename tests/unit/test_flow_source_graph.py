@@ -5,8 +5,10 @@ from pydantic import ValidationError
 
 from pydiag.infrastructure.flow_source_graph import (
     FlowSourceDocument,
+    dump_flow_source_payload,
     editable_flow_graph_payload_from_source_payload,
     flow_source_payload_from_editable_payload,
+    load_structured_payload,
 )
 
 
@@ -124,6 +126,28 @@ def test_flow_source_payload_materializes_rich_editable_graph() -> None:
     assert no_edge["metadata"]["note"] == "вернуть на доработку"
 
 
+def test_flow_source_payload_omits_deleted_nodes_and_their_edges() -> None:
+    payload = valid_flow_source_payload()
+    payload["nodes"]["review_data"]["deleted"] = True
+
+    editable_payload = editable_flow_graph_payload_from_source_payload(payload)
+
+    assert {node["id"] for node in editable_payload["nodes"]} == {
+        "data_complete",
+        "well_design",
+    }
+    assert editable_payload["edges"] == [
+        {
+            "id": "edge_data_complete_well_design_yes_1",
+            "kind": "yes",
+            "source": "data_complete",
+            "target": "well_design",
+            "label": "Да",
+            "metadata": {"condition": "dataset complete"},
+        }
+    ]
+
+
 def test_editable_flow_graph_payload_converts_back_to_flow_source_payload() -> None:
     editable_payload = editable_flow_graph_payload_from_source_payload(
         valid_flow_source_payload()
@@ -194,6 +218,29 @@ def test_editable_flow_graph_payload_roundtrips_custom_layout_without_metadata_l
     }
     assert "_pydiag_custom_layout_x" not in source_payload["nodes"]["review_data"]["metadata"]
     assert "_pydiag_custom_layout_y" not in source_payload["nodes"]["review_data"]["metadata"]
+
+
+def test_dump_flow_source_payload_strips_figma_trace_metadata() -> None:
+    payload = valid_flow_source_payload()
+    payload["nodes"]["review_data"]["metadata"] = {
+        "figma_source_id": "3029:949",
+        "figma_parent_id": "875:1085",
+        "figma_source_type": "SHAPE_WITH_TEXT",
+        "kept": "value",
+    }
+    payload["nodes"]["data_complete"]["transitions"][0]["metadata"] = {
+        "figma_source_id": "3029:1002",
+        "figma_parent_id": "875:1085",
+        "note": "keep me",
+    }
+
+    serialized = dump_flow_source_payload(payload)
+    normalized = load_structured_payload(serialized)
+
+    assert normalized["nodes"]["review_data"]["metadata"] == {"kept": "value"}
+    assert normalized["nodes"]["data_complete"]["transitions"][0]["metadata"] == {
+        "note": "keep me"
+    }
 
 
 def test_flow_source_document_rejects_unknown_transition_target() -> None:

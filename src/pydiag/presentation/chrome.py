@@ -32,6 +32,33 @@ LEGEND_TYPE_ITEMS = (
 )
 APP_CSS = """
 <style>
+:root {
+    /* Compact density profile. Tweak these tokens to relax or tighten the whole UI. */
+    --app-page-pad-top: 0.32rem;
+    --app-page-pad-x: 1.2rem;
+    --app-page-pad-bottom: 0.5rem;
+    --app-sidebar-pad-top: 0.18rem;
+    --app-stack-gap: 0.42rem;
+    --app-stack-gap-sidebar: 0.3rem;
+    --app-divider-gap: 0.4rem;
+    --app-paragraph-gap-top: 0.05rem;
+    --app-paragraph-gap-bottom: 0.26rem;
+    --app-expander-gap-top: 0.08rem;
+    --app-expander-gap-bottom: 0.14rem;
+    --app-title-gap: 0.12rem;
+    --app-subtitle-gap: 0.5rem;
+    --app-status-gap-top: 0.16rem;
+    --app-status-gap-bottom: 0.44rem;
+    --app-status-pad-top: 6px;
+    --app-muted-gap-bottom: 0.4rem;
+    --app-kv-gap-top: 0.34rem;
+    --app-kv-gap-bottom: 0.52rem;
+    --app-legend-gap-top: 0.12rem;
+    --app-legend-gap-bottom: 0.36rem;
+    --app-control-height: 2rem;
+    --app-alert-gap: 0.05rem;
+    --app-mobile-inspector-gap: 0.75rem;
+}
 .stApp {
     background:
         linear-gradient(180deg, rgba(246, 247, 249, 0.98), rgba(246, 247, 249, 1));
@@ -69,7 +96,6 @@ APP_CSS = """
 [data-testid="stHeaderActionElements"],
 [data-testid="stToolbarActions"],
 [data-testid="stMainMenu"],
-[data-testid="stStatusWidget"],
 [data-testid="stAppDeployButton"],
 [data-testid="stDecoration"],
 .stDeployButton {
@@ -77,11 +103,35 @@ APP_CSS = """
 }
 .block-container {
     max-width: none;
-    padding: 0.55rem 1.35rem 0.8rem;
+    padding: var(--app-page-pad-top) var(--app-page-pad-x) var(--app-page-pad-bottom);
+}
+div[data-testid="stVerticalBlock"] {
+    gap: var(--app-stack-gap);
+}
+[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {
+    gap: var(--app-stack-gap-sidebar);
+}
+.stApp hr {
+    margin: var(--app-divider-gap) 0;
+}
+div[data-testid="stMarkdownContainer"] p {
+    margin: var(--app-paragraph-gap-top) 0 var(--app-paragraph-gap-bottom);
+}
+div[data-testid="stExpander"] {
+    margin: var(--app-expander-gap-top) 0 var(--app-expander-gap-bottom);
 }
 [data-testid="stSidebar"] {
     background: #eef2f6;
     border-right: 1px solid rgba(100, 116, 139, 0.18);
+}
+[data-testid="stSidebarContent"] {
+    padding-top: 0 !important;
+}
+[data-testid="stSidebarUserContent"] {
+    padding-top: var(--app-sidebar-pad-top) !important;
+}
+[data-testid="stSidebar"] .block-container {
+    padding-top: var(--app-sidebar-pad-top);
 }
 [data-testid="stSidebar"] label,
 [data-testid="stSidebar"] p {
@@ -93,22 +143,22 @@ APP_CSS = """
     font-weight: 780;
     letter-spacing: 0;
     color: #0f172a;
-    margin: 0 0 0.15rem;
+    margin: 0 0 var(--app-title-gap);
 }
 .app-subtitle {
     color: #526173;
     font-size: 0.94rem;
-    margin: 0 0 0.9rem;
+    margin: 0 0 var(--app-subtitle-gap);
 }
 .status-row {
     display: grid;
     grid-template-columns: repeat(4, minmax(120px, 1fr));
     gap: 10px;
-    margin: 0.25rem 0 0.85rem;
+    margin: var(--app-status-gap-top) 0 var(--app-status-gap-bottom);
 }
 .status-cell {
     border-top: 1px solid rgba(100, 116, 139, 0.22);
-    padding-top: 9px;
+    padding-top: var(--app-status-pad-top);
 }
 .status-cell span {
     display: block;
@@ -131,14 +181,14 @@ APP_CSS = """
 .muted-line {
     color: #64748b;
     font-size: 0.86rem;
-    margin: 0.1rem 0 0.55rem;
+    margin: 0.06rem 0 var(--app-muted-gap-bottom);
 }
 .mini-kv {
     display: grid;
     grid-template-columns: 112px minmax(0, 1fr);
     gap: 7px 10px;
     font-size: 0.88rem;
-    margin: 0.65rem 0 0.9rem;
+    margin: var(--app-kv-gap-top) 0 var(--app-kv-gap-bottom);
 }
 .mini-kv span:nth-child(odd) {
     color: #64748b;
@@ -150,7 +200,7 @@ APP_CSS = """
 .legend-shell {
     display: grid;
     gap: 12px;
-    margin: 0.2rem 0 0.8rem;
+    margin: var(--app-legend-gap-top) 0 var(--app-legend-gap-bottom);
 }
 .legend-title {
     color: #526173;
@@ -212,14 +262,15 @@ APP_CSS = """
 }
 div[data-testid="stButton"] button {
     border-radius: 7px;
-    min-height: 2.35rem;
+    min-height: var(--app-control-height);
 }
 div[data-testid="stFormSubmitButton"] button {
     border-radius: 7px;
-    min-height: 2.35rem;
+    min-height: var(--app-control-height);
 }
 div[data-testid="stAlert"] {
     border-radius: 8px;
+    margin: var(--app-alert-gap) 0;
 }
 @media (max-width: 900px) {
     .status-row {
@@ -227,13 +278,12 @@ div[data-testid="stAlert"] {
     }
     .inspector-shell {
         border-top: 1px solid rgba(100, 116, 139, 0.20);
-        padding-top: 1rem;
+        padding-top: var(--app-mobile-inspector-gap);
         min-height: auto;
     }
 }
 </style>
 """.strip()
-
 
 @dataclass(frozen=True)
 class HeaderMetric:

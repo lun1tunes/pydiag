@@ -8,7 +8,7 @@ from pydiag.common.graph_source_admin import (
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
 )
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.infrastructure.json_documents_gateway import JsonDocumentsGateway
 
 
@@ -102,13 +102,27 @@ def test_json_documents_gateway_delegates_to_storage_functions(documents) -> Non
         calls.append(("materialize_graph_version",))
         return version_info
 
+    def fake_can_import_raw_graph_source() -> bool:
+        calls.append(("can_import_raw_graph_source",))
+        return True
+
+    def fake_import_live_graph_source_from_raw() -> RawImportResult:
+        calls.append(("import_live_graph_source_from_raw",))
+        return RawImportResult(
+            live_path=Path("/tmp/flow_source.yaml"),
+            changed=True,
+            backup_version=version_info,
+        )
+
     gateway = JsonDocumentsGateway(
         load_documents_fn=fake_load_documents,
         resolve_graph_version_path_fn=fake_resolve_graph_version_path,
         list_graph_versions_fn=fake_list_graph_versions,
         can_materialize_graph_version_fn=fake_can_materialize_graph_version,
+        can_import_raw_graph_source_fn=fake_can_import_raw_graph_source,
         ensure_live_graph_source_fn=fake_ensure_live_graph_source,
         materialize_graph_version_fn=fake_materialize_graph_version,
+        import_live_graph_source_from_raw_fn=fake_import_live_graph_source_from_raw,
         wells_path_fn=fake_wells_path,
         save_graph_positions_fn=fake_save_graph_positions,
         load_graph_source_node_fn=fake_load_graph_source_node,
@@ -133,7 +147,6 @@ def test_json_documents_gateway_delegates_to_storage_functions(documents) -> Non
         gateway.save_graph_positions(
             {"proc_initial_review": (10.0, 20.0)},
             expected_version=graph.version,
-            layout_mode="manual",
             graph_version_id=version_info.id,
         )
         == graph
@@ -178,6 +191,12 @@ def test_json_documents_gateway_delegates_to_storage_functions(documents) -> Non
     assert gateway.list_graph_versions() == [version_info]
     assert gateway.can_materialize_graph_version() is True
     assert gateway.materialize_graph_version() == version_info
+    assert gateway.can_import_raw_graph_source() is True
+    assert gateway.import_live_graph_source_from_raw() == RawImportResult(
+        live_path=Path("/tmp/flow_source.yaml"),
+        changed=True,
+        backup_version=version_info,
+    )
 
     assert calls == [
         ("load_documents", None),
@@ -204,4 +223,6 @@ def test_json_documents_gateway_delegates_to_storage_functions(documents) -> Non
         ("list_graph_versions",),
         ("can_materialize_graph_version",),
         ("materialize_graph_version",),
+        ("can_import_raw_graph_source",),
+        ("import_live_graph_source_from_raw",),
     ]

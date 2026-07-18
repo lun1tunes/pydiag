@@ -1,8 +1,12 @@
 const TOOLBAR_BUTTONS = [
   { id: "zoom-in", label: "+" },
   { id: "zoom-out", label: "-" },
-  { id: "reset-view", label: "Fit" },
+  { id: "reset-view", label: "Reset view" },
 ];
+const FIT_VIEW_PADDING_X = 64;
+const FIT_VIEW_PADDING_TOP = 48;
+const FIT_VIEW_PADDING_BOTTOM = 64;
+const VIEW_STATE_IDLE_SYNC_MS = 360;
 
 export default function(component) {
   const root = ensureRoot(component.parentElement);
@@ -16,6 +20,18 @@ export default function(component) {
     if (state.resizeObserver) {
       state.resizeObserver.disconnect();
       state.resizeObserver = null;
+    }
+    if (state.viewSyncTimer !== null) {
+      clearTimeout(state.viewSyncTimer);
+      state.viewSyncTimer = null;
+    }
+    if (state.fullscreenChangeHandler) {
+      state.ownerDocument.removeEventListener("fullscreenchange", state.fullscreenChangeHandler);
+      state.ownerDocument.removeEventListener(
+        "webkitfullscreenchange",
+        state.fullscreenChangeHandler,
+      );
+      state.fullscreenChangeHandler = null;
     }
   };
 }
@@ -40,17 +56,37 @@ function ensureState(root, component) {
     root,
     component,
     payload: normalizePayload(component.data),
+    nodePayloadsById: new Map(),
+    edgePayloadsById: new Map(),
+    tokenPayloadsById: new Map(),
     view: { x: 0, y: 0, scale: 1 },
     userMovedView: false,
     positions: {},
+    positionsVersion: 0,
     selectedId: null,
     isPanning: false,
     draggingNodeId: null,
     frameRequested: false,
     lastRevision: null,
+    sceneRevision: null,
+    renderedSelectedId: null,
+    renderedPositionsVersion: -1,
+    renderedDraggingNodeId: null,
     resizeObserver: null,
+    viewSyncTimer: null,
+    fullscreenChangeHandler: null,
     ownerDocument,
+    dom: null,
+    edgeElements: new Map(),
+    nodeElements: new Map(),
+    tokenElements: new Map(),
+    minimapNodeElements: new Map(),
+    minimapBounds: null,
+    lastReportedView: null,
+    lastReportedUserMovedView: false,
   };
+
+  initializeRootStructure(state);
 
   state.resizeObserver = new ResizeObserver(() => {
     if (!state.userMovedView) {
@@ -59,8 +95,111 @@ function ensureState(root, component) {
     queueRender(state);
   });
   state.resizeObserver.observe(root);
+  state.fullscreenChangeHandler = () => {
+    syncFullscreenClass(state);
+    queueRender(state);
+  };
+  ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);
+  ownerDocument.addEventListener("webkitfullscreenchange", state.fullscreenChangeHandler);
+  syncFullscreenClass(state);
   root.__flowCanvasState = state;
   return state;
+}
+
+function initializeRootStructure(state) {
+  const root = state.root;
+  root.replaceChildren();
+
+  const emptyState = createElement("div", "flow-empty-state", root);
+  emptyState.textContent = "На схеме пока нет элементов.";
+  emptyState.hidden = true;
+
+  const toolbar = createElement("div", "flow-canvas-toolbar", root);
+  const toolbarButtons = {};
+  for (const buttonDef of TOOLBAR_BUTTONS) {
+    const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
+    button.type = "button";
+    button.textContent = buttonDef.label;
+    button.addEventListener("click", () => {
+      if (buttonDef.id === "zoom-in") {
+        zoomAtCenter(state, 1.12);
+      } else if (buttonDef.id === "zoom-out") {
+        zoomAtCenter(state, 1 / 1.12);
+      } else {
+        state.userMovedView = false;
+        fitView(state);
+      }
+      syncViewState(state);
+      queueRender(state);
+    });
+    toolbarButtons[buttonDef.id] = button;
+  }
+
+  const fullscreenButton = createElement("button", "flow-canvas-toolbar__button", toolbar);
+  fullscreenButton.type = "button";
+  fullscreenButton.addEventListener("click", () => {
+    toggleFullscreen(state);
+  });
+
+  const viewport = createElement("div", "flow-canvas-viewport", root);
+  attachViewportHandlers(viewport, state);
+
+  const stage = createElement("div", "flow-canvas-stage", viewport);
+  const svg = createSvgElement("svg");
+  svg.classList.add("flow-canvas-edges");
+  stage.appendChild(svg);
+
+  const defs = createSvgElement("defs");
+  svg.appendChild(defs);
+  const edgeLayer = createSvgElement("g");
+  svg.appendChild(edgeLayer);
+
+  const labelsLayer = createElement("div", "flow-canvas-labels", stage);
+  const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
+
+  const minimap = createElement("div", "flow-canvas-minimap", root);
+  minimap.setAttribute("role", "img");
+  minimap.setAttribute("aria-label", "Миникарта схемы");
+  attachMinimapHandlers(minimap, state);
+
+  const minimapSvg = createSvgElement("svg");
+  minimapSvg.classList.add("flow-canvas-minimap__svg");
+  minimap.appendChild(minimapSvg);
+
+  const minimapBackdrop = createSvgElement("rect");
+  minimapBackdrop.classList.add("flow-canvas-minimap__backdrop");
+  minimapSvg.appendChild(minimapBackdrop);
+
+  const minimapEdgeLayer = createSvgElement("g");
+  minimapSvg.appendChild(minimapEdgeLayer);
+
+  const minimapNodeLayer = createSvgElement("g");
+  minimapSvg.appendChild(minimapNodeLayer);
+
+  const minimapViewport = createSvgElement("rect");
+  minimapViewport.classList.add("flow-canvas-minimap__viewport");
+  minimapViewport.setAttribute("rx", "12");
+  minimapSvg.appendChild(minimapViewport);
+
+  state.dom = {
+    emptyState,
+    toolbar,
+    toolbarButtons,
+    fullscreenButton,
+    viewport,
+    stage,
+    svg,
+    defs,
+    edgeLayer,
+    labelsLayer,
+    nodesLayer,
+    minimap,
+    minimapSvg,
+    minimapBackdrop,
+    minimapEdgeLayer,
+    minimapNodeLayer,
+    minimapViewport,
+  };
 }
 
 function normalizePayload(data) {
@@ -68,10 +207,11 @@ function normalizePayload(data) {
     return {
       nodes: [],
       edges: [],
-      canvas: { width: 1200, height: 720 },
-      bounds: { left: 0, top: 0, right: 1200, bottom: 720, width: 1200, height: 720 },
+      canvas: { width: 1200, height: 828 },
+      bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
       selected_id: null,
       position_edit_enabled: false,
+      persisted_view_state: null,
       revision: 0,
     };
   }
@@ -80,14 +220,29 @@ function normalizePayload(data) {
 
 function syncStateFromPayload(state) {
   const payload = state.payload;
+  const persistedViewState = normalizePersistedViewState(payload.persisted_view_state);
   const graphChanged = state.lastRevision !== payload.revision;
-  if (graphChanged || state.draggingNodeId === null) {
-    state.positions = nodePositionMap(payload.nodes);
+  const nextPositions = nodePositionMap(payload.nodes);
+
+  state.nodePayloadsById = indexPayloadsById(payload.nodes);
+  state.edgePayloadsById = indexPayloadsById(payload.edges);
+  state.tokenPayloadsById = indexTokenPayloads(payload.nodes);
+
+  if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
+    state.positions = nextPositions;
+    state.positionsVersion += 1;
   }
+
   state.selectedId = payload.selected_id ?? state.selectedId ?? null;
+  if (persistedViewState && state.lastRevision === null) {
+    state.view = persistedViewState.view;
+    state.userMovedView = persistedViewState.userMovedView;
+    state.lastReportedView = { ...persistedViewState.view };
+    state.lastReportedUserMovedView = persistedViewState.userMovedView;
+  }
   if (graphChanged) {
     state.lastRevision = payload.revision;
-    if (!state.userMovedView) {
+    if (!persistedViewState && !state.userMovedView) {
       fitView(state);
     }
   }
@@ -106,201 +261,447 @@ function queueRender(state) {
 
 function renderState(state) {
   const payload = state.payload;
-  const root = state.root;
-  root.innerHTML = "";
+  syncFullscreenClass(state);
+  syncToolbarState(state);
+  syncViewportState(state);
+  syncMinimapGeometry(state);
 
   if (!payload.nodes.length) {
-    const empty = createElement("div", "flow-empty-state", root);
-    empty.textContent = "На схеме пока нет элементов.";
+    clearScene(state);
+    state.dom.emptyState.hidden = false;
+    state.dom.toolbar.hidden = true;
+    state.dom.viewport.hidden = true;
+    state.dom.minimap.hidden = true;
+    state.sceneRevision = null;
+    state.renderedSelectedId = state.selectedId;
+    state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedDraggingNodeId = state.draggingNodeId;
     return;
   }
 
-  const toolbar = createElement("div", "flow-canvas-toolbar", root);
-  for (const buttonDef of TOOLBAR_BUTTONS) {
-    const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
-    button.type = "button";
-    button.textContent = buttonDef.label;
-    button.addEventListener("click", () => {
-      if (buttonDef.id === "zoom-in") {
-        zoomAtCenter(state, 1.12);
-      } else if (buttonDef.id === "zoom-out") {
-        zoomAtCenter(state, 1 / 1.12);
-      } else {
-        state.userMovedView = false;
-        fitView(state);
-      }
-      queueRender(state);
-    });
+  state.dom.emptyState.hidden = true;
+  state.dom.toolbar.hidden = false;
+  state.dom.viewport.hidden = false;
+  state.dom.minimap.hidden = false;
+
+  const graphChanged = state.sceneRevision !== payload.revision;
+  if (graphChanged) {
+    rebuildGraphScene(state);
+    state.sceneRevision = payload.revision;
+    state.renderedSelectedId = state.selectedId;
+    state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedDraggingNodeId = state.draggingNodeId;
+  } else {
+    if (state.renderedPositionsVersion !== state.positionsVersion) {
+      updateNodePositions(state);
+      updateMinimapNodePositions(state);
+      state.renderedPositionsVersion = state.positionsVersion;
+    }
+    if (state.renderedDraggingNodeId !== state.draggingNodeId) {
+      syncDraggingState(state, state.renderedDraggingNodeId, state.draggingNodeId);
+      state.renderedDraggingNodeId = state.draggingNodeId;
+    }
+    if (state.renderedSelectedId !== state.selectedId) {
+      updateSelectionState(state, state.renderedSelectedId, state.selectedId);
+      state.renderedSelectedId = state.selectedId;
+    }
   }
 
-  if (payload.position_edit_enabled) {
-    const hint = createElement("div", "flow-canvas-hint", root);
-    hint.innerHTML =
-      "<strong>Режим layout</strong><span>Тяните карточку за сам блок. Пустой фон двигает сцену.</span>";
-  }
-
-  const viewport = createElement(
-    "div",
-    state.isPanning ? "flow-canvas-viewport is-panning" : "flow-canvas-viewport",
-    root,
-  );
-  const stage = createElement("div", "flow-canvas-stage", viewport);
-  stage.style.width = `${payload.canvas.width}px`;
-  stage.style.height = `${payload.canvas.height}px`;
-  stage.style.transform = `translate(${state.view.x}px, ${state.view.y}px) scale(${state.view.scale})`;
-
-  const svg = createSvgElement("svg");
-  svg.classList.add("flow-canvas-edges");
-  svg.setAttribute("viewBox", `0 0 ${payload.canvas.width} ${payload.canvas.height}`);
-  svg.setAttribute("width", String(payload.canvas.width));
-  svg.setAttribute("height", String(payload.canvas.height));
-  stage.appendChild(svg);
-
-  const defs = createSvgElement("defs");
-  svg.appendChild(defs);
-  for (const edge of payload.edges) {
-    defs.appendChild(buildMarker(edge.color, edge.id));
-  }
-
-  const labelsLayer = createElement("div", "flow-canvas-labels", stage);
-  const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
-
-  attachViewportHandlers(viewport, state);
-  renderEdges(svg, labelsLayer, state);
-  renderNodes(nodesLayer, state);
-  renderMinimap(root, state);
+  updateMinimapViewport(state);
 }
 
-function renderEdges(svg, labelsLayer, state) {
+function syncToolbarState(state) {
+  const fullscreenButton = state.dom.fullscreenButton;
+  const fullscreenSupported = isFullscreenSupported(state.root);
+  const fullscreenActive = isRootFullscreen(state);
+
+  fullscreenButton.hidden = !fullscreenSupported;
+  if (!fullscreenSupported) {
+    return;
+  }
+
+  fullscreenButton.textContent = fullscreenActive ? "Exit" : "Full";
+  fullscreenButton.title = fullscreenActive
+    ? "Выйти из полноэкранного режима"
+    : "Развернуть схему на весь экран";
+  fullscreenButton.setAttribute("aria-label", fullscreenButton.title);
+  fullscreenButton.classList.toggle("is-active", fullscreenActive);
+}
+
+function syncViewportState(state) {
+  const payload = state.payload;
+  state.dom.viewport.classList.toggle("is-panning", state.isPanning);
+  state.dom.stage.style.width = `${payload.canvas.width}px`;
+  state.dom.stage.style.height = `${payload.canvas.height}px`;
+  state.dom.stage.style.transform = `translate(${state.view.x}px, ${state.view.y}px) scale(${state.view.scale})`;
+  state.dom.svg.setAttribute("viewBox", `0 0 ${payload.canvas.width} ${payload.canvas.height}`);
+  state.dom.svg.setAttribute("width", String(payload.canvas.width));
+  state.dom.svg.setAttribute("height", String(payload.canvas.height));
+}
+
+function syncMinimapGeometry(state) {
+  const bounds = minimapBounds(state.payload.bounds);
+  state.minimapBounds = bounds;
+  state.dom.minimapSvg.setAttribute(
+    "viewBox",
+    `${bounds.left} ${bounds.top} ${bounds.width} ${bounds.height}`,
+  );
+  state.dom.minimapSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  state.dom.minimapBackdrop.setAttribute("x", String(bounds.left));
+  state.dom.minimapBackdrop.setAttribute("y", String(bounds.top));
+  state.dom.minimapBackdrop.setAttribute("width", String(bounds.width));
+  state.dom.minimapBackdrop.setAttribute("height", String(bounds.height));
+  state.dom.minimapBackdrop.setAttribute("rx", "20");
+}
+
+function clearScene(state) {
+  state.dom.defs.replaceChildren();
+  state.dom.edgeLayer.replaceChildren();
+  state.dom.labelsLayer.replaceChildren();
+  state.dom.nodesLayer.replaceChildren();
+  state.dom.minimapEdgeLayer.replaceChildren();
+  state.dom.minimapNodeLayer.replaceChildren();
+  state.edgeElements = new Map();
+  state.nodeElements = new Map();
+  state.tokenElements = new Map();
+  state.minimapNodeElements = new Map();
+}
+
+function rebuildGraphScene(state) {
+  clearScene(state);
+
   for (const edge of state.payload.edges) {
-    const edgeSelected = state.selectedId === edge.id;
-    const group = createSvgElement("g");
-    svg.appendChild(group);
+    state.dom.defs.appendChild(buildMarker(edge.color, edge.id));
+    buildEdgeElement(state, edge);
+    buildMinimapEdgeElement(state, edge);
+  }
 
-    const pathData = roundedPath(edge.points);
-    const visiblePath = createSvgElement("path");
-    visiblePath.classList.add("flow-edge-path");
-    if (edgeSelected) {
-      visiblePath.classList.add("is-selected");
-    }
-    visiblePath.setAttribute("d", pathData);
-    visiblePath.setAttribute("stroke", edge.style.stroke || edge.color);
-    visiblePath.setAttribute("stroke-width", String(edgeSelected ? 3.3 : edge.style.strokeWidth || 2.4));
-    visiblePath.setAttribute("stroke-linecap", edge.style.strokeLinecap || "round");
-    visiblePath.setAttribute("stroke-linejoin", edge.style.strokeLinejoin || "round");
-    visiblePath.setAttribute("opacity", String(edge.style.opacity ?? 1));
-    visiblePath.setAttribute("marker-end", `url(#marker-${edge.id})`);
-    if (edge.style.strokeDasharray && edge.style.strokeDasharray !== "0") {
-      visiblePath.setAttribute("stroke-dasharray", edge.style.strokeDasharray);
-    }
-    group.appendChild(visiblePath);
+  for (const node of state.payload.nodes) {
+    buildNodeElement(state, node);
+    buildMinimapNodeElement(state, node);
+  }
+}
 
-    const hitPath = createSvgElement("path");
-    hitPath.classList.add("flow-edge-hit");
-    hitPath.setAttribute("d", pathData);
-    hitPath.addEventListener("click", (event) => {
+function buildEdgeElement(state, edge) {
+  const group = createSvgElement("g");
+  state.dom.edgeLayer.appendChild(group);
+
+  const pathData = roundedPath(edge.points);
+  const visiblePath = createSvgElement("path");
+  visiblePath.classList.add("flow-edge-path");
+  visiblePath.setAttribute("d", pathData);
+  visiblePath.setAttribute("stroke", edge.style.stroke || edge.color);
+  visiblePath.setAttribute("stroke-linecap", edge.style.strokeLinecap || "round");
+  visiblePath.setAttribute("stroke-linejoin", edge.style.strokeLinejoin || "round");
+  visiblePath.setAttribute("opacity", String(edge.style.opacity ?? 1));
+  visiblePath.setAttribute("marker-end", `url(#marker-${edge.id})`);
+  if (edge.style.strokeDasharray && edge.style.strokeDasharray !== "0") {
+    visiblePath.setAttribute("stroke-dasharray", edge.style.strokeDasharray);
+  }
+  group.appendChild(visiblePath);
+
+  const hitPath = createSvgElement("path");
+  hitPath.classList.add("flow-edge-hit");
+  hitPath.setAttribute("d", pathData);
+  hitPath.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectId(state, edge.id);
+  });
+  group.appendChild(hitPath);
+
+  let label = null;
+  if (edge.label) {
+    label = createElement("button", "flow-edge-label", state.dom.labelsLayer);
+    label.type = "button";
+    label.textContent = edge.label.text;
+    label.style.left = `${edge.label.position.x}px`;
+    label.style.top = `${edge.label.position.y}px`;
+    label.style.width = `${edge.label.width}px`;
+    label.style.height = `${edge.label.height}px`;
+    label.style.border = `1px solid ${edge.label.color}`;
+    label.style.color = edge.label.color;
+    label.style.opacity = String(edge.label.active ? 1 : 0.24);
+    label.addEventListener("click", (event) => {
       event.stopPropagation();
       selectId(state, edge.id);
     });
-    group.appendChild(hitPath);
+  }
 
-    if (edge.label) {
-      const label = createElement("button", "flow-edge-label", labelsLayer);
-      label.type = "button";
-      label.textContent = edge.label.text;
-      label.style.left = `${edge.label.position.x}px`;
-      label.style.top = `${edge.label.position.y}px`;
-      label.style.width = `${edge.label.width}px`;
-      label.style.height = `${edge.label.height}px`;
-      label.style.border = `1px solid ${edge.label.color}`;
-      label.style.color = edge.label.color;
-      label.style.opacity = String(edge.label.active ? 1 : 0.24);
-      label.style.transform = edgeSelected ? "translateY(-1px)" : "none";
-      label.addEventListener("click", (event) => {
+  const elements = { visiblePath, label };
+  setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
+  state.edgeElements.set(edge.id, elements);
+}
+
+function buildNodeElement(state, node) {
+  const shell = createElement("div", "flow-node-shell", state.dom.nodesLayer);
+  shell.style.width = `${node.size.w}px`;
+  shell.style.height = `${node.size.h}px`;
+
+  if (node.time_badge || node.responsible_badges.length) {
+    const rail = createElement("div", "flow-node-top-rail", shell);
+    if (node.time_badge) {
+      const badge = createElement("div", "flow-node-badge", rail);
+      applyStyles(badge, node.time_badge.style);
+      badge.textContent = node.time_badge.text;
+      badge.title = node.time_badge.title;
+    }
+    for (const badgePayload of node.responsible_badges) {
+      const badge = createElement("div", "flow-node-badge", rail);
+      applyStyles(badge, badgePayload.style);
+      badge.textContent = badgePayload.abbr;
+      badge.title = badgePayload.title;
+    }
+  }
+
+  const card = createElement("button", "flow-node-card", shell);
+  card.type = "button";
+  if (node.draggable && state.payload.position_edit_enabled) {
+    card.classList.add("is-draggable");
+  }
+  if (state.draggingNodeId === node.id) {
+    card.classList.add("is-dragging");
+  }
+  applyStyles(card, node.style);
+  card.dataset.nodeId = node.id;
+  card.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectId(state, node.id);
+  });
+  if (node.draggable && state.payload.position_edit_enabled) {
+    card.addEventListener("pointerdown", (event) => startNodeDrag(event, state, node.id));
+  }
+
+  const content = createElement("span", "flow-node-content", card);
+  const text = createElement("span", "flow-node-text", content);
+  text.textContent = node.text;
+
+  if (node.well_tokens.length) {
+    const wells = createElement("div", "flow-node-wells", shell);
+    for (const tokenPayload of node.well_tokens) {
+      const token = createElement("button", "flow-token", wells);
+      token.type = "button";
+      token.textContent = tokenPayload.text;
+      token.title = tokenPayload.title;
+      setTokenSelectedState(token, tokenPayload, state.selectedId === tokenPayload.id);
+      token.addEventListener("click", (event) => {
         event.stopPropagation();
-        selectId(state, edge.id);
+        selectId(state, tokenPayload.id);
       });
+      state.tokenElements.set(tokenPayload.id, token);
+    }
+  }
+
+  const elements = { shell, card, overlay: null };
+  syncNodeShellPosition(shell, state.positions[node.id] || node.position);
+  setNodeSelectedState(elements, node, state.selectedId === node.id);
+  state.nodeElements.set(node.id, elements);
+}
+
+function buildMinimapEdgeElement(state, edge) {
+  const path = createSvgElement("path");
+  path.classList.add("flow-canvas-minimap__edge");
+  path.setAttribute("d", roundedPath(edge.points));
+  state.dom.minimapEdgeLayer.appendChild(path);
+}
+
+function buildMinimapNodeElement(state, node) {
+  const shape = createMinimapNodeShape(node);
+  shape.classList.add("flow-canvas-minimap__node", `is-${node.kind.replaceAll("_", "-")}`);
+  shape.classList.toggle("is-selected", state.selectedId === node.id);
+  syncMinimapNodeShape(shape, node, state.positions[node.id] || node.position);
+  state.dom.minimapNodeLayer.appendChild(shape);
+  state.minimapNodeElements.set(node.id, shape);
+}
+
+function updateNodePositions(state) {
+  for (const node of state.payload.nodes) {
+    const elements = state.nodeElements.get(node.id);
+    if (!elements) {
+      continue;
+    }
+    syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
+  }
+}
+
+function updateMinimapNodePositions(state) {
+  for (const node of state.payload.nodes) {
+    const shape = state.minimapNodeElements.get(node.id);
+    if (!shape) {
+      continue;
+    }
+    syncMinimapNodeShape(shape, node, state.positions[node.id] || node.position);
+  }
+}
+
+function updateSelectionState(state, previousSelectedId, nextSelectedId) {
+  syncEdgeSelectionById(state, previousSelectedId);
+  syncEdgeSelectionById(state, nextSelectedId);
+  syncNodeSelectionById(state, previousSelectedId);
+  syncNodeSelectionById(state, nextSelectedId);
+  syncTokenSelectionById(state, previousSelectedId);
+  syncTokenSelectionById(state, nextSelectedId);
+}
+
+function syncEdgeSelectionById(state, selectedId) {
+  if (!selectedId) {
+    return;
+  }
+  const edge = state.edgePayloadsById.get(selectedId);
+  const elements = state.edgeElements.get(selectedId);
+  if (!edge || !elements) {
+    return;
+  }
+  setEdgeSelectedState(elements, edge, state.selectedId === selectedId);
+}
+
+function syncNodeSelectionById(state, selectedId) {
+  if (!selectedId) {
+    return;
+  }
+  const node = state.nodePayloadsById.get(selectedId);
+  const elements = state.nodeElements.get(selectedId);
+  if (!node || !elements) {
+    return;
+  }
+  setNodeSelectedState(elements, node, state.selectedId === selectedId);
+
+  const minimapNode = state.minimapNodeElements.get(selectedId);
+  if (minimapNode) {
+    minimapNode.classList.toggle("is-selected", state.selectedId === selectedId);
+  }
+}
+
+function syncTokenSelectionById(state, selectedId) {
+  if (!selectedId) {
+    return;
+  }
+  const tokenPayload = state.tokenPayloadsById.get(selectedId);
+  const token = state.tokenElements.get(selectedId);
+  if (!tokenPayload || !token) {
+    return;
+  }
+  setTokenSelectedState(token, tokenPayload, state.selectedId === selectedId);
+}
+
+function syncDraggingState(state, previousNodeId, nextNodeId) {
+  if (previousNodeId) {
+    const previous = state.nodeElements.get(previousNodeId);
+    if (previous) {
+      previous.card.classList.remove("is-dragging");
+    }
+  }
+  if (nextNodeId) {
+    const next = state.nodeElements.get(nextNodeId);
+    if (next) {
+      next.card.classList.add("is-dragging");
     }
   }
 }
 
-function renderNodes(layer, state) {
-  const payload = state.payload;
-  for (const node of payload.nodes) {
-    const nodeSelected = state.selectedId === node.id;
-    const position = state.positions[node.id] || node.position;
-    const shell = createElement("div", "flow-node-shell", layer);
-    shell.style.left = `${position.x}px`;
-    shell.style.top = `${position.y}px`;
-    shell.style.width = `${node.size.w}px`;
-    shell.style.height = `${node.size.h}px`;
+function updateMinimapViewport(state) {
+  const viewportRect = currentViewportWorldRect(state);
+  state.dom.minimapViewport.setAttribute("x", String(round(viewportRect.x)));
+  state.dom.minimapViewport.setAttribute("y", String(round(viewportRect.y)));
+  state.dom.minimapViewport.setAttribute("width", String(round(viewportRect.width)));
+  state.dom.minimapViewport.setAttribute("height", String(round(viewportRect.height)));
+}
 
-    if (node.time_badge || node.responsible_badges.length) {
-      const rail = createElement("div", "flow-node-top-rail", shell);
-      if (node.time_badge) {
-        const badge = createElement("div", "flow-node-badge", rail);
-        applyStyles(badge, node.time_badge.style);
-        badge.textContent = node.time_badge.text;
-        badge.title = node.time_badge.title;
-      }
-      for (const badgePayload of node.responsible_badges) {
-        const badge = createElement("div", "flow-node-badge", rail);
-        applyStyles(badge, badgePayload.style);
-        badge.textContent = badgePayload.abbr;
-        badge.title = badgePayload.title;
-      }
-    }
+function setEdgeSelectedState(elements, edge, selected) {
+  elements.visiblePath.classList.toggle("is-selected", selected);
+  elements.visiblePath.setAttribute(
+    "stroke-width",
+    String(selected ? 3.3 : edge.style.strokeWidth || 2.4),
+  );
+  if (elements.label) {
+    elements.label.style.transform = selected ? "translateY(-1px)" : "none";
+  }
+}
 
-    const card = createElement("button", "flow-node-card", shell);
-    card.type = "button";
-    if (node.draggable && payload.position_edit_enabled) {
-      card.classList.add("is-draggable");
-    }
-    if (state.draggingNodeId === node.id) {
-      card.classList.add("is-dragging");
-    }
-    applyStyles(card, node.style);
-    if (nodeSelected) {
-      card.style.boxShadow =
-        "0 0 0 4px rgba(20, 184, 166, 0.24), 0 18px 36px rgba(15, 23, 42, 0.18)";
-      card.style.transform = "translateY(-1px)";
-    }
-    card.dataset.nodeId = node.id;
-    card.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectId(state, node.id);
-    });
-    if (node.draggable && payload.position_edit_enabled) {
-      card.addEventListener("pointerdown", (event) => startNodeDrag(event, state, node.id));
-    }
+function setNodeSelectedState(elements, node, selected) {
+  elements.shell.classList.toggle("is-selected", selected);
+  elements.card.classList.toggle("is-selected", selected);
+  if (selected && elements.overlay === null) {
+    elements.overlay = buildNodeSelectionOverlay(node);
+    elements.card.appendChild(elements.overlay);
+  } else if (!selected && elements.overlay !== null) {
+    elements.overlay.remove();
+    elements.overlay = null;
+  }
+}
 
-    const text = createElement("span", "flow-node-text", card);
-    text.textContent = node.text;
+function setTokenSelectedState(element, tokenPayload, selected) {
+  applyStyles(element, tokenPayload.style);
+  element.textContent = tokenPayload.text;
+  element.title = tokenPayload.title;
+  if (selected) {
+    element.style.boxShadow =
+      "0 0 0 3px rgba(59, 130, 246, 0.2), 0 12px 28px rgba(37, 99, 235, 0.16)";
+    element.style.transform = "translateY(-1px)";
+  } else {
+    element.style.transform = "";
+  }
+}
 
-    if (node.well_tokens.length) {
-      const wells = createElement("div", "flow-node-wells", shell);
-      for (const tokenPayload of node.well_tokens) {
-        const tokenSelected = state.selectedId === tokenPayload.id;
-        const token = createElement("button", "flow-token", wells);
-        token.type = "button";
-        token.textContent = tokenPayload.text;
-        token.title = tokenPayload.title;
-        applyStyles(token, tokenPayload.style);
-        if (tokenSelected) {
-          token.style.boxShadow = "0 0 0 3px rgba(20, 184, 166, 0.24), 0 10px 24px rgba(15, 23, 42, 0.16)";
-          token.style.transform = "translateY(-1px)";
-        }
-        token.addEventListener("click", (event) => {
-          event.stopPropagation();
-          if (tokenPayload.id.startsWith("well-extra::")) {
-            selectId(state, tokenPayload.id);
-            return;
-          }
-          selectId(state, tokenPayload.id);
-        });
-      }
+function syncNodeShellPosition(shell, position) {
+  shell.style.left = `${position.x}px`;
+  shell.style.top = `${position.y}px`;
+}
+
+function buildNodeSelectionOverlay(node) {
+  const overlay = createElement("span", "flow-node-selection");
+  overlay.setAttribute("aria-hidden", "true");
+
+  const svg = createSvgElement("svg");
+  svg.classList.add("flow-node-selection__svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  overlay.appendChild(svg);
+
+  const descriptors = nodeSelectionShapeDescriptors(node.kind);
+  for (const className of [
+    "flow-node-selection__glow",
+    "flow-node-selection__stroke",
+    "flow-node-selection__sheen",
+  ]) {
+    for (const descriptor of descriptors) {
+      svg.appendChild(buildNodeSelectionShape(descriptor, className));
     }
   }
+  return overlay;
+}
+
+function nodeSelectionShapeDescriptors(kind) {
+  if (kind === "decision_diamond") {
+    return [{ tag: "polygon", attrs: { points: "50,4 96,50 50,96 4,50" } }];
+  }
+  if (kind === "input_data") {
+    return [{ tag: "polygon", attrs: { points: "14,4 96,4 86,96 4,96" } }];
+  }
+  if (kind === "database") {
+    return [
+      { tag: "path", attrs: { d: "M10 20 L10 78 C10 90 90 90 90 78 L90 20" } },
+      { tag: "ellipse", attrs: { cx: "50", cy: "20", rx: "40", ry: "12" } },
+    ];
+  }
+  if (kind === "event") {
+    return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "28" } }];
+  }
+  if (kind === "decision_card") {
+    return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "22" } }];
+  }
+  if (kind === "figma_text") {
+    return [{ tag: "rect", attrs: { x: "5", y: "5", width: "90", height: "90", rx: "10" } }];
+  }
+  return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "10" } }];
+}
+
+function buildNodeSelectionShape(descriptor, className) {
+  const shape = createSvgElement(descriptor.tag);
+  shape.classList.add(className);
+  for (const [key, value] of Object.entries(descriptor.attrs)) {
+    shape.setAttribute(key, value);
+  }
+  return shape;
 }
 
 function attachViewportHandlers(viewport, state) {
@@ -322,6 +723,7 @@ function attachViewportHandlers(viewport, state) {
       const cursor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
       zoomAt(state, cursor, scaleFactor);
       state.userMovedView = true;
+      scheduleViewStateSync(state);
       queueRender(state);
     },
     { passive: false },
@@ -360,6 +762,7 @@ function attachViewportHandlers(viewport, state) {
       ownerDocument.removeEventListener("pointermove", move);
       ownerDocument.removeEventListener("pointerup", stop);
       ownerDocument.removeEventListener("pointercancel", stop);
+      syncViewState(state);
       queueRender(state);
     };
     ownerDocument.addEventListener("pointermove", move, { passive: false });
@@ -411,12 +814,18 @@ function startNodeDrag(event, state, nodeId) {
   }
   const move = (moveEvent) => {
     moveEvent.preventDefault();
-    const dx = (moveEvent.clientX - start.x) / state.view.scale;
-    const dy = (moveEvent.clientY - start.y) / state.view.scale;
-    state.positions[nodeId] = {
-      x: round(origin.x + dx),
-      y: round(origin.y + dy),
+    const nextPosition = {
+      x: round(origin.x + (moveEvent.clientX - start.x) / state.view.scale),
+      y: round(origin.y + (moveEvent.clientY - start.y) / state.view.scale),
     };
+    if (
+      nextPosition.x === state.positions[nodeId].x &&
+      nextPosition.y === state.positions[nodeId].y
+    ) {
+      return;
+    }
+    state.positions[nodeId] = nextPosition;
+    state.positionsVersion += 1;
     queueRender(state);
   };
   const stop = () => {
@@ -434,9 +843,13 @@ function startNodeDrag(event, state, nodeId) {
   ownerDocument.addEventListener("pointermove", move, { passive: false });
   ownerDocument.addEventListener("pointerup", stop);
   ownerDocument.addEventListener("pointercancel", stop);
+  queueRender(state);
 }
 
 function selectId(state, value) {
+  if (state.selectedId === value) {
+    return;
+  }
   state.selectedId = value;
   state.component.setStateValue("selected_id", value);
   queueRender(state);
@@ -464,9 +877,11 @@ function fitView(state) {
     return;
   }
 
-  const padding = 64;
-  const availableWidth = Math.max(120, rect.width - padding * 2);
-  const availableHeight = Math.max(120, rect.height - padding * 2);
+  const availableWidth = Math.max(120, rect.width - FIT_VIEW_PADDING_X * 2);
+  const availableHeight = Math.max(
+    120,
+    rect.height - FIT_VIEW_PADDING_TOP - FIT_VIEW_PADDING_BOTTOM,
+  );
   const scale = clamp(
     Math.min(availableWidth / bounds.width, availableHeight / bounds.height, 1.2),
     0.32,
@@ -474,91 +889,109 @@ function fitView(state) {
   );
   state.view.scale = scale;
   state.view.x = round((rect.width - bounds.width * scale) / 2 - bounds.left * scale);
-  state.view.y = round((rect.height - bounds.height * scale) / 2 - bounds.top * scale);
+  state.view.y = round(FIT_VIEW_PADDING_TOP - bounds.top * scale);
 }
 
-function renderMinimap(root, state) {
-  const bounds = minimapBounds(state.payload.bounds);
-  const minimap = createElement("div", "flow-canvas-minimap", root);
-  minimap.setAttribute("role", "img");
-  minimap.setAttribute("aria-label", "Миникарта схемы");
-
-  const svg = createSvgElement("svg");
-  svg.classList.add("flow-canvas-minimap__svg");
-  svg.setAttribute("viewBox", `${bounds.left} ${bounds.top} ${bounds.width} ${bounds.height}`);
-  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-  minimap.appendChild(svg);
-
-  const backdrop = createSvgElement("rect");
-  backdrop.classList.add("flow-canvas-minimap__backdrop");
-  backdrop.setAttribute("x", String(bounds.left));
-  backdrop.setAttribute("y", String(bounds.top));
-  backdrop.setAttribute("width", String(bounds.width));
-  backdrop.setAttribute("height", String(bounds.height));
-  backdrop.setAttribute("rx", "20");
-  svg.appendChild(backdrop);
-
-  for (const edge of state.payload.edges) {
-    const path = createSvgElement("path");
-    path.classList.add("flow-canvas-minimap__edge");
-    path.setAttribute("d", roundedPath(edge.points));
-    svg.appendChild(path);
+function syncViewState(state) {
+  const nextView = {
+    x: round(state.view.x, 4),
+    y: round(state.view.y, 4),
+    scale: round(state.view.scale, 4),
+  };
+  if (
+    sameViewState(state.lastReportedView, nextView) &&
+    state.lastReportedUserMovedView === state.userMovedView
+  ) {
+    return;
   }
-
-  for (const node of state.payload.nodes) {
-    const position = state.positions[node.id] || node.position;
-    svg.appendChild(buildMinimapNode(node, position, state.selectedId === node.id));
-  }
-
-  const viewportRect = currentViewportWorldRect(state);
-  const frame = createSvgElement("rect");
-  frame.classList.add("flow-canvas-minimap__viewport");
-  frame.setAttribute("x", String(round(viewportRect.x)));
-  frame.setAttribute("y", String(round(viewportRect.y)));
-  frame.setAttribute("width", String(round(viewportRect.width)));
-  frame.setAttribute("height", String(round(viewportRect.height)));
-  frame.setAttribute("rx", "12");
-  svg.appendChild(frame);
-
-  attachMinimapHandlers(minimap, svg, state, bounds);
+  state.component.setStateValue("view", nextView);
+  state.component.setStateValue("user_moved_view", state.userMovedView);
+  state.lastReportedView = nextView;
+  state.lastReportedUserMovedView = state.userMovedView;
 }
 
-function buildMinimapNode(node, position, selected) {
-  const shape = minimapNodeShape(node, position);
-  shape.classList.add("flow-canvas-minimap__node", `is-${node.kind.replaceAll("_", "-")}`);
-  if (selected) {
-    shape.classList.add("is-selected");
+function scheduleViewStateSync(state, delay = VIEW_STATE_IDLE_SYNC_MS) {
+  if (state.viewSyncTimer !== null) {
+    clearTimeout(state.viewSyncTimer);
   }
-  return shape;
+  state.viewSyncTimer = setTimeout(() => {
+    state.viewSyncTimer = null;
+    syncViewState(state);
+  }, delay);
 }
 
-function minimapNodeShape(node, position) {
-  const x = round(position.x);
-  const y = round(position.y);
-  const width = round(node.size.w);
-  const height = round(node.size.h);
-
-  if (node.kind === "decision_diamond") {
-    const shape = createSvgElement("polygon");
-    shape.setAttribute(
-      "points",
-      `${x + width / 2},${y} ${x + width},${y + height / 2} ${x + width / 2},${y + height} ${x},${y + height / 2}`,
-    );
-    return shape;
+function toggleFullscreen(state) {
+  const request = isRootFullscreen(state)
+    ? exitDocumentFullscreen(state.ownerDocument)
+    : requestElementFullscreen(state.root);
+  if (request && typeof request.catch === "function") {
+    request.catch(() => {});
   }
-
-  const shape = createSvgElement("rect");
-  shape.setAttribute("x", String(x));
-  shape.setAttribute("y", String(y));
-  shape.setAttribute("width", String(width));
-  shape.setAttribute("height", String(height));
-  shape.setAttribute("rx", node.kind === "event" ? "26" : node.kind === "decision_card" ? "20" : "10");
-  return shape;
 }
 
-function attachMinimapHandlers(minimap, svg, state, bounds) {
+function requestElementFullscreen(element) {
+  if (typeof element.requestFullscreen === "function") {
+    return element.requestFullscreen();
+  }
+  if (typeof element.webkitRequestFullscreen === "function") {
+    return element.webkitRequestFullscreen();
+  }
+  return null;
+}
+
+function exitDocumentFullscreen(ownerDocument) {
+  if (typeof ownerDocument.exitFullscreen === "function") {
+    return ownerDocument.exitFullscreen();
+  }
+  if (typeof ownerDocument.webkitExitFullscreen === "function") {
+    return ownerDocument.webkitExitFullscreen();
+  }
+  return null;
+}
+
+function isFullscreenSupported(element) {
+  return (
+    typeof element.requestFullscreen === "function" ||
+    typeof element.webkitRequestFullscreen === "function"
+  );
+}
+
+function fullscreenElementOfDocument(ownerDocument) {
+  return ownerDocument.fullscreenElement || ownerDocument.webkitFullscreenElement || null;
+}
+
+function isRootFullscreen(state) {
+  return fullscreenElementOfDocument(state.ownerDocument) === state.root;
+}
+
+function syncFullscreenClass(state) {
+  state.root.classList.toggle("is-fullscreen", isRootFullscreen(state));
+}
+
+function normalizePersistedViewState(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const x = finiteNumber(value.x);
+  const y = finiteNumber(value.y);
+  const scale = finiteNumber(value.scale);
+  if (x === null || y === null || scale === null || scale <= 0) {
+    return null;
+  }
+  return {
+    view: { x, y, scale },
+    userMovedView: Boolean(value.user_moved_view),
+  };
+}
+
+function attachMinimapHandlers(minimap, state) {
   minimap.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) {
+    if (
+      event.button !== 0 ||
+      state.isPanning ||
+      state.draggingNodeId !== null ||
+      state.minimapBounds === null
+    ) {
       return;
     }
     event.preventDefault();
@@ -566,7 +999,10 @@ function attachMinimapHandlers(minimap, svg, state, bounds) {
     clearSelection(state.ownerDocument);
 
     const updateView = (pointerEvent) => {
-      const point = minimapPointToWorld(svg, pointerEvent, bounds);
+      const point = minimapPointToWorld(state.dom.minimapSvg, pointerEvent, state.minimapBounds);
+      if (!point) {
+        return;
+      }
       centerViewAtWorld(state, point.x, point.y);
       state.userMovedView = true;
       queueRender(state);
@@ -582,11 +1018,80 @@ function attachMinimapHandlers(minimap, svg, state, bounds) {
       ownerDocument.removeEventListener("pointermove", move);
       ownerDocument.removeEventListener("pointerup", stop);
       ownerDocument.removeEventListener("pointercancel", stop);
+      syncViewState(state);
     };
     ownerDocument.addEventListener("pointermove", move, { passive: false });
     ownerDocument.addEventListener("pointerup", stop);
     ownerDocument.addEventListener("pointercancel", stop);
   });
+}
+
+function createMinimapNodeShape(node) {
+  if (node.kind === "decision_diamond" || node.kind === "input_data") {
+    return createSvgElement("polygon");
+  }
+  if (node.kind === "database") {
+    const group = createSvgElement("g");
+    group.appendChild(createSvgElement("path"));
+    group.appendChild(createSvgElement("ellipse"));
+    const bottom = createSvgElement("path");
+    bottom.setAttribute("fill", "none");
+    group.appendChild(bottom);
+    return group;
+  }
+
+  return createSvgElement("rect");
+}
+
+function syncMinimapNodeShape(shape, node, position) {
+  const x = round(position.x);
+  const y = round(position.y);
+  const width = round(node.size.w);
+  const height = round(node.size.h);
+
+  if (node.kind === "decision_diamond") {
+    shape.setAttribute(
+      "points",
+      `${x + width / 2},${y} ${x + width},${y + height / 2} ${x + width / 2},${y + height} ${x},${y + height / 2}`,
+    );
+    return;
+  }
+  if (node.kind === "input_data") {
+    shape.setAttribute(
+      "points",
+      `${x + width * 0.12},${y} ${x + width},${y} ${x + width * 0.88},${y + height} ${x},${y + height}`,
+    );
+    return;
+  }
+  if (node.kind === "database") {
+    const [body, top, bottom] = shape.children;
+    body.setAttribute(
+      "d",
+      `M ${x + width * 0.08} ${y + height * 0.2} L ${x + width * 0.08} ${y + height * 0.78} ` +
+        `C ${x + width * 0.08} ${y + height * 0.92} ${x + width * 0.92} ${y + height * 0.92} ` +
+        `${x + width * 0.92} ${y + height * 0.78} L ${x + width * 0.92} ${y + height * 0.2} Z`,
+    );
+    top.setAttribute("cx", String(round(x + width / 2)));
+    top.setAttribute("cy", String(round(y + height * 0.2)));
+    top.setAttribute("rx", String(round(width * 0.42)));
+    top.setAttribute("ry", String(round(height * 0.13)));
+    bottom.setAttribute(
+      "d",
+      `M ${x + width * 0.08} ${y + height * 0.78} ` +
+        `C ${x + width * 0.08} ${y + height * 0.92} ${x + width * 0.92} ${y + height * 0.92} ` +
+        `${x + width * 0.92} ${y + height * 0.78}`,
+    );
+    return;
+  }
+
+  shape.setAttribute("x", String(x));
+  shape.setAttribute("y", String(y));
+  shape.setAttribute("width", String(width));
+  shape.setAttribute("height", String(height));
+  shape.setAttribute(
+    "rx",
+    node.kind === "event" ? "26" : node.kind === "decision_card" ? "20" : "10",
+  );
 }
 
 function minimapBounds(bounds) {
@@ -610,7 +1115,13 @@ function currentViewportWorldRect(state) {
 }
 
 function minimapPointToWorld(svg, event, bounds) {
+  if (!svg) {
+    return null;
+  }
   const rect = svg.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
   const ratioX = clamp((event.clientX - rect.left) / rect.width, 0, 1);
   const ratioY = clamp((event.clientY - rect.top) / rect.height, 0, 1);
   return {
@@ -691,6 +1202,55 @@ function copyPositionMap(positions) {
   return result;
 }
 
+function indexPayloadsById(payloads) {
+  const result = new Map();
+  for (const payload of payloads) {
+    result.set(payload.id, payload);
+  }
+  return result;
+}
+
+function indexTokenPayloads(nodes) {
+  const result = new Map();
+  for (const node of nodes) {
+    for (const token of node.well_tokens || []) {
+      result.set(token.id, token);
+    }
+  }
+  return result;
+}
+
+function samePositionMaps(first, second) {
+  const firstKeys = Object.keys(first);
+  const secondKeys = Object.keys(second);
+  if (firstKeys.length !== secondKeys.length) {
+    return false;
+  }
+  for (const key of firstKeys) {
+    const firstPosition = first[key];
+    const secondPosition = second[key];
+    if (
+      !secondPosition ||
+      firstPosition.x !== secondPosition.x ||
+      firstPosition.y !== secondPosition.y
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameViewState(first, second) {
+  if (!first || !second) {
+    return false;
+  }
+  return (
+    first.x === second.x &&
+    first.y === second.y &&
+    first.scale === second.scale
+  );
+}
+
 function createElement(tagName, className, parent) {
   const element = document.createElement(tagName);
   if (className) {
@@ -735,6 +1295,13 @@ function isCollinear(first, second, third) {
 
 function clamp(value, minValue, maxValue) {
   return Math.max(minValue, Math.min(maxValue, value));
+}
+
+function finiteNumber(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
 }
 
 function round(value, digits = 2) {

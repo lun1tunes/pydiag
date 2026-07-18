@@ -53,6 +53,7 @@ class UpdateGraphSourceNodeCommand:
     approvers: tuple[str, ...]
     duration: str | None
     note: str | None
+    deleted: bool | None = None
 
 
 @dataclass(frozen=True)

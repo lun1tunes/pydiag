@@ -23,12 +23,10 @@ from .flow_source_graph import (
 )
 from .storage_materialization import (
     ensure_wells_doc_exists as ensure_wells_doc_bootstrap,
-    materialize_flow_graph_from_source,
 )
 from .storage_paths import (
     GRAPH_PATH,
     configured_graph_path,
-    graph_path,
     preferred_graph_source_path,
     wells_path,
 )
@@ -84,19 +82,19 @@ def load_documents(
     wells = load_wells_doc(wells_doc_path)
     validate_wells_against_graph(graph, wells)
     return graph, wells
+
+
 def resolve_graph_read_path(path: str | Path | None) -> Path:
     if path is not None:
         return Path(path)
 
-    configured = configured_graph_path()
     source = preferred_graph_source_path()
     if source is not None:
-        target = configured or graph_path()
-        materialize_flow_graph_from_source(source_path=source, target_path=target)
-        return target
+        return source
 
+    configured = configured_graph_path()
     if configured is not None:
         return configured
     if GRAPH_PATH.exists():
         return GRAPH_PATH
-    return graph_path()
+    return GRAPH_PATH

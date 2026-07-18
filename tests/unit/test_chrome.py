@@ -6,10 +6,14 @@ from pydiag.presentation.chrome import inject_css, legend_html
 class CaptureStreamlitModule:
     def __init__(self):
         self.rendered: list[str] = []
+        self.html_calls: list[tuple[str, dict[str, object]]] = []
 
     def markdown(self, body: str, *, unsafe_allow_html: bool = False) -> None:
         assert unsafe_allow_html is True
         self.rendered.append(body)
+
+    def html(self, body: str, **kwargs) -> None:
+        self.html_calls.append((body, kwargs))
 
 
 def test_legend_html_explains_block_types_and_responsible_colors(documents) -> None:
@@ -53,8 +57,22 @@ def test_css_keeps_sidebar_expand_control_available() -> None:
     assert '[data-testid="collapsedControl"]' in css
     assert '[data-testid="stExpandSidebarButton"]' in css
     assert '[data-testid="stHeader"] button' in css
+    assert "Compact density profile." in css
+    assert "--app-page-pad-top:" in css
+    assert "--app-sidebar-pad-top:" in css
+    assert '[data-testid="stSidebarContent"] {' in css
+    assert '[data-testid="stSidebarUserContent"] {' in css
+    assert 'div[data-testid="stVerticalBlock"] {' in css
+    assert "gap: var(--app-stack-gap);" in css
+    assert ".stApp hr {" in css
+    hidden_header_actions_block = css.split('[data-testid="stHeaderActionElements"],', maxsplit=1)[1].split(
+        "}",
+        maxsplit=1,
+    )[0]
+    assert '[data-testid="stStatusWidget"]' not in hidden_header_actions_block
     toolbar_block = css.split('[data-testid="stToolbar"] {', maxsplit=1)[1].split(
         "}",
         maxsplit=1,
     )[0]
     assert "display: none" not in toolbar_block
+    assert st_module.html_calls == []

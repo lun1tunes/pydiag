@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
@@ -51,3 +52,39 @@ def component_selected_id_from_state(
     ):
         return selected_id
     return None
+
+
+def component_view_state_from_state(
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, float | bool] | None:
+    if component_state is None:
+        return None
+
+    raw_view = component_state.get("view")
+    if not isinstance(raw_view, Mapping):
+        return None
+
+    x = _finite_float(raw_view.get("x"))
+    y = _finite_float(raw_view.get("y"))
+    scale = _finite_float(raw_view.get("scale"))
+    if x is None or y is None or scale is None:
+        return None
+    if scale <= 0:
+        return None
+
+    user_moved_view = component_state.get("user_moved_view")
+    return {
+        "x": x,
+        "y": y,
+        "scale": scale,
+        "user_moved_view": bool(user_moved_view),
+    }
+
+
+def _finite_float(value: object) -> float | None:
+    if not isinstance(value, int | float):
+        return None
+    result = round(float(value), 4)
+    if not isfinite(result):
+        return None
+    return result

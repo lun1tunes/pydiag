@@ -97,6 +97,15 @@ def set_toggle(app: AppTest, label: str, value: bool) -> AppTest:
     raise AssertionError(f"Toggle not found: {label}")
 
 
+def set_checkbox(app: AppTest, label: str, value: bool) -> AppTest:
+    for item in app.checkbox:
+        if item.label == label:
+            item.set_value(value).run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Checkbox not found: {label}")
+
+
 def prepare_temp_workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
     graph_path = tmp_path / "flow_graph.json"
     wells_path = tmp_path / "wells.yaml"
@@ -120,7 +129,7 @@ def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> Non
     assert any("Легенда" in item.value for item in app.markdown)
     assert any("Типы блоков" in item.value for item in app.markdown)
     assert any("Цвета ответственных" in item.value for item in app.markdown)
-    assert app.info[0].value == "Выберите узел, связь или фишку скважины на схеме."
+    assert not app.info
 
 
 def test_streamlit_app_requires_explicit_users(data_paths, monkeypatch) -> None:
@@ -128,7 +137,7 @@ def test_streamlit_app_requires_explicit_users(data_paths, monkeypatch) -> None:
 
     assert any("Пользователи не настроены" in item.value for item in app.warning)
     labels = {button.label for button in app.button}
-    assert {"Войти", "Перечитать данные"} <= labels
+    assert {"Войти", "Обновить данные"} <= labels
     assert "Продвинуть" not in labels
 
 
@@ -226,7 +235,7 @@ def test_streamlit_app_switches_graph_versions_from_source_selector(
     app.run(timeout=30)
     assert not app.exception
 
-    set_selectbox(app, "Режим просмотра", "flow_source.v0001.yaml")
+    set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
 
     assert any("Архивная версия карточки" in item.value for item in app.markdown)
 
@@ -246,7 +255,7 @@ def test_streamlit_admin_shows_read_only_controls_for_archived_source(
     )
     login_as_admin(app)
 
-    set_selectbox(app, "Режим просмотра", "flow_source.v0001.yaml")
+    set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
 
     assert any(
         item.value == "Изменение скважин доступно только для текущего source YAML."
@@ -254,7 +263,7 @@ def test_streamlit_admin_shows_read_only_controls_for_archived_source(
     )
 
 
-def test_streamlit_admin_can_save_custom_layout_without_overwriting_source_layout(
+def test_streamlit_admin_can_save_source_layout_to_flow_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -267,7 +276,6 @@ def test_streamlit_admin_can_save_custom_layout_without_overwriting_source_layou
     )
     login_as_admin(app)
 
-    set_selectbox(app, "Расположение", "custom")
     set_toggle(app, "Редактировать положение", True)
     app.session_state["position_edit_positions"] = {"proc_initial_review": (733.5, 412.25)}
     app.run(timeout=30)
@@ -276,17 +284,40 @@ def test_streamlit_admin_can_save_custom_layout_without_overwriting_source_layou
 
     saved = load_structured_payload(source_path.read_bytes())
     assert saved["layout"]["proc_initial_review"] == {
-        "x": 420,
-        "y": 260,
-        "w": 300,
-        "h": 116,
-    }
-    assert saved["custom_layout"]["proc_initial_review"] == {
         "x": 733.5,
         "y": 412.25,
         "w": 300,
         "h": 116,
     }
+    assert "custom_layout" not in saved or "proc_initial_review" not in saved.get(
+        "custom_layout",
+        {},
+    )
+
+
+def test_streamlit_admin_can_soft_delete_selected_flow_source_node(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "db_offset_wells"
+    app.run(timeout=30)
+    assert not app.exception
+    login_as_admin(app)
+
+    set_checkbox(app, "Подтвердить удаление карточки", True)
+    click_button(app, "Удалить карточку")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    assert saved["nodes"]["db_offset_wells"]["deleted"] is True
+    assert "db_offset_wells" not in {node.id for node in app.session_state["graph_doc"].nodes}
+    assert "e_offsets_review" not in {edge.id for edge in app.session_state["graph_doc"].edges}
 
 
 def test_streamlit_admin_can_update_layout_draft_from_workspace_panel(
@@ -305,7 +336,13 @@ def test_streamlit_admin_can_update_layout_draft_from_workspace_panel(
     assert not app.exception
     login_as_admin(app)
 
-    set_selectbox(app, "Расположение", "custom")
+    assert "Включить drag карточек" not in {button.label for button in app.button}
+    assert any(
+        item.value
+        == "Включите «Редактировать положение» в боковой панели, чтобы менять layout."
+        for item in app.caption
+    )
+
     set_toggle(app, "Редактировать положение", True)
     set_text_input(app, "X в текущем layout", "733.5")
     set_text_input(app, "Y в текущем layout", "412.25")

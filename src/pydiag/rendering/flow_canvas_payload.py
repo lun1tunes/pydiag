@@ -14,7 +14,6 @@ from .flow_edge_rendering import (
     edge_opacity,
     edge_style,
 )
-from .flow_edge_routing import route_target_side
 from .flow_layout_positions import node_ports
 from .flow_node_filters import KIND_LABELS, node_matches_filters
 from .flow_node_overlays import (
@@ -72,7 +71,7 @@ def build_flow_canvas_payload(
         "revision": revision if revision is not None else snapshot.graph.version,
         "canvas": {
             "width": max(1200, int(bounds["right"] - bounds["left"] + 160)),
-            "height": max(canvas_height_for_snapshot(snapshot), 720),
+            "height": max(canvas_height_for_snapshot(snapshot), 828),
         },
         "bounds": bounds,
     }
@@ -156,7 +155,7 @@ def build_flow_canvas_node(
             graph,
             node_width=render_spec.width,
             node_height=render_spec.height,
-            selected=node.id == selected_id,
+            selected=False,
             active=active,
         ),
         "time_badge": build_time_badge(node, active),
@@ -321,12 +320,9 @@ def edge_route_points(
     target: NodeGeometry,
     layout_mode: str,
 ) -> list[tuple[float, float]]:
-    source_side = (
-        route.source_anchor.source_position
-        if route.source_anchor is not None
-        else node_ports(source.index, layout_mode)[0]
-    )
-    target_side = route_target_side(target, layout_mode)
+    _ = layout_mode
+    source_side = route.source_side
+    target_side = route.target_side
     start = (
         route.source_anchor.pos
         if route.source_anchor is not None

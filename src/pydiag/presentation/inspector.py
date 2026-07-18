@@ -46,7 +46,6 @@ def render_inspector(
     elif selection_kind == "edge" and selected is not None:
         render_edge_details(st_module, graph, selected)
     else:
-        st_module.info("Выберите узел, связь или фишку скважины на схеме.")
         render_overview_tables(st_module, graph, wells)
 
     if actions.current_user_is_admin():

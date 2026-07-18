@@ -10,7 +10,7 @@ from .graph_source_admin import (
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
 )
-from .graph_versions import GraphVersionInfo
+from .graph_versions import GraphVersionInfo, RawImportResult
 
 __all__ = [
     "AuthSessionRecord",
@@ -21,6 +21,7 @@ __all__ = [
     "GraphSourceNodeDraft",
     "GraphSourceNodeKind",
     "GraphVersionInfo",
+    "RawImportResult",
     "UpdateGraphSourceEdgeCommand",
     "UpdateGraphSourceNodeCommand",
     "VersionConflictError",

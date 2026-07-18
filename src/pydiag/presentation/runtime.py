@@ -20,10 +20,10 @@ from pydiag.presentation.chrome import inject_css, render_legend
 from pydiag.presentation.inspector import InspectorActions, render_inspector
 from pydiag.presentation.runtime_session import StreamlitSessionCoordinator
 from pydiag.presentation.selection import resolve_selection
-from pydiag.presentation.sidebar import SidebarActions, render_sidebar
+from pydiag.presentation.sidebar import SOURCE_LAYOUT_MODE, SidebarActions, render_sidebar
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
-WORKSPACE_PANEL_HEIGHT = 720
+WORKSPACE_PANEL_HEIGHT = 828
 LAYOUT_DRAFT_ERROR_KEY = "_layout_draft_error"
 
 
@@ -54,6 +54,44 @@ class StreamlitAppRuntime:
         node_id: str,
     ) -> str:
         return f"layout_draft_{axis}::{layout_mode}::{node_id}"
+
+    def _layout_draft_synced_value_key(
+        self,
+        *,
+        axis: str,
+        layout_mode: str,
+        node_id: str,
+    ) -> str:
+        return f"_layout_draft_sync_{axis}::{layout_mode}::{node_id}"
+
+    def _sync_layout_draft_inputs(
+        self,
+        *,
+        layout_mode: str,
+        node_id: str,
+        current_x: float,
+        current_y: float,
+    ) -> None:
+        values = {
+            "x": format_layout_float(current_x),
+            "y": format_layout_float(current_y),
+        }
+        for axis, value in values.items():
+            synced_value_key = self._layout_draft_synced_value_key(
+                axis=axis,
+                layout_mode=layout_mode,
+                node_id=node_id,
+            )
+            if self.st_module.session_state.get(synced_value_key) == value:
+                continue
+            self.st_module.session_state[
+                self._layout_draft_input_key(
+                    axis=axis,
+                    layout_mode=layout_mode,
+                    node_id=node_id,
+                )
+            ] = value
+            self.st_module.session_state[synced_value_key] = value
 
     def _apply_layout_draft(
         self,
@@ -108,11 +146,10 @@ class StreamlitAppRuntime:
         session = self.session
         graph_versions = session.list_graph_versions()
 
-        def save_positions(layout_mode: str) -> None:
+        def save_positions() -> None:
             session.save_graph_positions(
                 graph,
                 session.position_edit_positions(graph),
-                layout_mode=layout_mode,
             )
 
         state = render_sidebar(
@@ -126,7 +163,9 @@ class StreamlitAppRuntime:
                 reload_data=session.reload_data,
                 select_graph_version=session.select_graph_version,
                 materialize_graph_version=session.materialize_graph_version,
+                import_live_graph_source_from_raw=session.import_live_graph_source_from_raw,
                 can_materialize_graph_version=session.can_materialize_graph_version(),
+                can_import_raw_graph_source=session.can_import_raw_graph_source(),
                 save_positions_enabled=session.has_position_edit_positions(),
                 graph_versions=graph_versions,
                 selected_graph_version_id=session.selected_graph_version_id(),
@@ -174,7 +213,7 @@ class StreamlitAppRuntime:
         session = self.session
         selected_kind, selected = resolve_selection(selected_id, graph, wells)
         with self.st_module.expander(
-            "Положение на холсте",
+            "Положение на схеме",
             expanded=selected_kind == "node",
         ):
             if not session.position_edit_available():
@@ -184,31 +223,13 @@ class StreamlitAppRuntime:
                 )
                 return
 
-            if layout_mode == "snake":
-                self.st_module.caption(
-                    "В режиме 'Змейка' позиции рассчитываются автоматически. "
-                    "Переключитесь на source или custom layout."
-                )
-                return
-
             if selected_kind != "node" or selected is None:
-                self.st_module.caption(
-                    "Выберите карточку на схеме, чтобы менять её положение или перетаскивать мышью."
-                )
                 return
 
             if not position_edit_enabled:
                 self.st_module.caption(
-                    "Включите 'Редактировать положение' в sidebar, чтобы двигать карточку "
-                    "мышью или менять X/Y без полного перезапуска страницы."
+                    "Включите «Редактировать положение» в боковой панели, чтобы менять layout."
                 )
-                if self.st_module.button(
-                    "Включить drag карточек",
-                    key="enable_position_edit_button",
-                    width="stretch",
-                ):
-                    self.st_module.session_state["position_edit_enabled"] = True
-                    self.st_module.rerun()
                 return
 
             positions = session.ensure_position_edit_draft(graph, wells, layout_mode)
@@ -216,12 +237,11 @@ class StreamlitAppRuntime:
                 selected.id,
                 (selected.position.x, selected.position.y),
             )
-            self.st_module.caption(
-                "Это черновик текущего layout. "
-                "Поля source YAML ниже меняют канонические координаты схемы."
-            )
-            self.st_module.caption(
-                "Тяните карточку за сам блок. Пустой фон двигает сцену."
+            self._sync_layout_draft_inputs(
+                layout_mode=layout_mode,
+                node_id=selected.id,
+                current_x=current_x,
+                current_y=current_y,
             )
             col_a, col_b = self.st_module.columns(2)
             with col_a:
@@ -320,39 +340,6 @@ class StreamlitAppRuntime:
             component_key=FLOW_CANVAS_COMPONENT_KEY,
         )
 
-    def _render_workspace(
-        self,
-        graph: FlowGraphDocument,
-        wells: WellsDocument,
-        *,
-        search: str,
-        responsible_filter: list[str],
-        kind_filter: list[str],
-        layout_mode: str,
-        position_edit_enabled: bool,
-    ) -> None:
-        diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
-        with diagram_col:
-            selected_id = self._render_flow(
-                graph,
-                wells,
-                search=search,
-                responsible_filter=responsible_filter,
-                kind_filter=kind_filter,
-                layout_mode=layout_mode,
-                position_edit_enabled=position_edit_enabled,
-            )
-        with side_col:
-            with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
-                self._render_layout_draft_panel(
-                    graph,
-                    wells,
-                    selected_id,
-                    layout_mode=layout_mode,
-                    position_edit_enabled=position_edit_enabled,
-                )
-                self._render_inspector(graph, wells, selected_id)
-
     def run(self) -> None:
         session = self.session
         inject_css(self.st_module)
@@ -368,10 +355,12 @@ class StreamlitAppRuntime:
         search, responsible_filter, kind_filter, layout_mode, position_edit_enabled = (
             self._render_sidebar(graph)
         )
+        layout_mode = SOURCE_LAYOUT_MODE
+        diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
 
         @self.st_module.fragment
-        def render_workspace_fragment() -> None:
-            self._render_workspace(
+        def render_canvas_fragment() -> None:
+            self._render_flow(
                 graph,
                 wells,
                 search=search,
@@ -380,10 +369,31 @@ class StreamlitAppRuntime:
                 layout_mode=layout_mode,
                 position_edit_enabled=position_edit_enabled,
             )
+            if session.consume_flow_selection_rerun_request():
+                self.st_module.rerun()
 
-        render_workspace_fragment()
-        if session.consume_position_edit_rerun_request():
-            self.st_module.rerun()
+        @self.st_module.fragment
+        def render_inspector_fragment() -> None:
+            selected_id = self.st_module.session_state.get("selected_id")
+            if not isinstance(selected_id, str) or not selected_id:
+                selected_id = None
+
+            with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
+                self._render_layout_draft_panel(
+                    graph,
+                    wells,
+                    selected_id,
+                    layout_mode=layout_mode,
+                    position_edit_enabled=position_edit_enabled,
+                )
+                self._render_inspector(graph, wells, selected_id)
+            if session.consume_position_edit_rerun_request():
+                self.st_module.rerun()
+
+        with diagram_col:
+            render_canvas_fragment()
+        with side_col:
+            render_inspector_fragment()
 
 
 def parse_layout_draft_xy(

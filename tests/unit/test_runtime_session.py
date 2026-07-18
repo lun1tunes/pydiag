@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydiag.application.session_state import PersistenceResult
-from pydiag.common.graph_versions import GraphVersionInfo
+from pydiag.application.flow_view import FLOW_SELECTION_RERUN_REQUEST_KEY
+from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
 from pydiag.presentation.runtime_session import StreamlitSessionCoordinator
 
 
@@ -41,7 +42,6 @@ class FakeDocumentsGateway:
         positions,
         *,
         expected_version: int,
-        layout_mode: str = "manual",
         graph_version_id: str | None = None,
     ):
         self.calls.append(
@@ -49,7 +49,6 @@ class FakeDocumentsGateway:
                 "save_graph_positions",
                 positions,
                 expected_version,
-                layout_mode,
                 graph_version_id,
             ),
         )
@@ -73,6 +72,24 @@ class FakeDocumentsGateway:
         self.calls.append(("materialize_graph_version", version.id))
         self.versions = [version, *self.versions]
         return version
+
+    def can_import_raw_graph_source(self):
+        self.calls.append(("can_import_raw_graph_source",))
+        return True
+
+    def import_live_graph_source_from_raw(self):
+        result = RawImportResult(
+            live_path=Path("/tmp/flow_source.yaml"),
+            changed=True,
+            backup_version=GraphVersionInfo(
+                id="flow_source.v0002.yaml",
+                label="flow_source.v0002.yaml",
+                path=Path("/tmp/flow_source.v0002.yaml"),
+                is_versioned=True,
+            ),
+        )
+        self.calls.append(("import_live_graph_source_from_raw", result.backup_version.id))
+        return result
 
 
 class FakeStreamlitModule:
@@ -112,6 +129,15 @@ def test_session_coordinator_render_flash_emits_streamlit_messages() -> None:
     ]
 
 
+def test_session_coordinator_consumes_flow_selection_rerun_request() -> None:
+    st_module = FakeStreamlitModule()
+    st_module.session_state[FLOW_SELECTION_RERUN_REQUEST_KEY] = True
+    coordinator = StreamlitSessionCoordinator(st_module, FakeDocumentsGateway())
+
+    assert coordinator.consume_flow_selection_rerun_request() is True
+    assert coordinator.consume_flow_selection_rerun_request() is False
+
+
 def test_session_coordinator_reload_and_reset_position_draft(monkeypatch, documents) -> None:
     graph, wells = documents
     st_module = FakeStreamlitModule()
@@ -136,10 +162,7 @@ def test_session_coordinator_reload_and_reset_position_draft(monkeypatch, docume
     coordinator.reset_position_draft()
 
     assert load_calls == [True]
-    assert gateway.calls == [
-        ("ensure_live_graph_source", Path("/tmp/flow_source.yaml")),
-        ("load_documents", None),
-    ]
+    assert gateway.calls == [("load_documents", None)]
     assert st_module.reruns == 2
     assert "position_edit_signature" not in st_module.session_state
     assert "position_edit_positions" not in st_module.session_state
@@ -190,16 +213,17 @@ def test_session_coordinator_reload_reports_error_when_live_source_bootstrap_fai
     gateway = FakeDocumentsGateway(graph=graph, wells=wells)
     coordinator = StreamlitSessionCoordinator(st_module, gateway)
 
-    def fail_bootstrap():
+    def fail_load(graph_version_id: str | None = None):
+        gateway.calls.append(("load_documents", graph_version_id))
         raise FileNotFoundError("Graph source not found")
 
-    monkeypatch.setattr(gateway, "ensure_live_graph_source", fail_bootstrap)
+    monkeypatch.setattr(gateway, "load_documents", fail_load)
 
     coordinator.reload_data()
 
-    assert gateway.calls == []
+    assert gateway.calls == [("load_documents", None)]
     assert st_module.messages == [
-        ("error", "Не удалось перечитать данные: Graph source not found"),
+        ("error", "Не удалось обновить данные: Graph source not found"),
     ]
     assert st_module.reruns == 0
     assert "flash" not in st_module.session_state
@@ -222,12 +246,9 @@ def test_session_coordinator_reload_reports_error_when_load_fails_after_bootstra
 
     coordinator.reload_data()
 
-    assert gateway.calls == [
-        ("ensure_live_graph_source", Path("/tmp/flow_source.yaml")),
-        ("load_documents", None),
-    ]
+    assert gateway.calls == [("load_documents", None)]
     assert st_module.messages == [
-        ("error", "Не удалось перечитать данные: broken source"),
+        ("error", "Не удалось обновить данные: broken source"),
     ]
     assert st_module.reruns == 0
     assert "flash" not in st_module.session_state
@@ -281,6 +302,15 @@ def test_session_coordinator_exposes_materialization_capability() -> None:
 
     assert coordinator.can_materialize_graph_version() is True
     assert gateway.calls == [("can_materialize_graph_version",)]
+
+
+def test_session_coordinator_exposes_raw_import_capability() -> None:
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway()
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+
+    assert coordinator.can_import_raw_graph_source() is True
+    assert gateway.calls == [("can_import_raw_graph_source",)]
 
 
 def test_session_coordinator_save_wells_runs_storage_workflow(monkeypatch, documents) -> None:
@@ -368,7 +398,6 @@ def test_session_coordinator_save_graph_positions_runs_storage_workflow(
     coordinator.save_graph_positions(
         graph,
         {"proc_initial_review": (5.0, 6.0)},
-        layout_mode="manual",
     )
 
     assert ("persist", "Расположение карточек сохранено") in calls
@@ -377,31 +406,11 @@ def test_session_coordinator_save_graph_positions_runs_storage_workflow(
             "save_graph_positions",
             {"proc_initial_review": (5.0, 6.0)},
             graph.version,
-            "manual",
             None,
         ),
     ]
     assert "position_edit_signature" not in st_module.session_state
     assert st_module.messages == [("error", "cannot-save")]
-
-
-def test_session_coordinator_rejects_saving_drag_positions_for_snake_layout(documents) -> None:
-    graph, _ = documents
-    st_module = FakeStreamlitModule()
-    gateway = FakeDocumentsGateway(graph=graph)
-    coordinator = StreamlitSessionCoordinator(st_module, gateway)
-
-    coordinator.save_graph_positions(
-        graph,
-        {"proc_initial_review": (5.0, 6.0)},
-        layout_mode="snake",
-    )
-
-    assert gateway.calls == []
-    assert st_module.messages == [
-        ("error", "Перетаскивание можно сохранять только для layout source или custom."),
-    ]
-
 
 def test_session_coordinator_switches_selected_graph_version(monkeypatch, documents) -> None:
     graph, wells = documents
@@ -494,10 +503,71 @@ def test_session_coordinator_materializes_and_selects_new_graph_version(
     assert st_module.session_state["selected_graph_version_id"] == "flow_source.v0002.yaml"
     assert st_module.session_state["loaded_graph_version_id"] == "flow_source.v0002.yaml"
     assert st_module.session_state["flash"] == {
-        "message": "Создана новая версия source YAML: flow_source.v0002.yaml",
+        "message": "Создана версия схемы: flow_source.v0002.yaml",
         "level": "success",
     }
     assert st_module.reruns == 1
+
+
+def test_session_coordinator_imports_live_source_from_raw_and_switches_to_live(
+    monkeypatch,
+    documents,
+) -> None:
+    graph, wells = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph, wells=wells)
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+    load_calls: list[tuple[bool, str | None]] = []
+
+    def fake_load(session_state, loader, *, force: bool = False):
+        loaded_graph, loaded_wells = loader()
+        load_calls.append((force, session_state.get("selected_graph_version_id")))
+        return type("Documents", (), {"graph": loaded_graph, "wells": loaded_wells})()
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.load_session_documents",
+        fake_load,
+    )
+    st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+
+    coordinator.import_live_graph_source_from_raw()
+
+    assert load_calls == [(True, None)]
+    assert gateway.calls == [
+        ("import_live_graph_source_from_raw", "flow_source.v0002.yaml"),
+        ("load_documents", None),
+    ]
+    assert "selected_graph_version_id" not in st_module.session_state
+    assert st_module.session_state["loaded_graph_version_id"] is None
+    assert st_module.session_state["flash"] == {
+        "message": (
+            "Фактические данные импортированы в текущую схему. "
+            "Предыдущая версия сохранена как flow_source.v0002.yaml"
+        ),
+        "level": "success",
+    }
+    assert st_module.reruns == 1
+
+
+def test_session_coordinator_import_reports_error_and_restores_selection(documents) -> None:
+    graph, wells = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph, wells=wells)
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+
+    def fail_import():
+        raise ValueError("broken raw payload")
+
+    st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+    gateway.import_live_graph_source_from_raw = fail_import
+
+    coordinator.import_live_graph_source_from_raw()
+
+    assert st_module.session_state["selected_graph_version_id"] == "flow_source.v0001.yaml"
+    assert st_module.messages == [
+        ("error", "Не удалось импортировать фактические данные: broken raw payload"),
+    ]
+    assert st_module.reruns == 0
 
 
 def test_session_coordinator_restores_previous_selection_when_materialized_version_load_fails(
@@ -528,7 +598,7 @@ def test_session_coordinator_restores_previous_selection_when_materialized_versi
     assert st_module.messages == [
         (
             "error",
-            "Не удалось сохранить версию source YAML: materialized version is invalid",
+            "Не удалось создать версию схемы: materialized version is invalid",
         ),
     ]
     assert st_module.reruns == 0

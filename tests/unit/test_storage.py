@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
 from pydiag.common.layout_metadata import CUSTOM_LAYOUT_X_META, CUSTOM_LAYOUT_Y_META
+from pydiag.common.graph_source_admin import UpdateGraphSourceNodeCommand
 from pydiag.domain import move_well_to_node, well_by_id
 from pydiag.infrastructure.flow_source_graph import load_structured_payload
 from pydiag.infrastructure.graph_versions import (
+    can_import_raw_graph_source,
     can_materialize_graph_version,
     ensure_live_graph_source,
+    import_live_graph_source_from_raw,
     materialize_new_graph_version_from_raw_source,
 )
 from pydiag.infrastructure.storage_io import fsync_parent_dir, json_file_lock
@@ -27,9 +31,15 @@ from pydiag.infrastructure.storage_paths import (
     wells_path,
 )
 from pydiag.infrastructure.storage_writes import (
+    load_graph_source_node_draft,
     save_graph_positions_with_version_check,
+    save_graph_source_node_with_version_check,
     save_wells_with_version_check,
 )
+
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
+FLOW_SOURCE_FIXTURE_PATH = FIXTURES_DIR / "flow_source.yaml"
+WELLS_FIXTURE_PATH = FIXTURES_DIR / "wells.yaml"
 
 
 def raw_figma_payload() -> dict[str, object]:
@@ -647,7 +657,7 @@ def test_load_graph_doc_reads_raw_source_document(tmp_path) -> None:
     assert [node.id for node in graph.nodes] == ["start", "end"]
 
 
-def test_load_graph_doc_materializes_default_flow_graph_from_yaml_source(
+def test_load_graph_doc_reads_default_graph_directly_from_yaml_source(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -666,12 +676,10 @@ def test_load_graph_doc_materializes_default_flow_graph_from_yaml_source(
     monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
 
     graph = storage_loading.load_graph_doc()
-    payload = json.loads(flow_graph.read_text(encoding="utf-8"))
 
     review_node = next(node for node in graph.nodes if node.id == "review_data")
-    assert flow_graph.exists()
     assert storage_paths.graph_path() == flow_graph
-    assert payload["schema_version"] == "editable-flow-graph/1.0"
+    assert not flow_graph.exists()
     assert review_node.time == "40 minutes"
 
 
@@ -723,11 +731,10 @@ def test_load_graph_doc_prefers_live_source_over_existing_materialized_graph(
     monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
 
     graph = storage_loading.load_graph_doc()
-    payload = json.loads(flow_graph.read_text(encoding="utf-8"))
     review_node = next(node for node in graph.nodes if node.id == "review_data")
 
     assert storage_paths.graph_path() == flow_graph
-    assert payload["schema_version"] == "editable-flow-graph/1.0"
+    assert json.loads(flow_graph.read_text(encoding="utf-8")) == valid_internal_graph_payload()
     assert graph.version == 7
     assert review_node.time == "40 minutes"
 
@@ -800,7 +807,7 @@ def test_save_graph_positions_with_version_check_updates_editable_graph_payload(
     assert next(node for node in saved.nodes if node.id == "start").position.x == 111.13
 
 
-def test_save_graph_positions_with_version_check_updates_live_source_and_materialized_graph(
+def test_save_graph_positions_with_version_check_updates_live_source_only(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -823,17 +830,16 @@ def test_save_graph_positions_with_version_check_updates_live_source_and_materia
     )
 
     source_graph = load_graph_doc(source)
-    materialized_graph = load_graph_doc(target)
     moved = next(node for node in source_graph.nodes if node.id == "review_data")
 
     assert saved.version == graph.version + 1
     assert source_graph.version == graph.version + 1
-    assert materialized_graph.version == graph.version + 1
+    assert not target.exists()
     assert moved.position.x == 111.13
     assert moved.position.y == 222.22
 
 
-def test_save_graph_positions_with_version_check_updates_custom_layout_separately(
+def test_save_graph_positions_with_version_check_updates_custom_layout_in_live_source(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -857,8 +863,7 @@ def test_save_graph_positions_with_version_check_updates_custom_layout_separatel
     )
 
     payload = load_structured_payload(source.read_bytes())
-    materialized_graph = load_graph_doc(target)
-    review_node = next(node for node in materialized_graph.nodes if node.id == "review_data")
+    review_node = next(node for node in load_graph_doc(source).nodes if node.id == "review_data")
 
     assert saved.version == graph.version + 1
     assert payload["layout"]["review_data"] == {
@@ -873,10 +878,69 @@ def test_save_graph_positions_with_version_check_updates_custom_layout_separatel
         "w": 320,
         "h": 120,
     }
+    assert not target.exists()
     assert review_node.position.x == 380
     assert review_node.position.y == 60
     assert review_node.metadata[CUSTOM_LAYOUT_X_META] == 611.5
     assert review_node.metadata[CUSTOM_LAYOUT_Y_META] == 333.25
+
+
+def test_import_live_graph_source_from_raw_creates_backup_before_replacing_live_source(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    source_dir = tmp_path / "flow_sources"
+    source_dir.mkdir()
+    live_source = source_dir / "flow_source.yaml"
+    raw_source = tmp_path / "real_true_data.json"
+    live_source.write_text(flow_source_yaml(), encoding="utf-8")
+    raw_source.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", live_source)
+    monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", raw_source)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
+
+    assert can_import_raw_graph_source() is True
+
+    result = import_live_graph_source_from_raw()
+    backup_path = source_dir / "flow_source.v0001.yaml"
+    live_payload = load_structured_payload(live_source.read_bytes())
+    backup_payload = load_structured_payload(backup_path.read_bytes())
+
+    assert result.changed is True
+    assert result.backup_version is not None
+    assert result.backup_version.path == backup_path
+    assert backup_payload["nodes"]["review_data"]["title"] == "Проверка комплекта данных"
+    assert live_payload["nodes"]["start"]["title"] == "Start"
+    assert live_payload["version"] == 8
+
+
+def test_import_live_graph_source_from_raw_is_noop_when_live_source_already_matches_raw(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    source_dir = tmp_path / "flow_sources"
+    source_dir.mkdir()
+    live_source = source_dir / "flow_source.yaml"
+    raw_source = tmp_path / "real_true_data.json"
+    raw_source.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", live_source)
+    monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", raw_source)
+    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
+    ensure_live_graph_source(source_path=raw_source, target_path=live_source)
+
+    result = import_live_graph_source_from_raw()
+
+    assert result.changed is False
+    assert result.backup_version is None
+    assert graph_version_paths() == []
 
 
 def test_save_graph_positions_with_version_check_rejects_unsupported_layout_mode(
@@ -956,6 +1020,44 @@ def test_save_wells_with_version_check_rejects_graph_integrity_violation(
             path=wells_file,
             graph=graph,
         )
+
+
+def test_save_graph_source_node_with_version_check_rejects_soft_delete_for_referenced_node(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "flow_source.yaml"
+    wells_file = tmp_path / "wells.yaml"
+    source_path.write_bytes(FLOW_SOURCE_FIXTURE_PATH.read_bytes())
+    wells_file.write_bytes(WELLS_FIXTURE_PATH.read_bytes())
+    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(source_path))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_file))
+
+    draft = load_graph_source_node_draft(source_path, "proc_initial_review")
+
+    with pytest.raises(ValueError, match="current_node_id=proc_initial_review"):
+        save_graph_source_node_with_version_check(
+            UpdateGraphSourceNodeCommand(
+                node_id=draft.node_id,
+                title=draft.title,
+                kind=draft.kind,
+                layout_x=draft.layout_x,
+                layout_y=draft.layout_y,
+                layout_w=draft.layout_w,
+                layout_h=draft.layout_h,
+                responsible=draft.responsible,
+                participants=draft.participants,
+                approvers=draft.approvers,
+                duration=draft.duration,
+                note=draft.note,
+                deleted=True,
+            ),
+            expected_version=1,
+            path=source_path,
+        )
+
+    payload = load_structured_payload(source_path.read_bytes())
+    assert "deleted" not in payload["nodes"]["proc_initial_review"]
 
 
 def test_load_wells_doc_accepts_legacy_json_payload(tmp_path) -> None:
