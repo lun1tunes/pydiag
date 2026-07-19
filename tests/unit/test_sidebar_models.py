@@ -8,24 +8,27 @@ from pydiag.presentation.sidebar import (
 )
 
 
-def test_authenticated_user_state_hides_duplicate_username_caption() -> None:
-    user_state = build_authenticated_user_state(
+def test_authenticated_user_state_exposes_rights_caption() -> None:
+    admin_state = build_authenticated_user_state(
         {"display_name": "Иван", "username": "ivan"},
         is_admin=True,
         is_super_admin=False,
     )
-    same_name_state = build_authenticated_user_state(
+    super_admin_state = build_authenticated_user_state(
         {"display_name": "planner", "username": "planner"},
-        is_admin=False,
+        is_admin=True,
         is_super_admin=True,
     )
+    user_state = build_authenticated_user_state(
+        {"display_name": "Гость", "username": "guest"},
+        is_admin=False,
+        is_super_admin=False,
+    )
 
-    assert user_state.display_name == "Иван"
-    assert user_state.username_caption == "Логин: ivan"
-    assert user_state.show_admin_caption is True
-    assert user_state.show_super_admin_caption is False
-    assert same_name_state.username_caption is None
-    assert same_name_state.show_super_admin_caption is True
+    assert admin_state.display_name == "Иван"
+    assert admin_state.rights_caption == "Права: Админ"
+    assert super_admin_state.rights_caption == "Права: Super Admin"
+    assert user_state.rights_caption == "Права: Пользователь"
 
 
 def test_login_state_reflects_user_configuration_and_insecure_mode() -> None:

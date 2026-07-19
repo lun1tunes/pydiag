@@ -18,6 +18,7 @@ __all__ = [
     "offset_point",
     "opposite_side",
     "outbound_gutter_side",
+    "point_in_rect",
     "port_point",
     "route_anchor_id",
     "route_source_anchor_id",
@@ -74,6 +75,8 @@ class EdgeRoute:
     target_side: str
     anchors: tuple[RouteAnchor, ...]
     source_anchor: RouteAnchor | None = None
+    source_slot_offset: tuple[float, float] = (0.0, 0.0)
+    target_slot_offset: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass(frozen=True)

@@ -66,13 +66,21 @@ def test_sync_layout_draft_inputs_preserves_manual_edit_until_position_changes()
     assert st_module.session_state["layout_draft_x::manual::proc_initial_review"] == "801"
 
 
-def test_runtime_run_splits_canvas_and_inspector_into_separate_fragments() -> None:
+def test_runtime_run_keeps_canvas_and_inspector_in_one_workspace_fragment() -> None:
     source = inspect.getsource(StreamlitAppRuntime.run)
 
     assert "@self.st_module.fragment" in source
-    assert "def render_canvas_fragment() -> None:" in source
-    assert "def render_inspector_fragment() -> None:" in source
-    assert "with diagram_col:" in source
-    assert "render_canvas_fragment()" in source
-    assert "with side_col:" in source
-    assert "render_inspector_fragment()" in source
+    assert "def render_workspace_fragment() -> None:" in source
+    assert "render_workspace_fragment()" in source
+    assert "consume_flow_selection_rerun_request" not in source
+    assert "def render_canvas_fragment() -> None:" not in source
+    assert "def render_inspector_fragment() -> None:" not in source
+    # Columns must be created inside the fragment — writing widgets into
+    # outer-run containers raises StreamlitFragmentWidgetsNotAllowedOutsideError.
+    fragment_source = source.split("def render_workspace_fragment()", 1)[1]
+    assert "self.st_module.columns((2.3, 1.1), gap=\"large\")" in fragment_source
+    assert source.index("def render_workspace_fragment()") < source.index(
+        "self.st_module.columns((2.3, 1.1), gap=\"large\")"
+    )
+    assert "Ошибка отрисовки схемы:" in source
+    assert "Ошибка панели инспектора:" in source

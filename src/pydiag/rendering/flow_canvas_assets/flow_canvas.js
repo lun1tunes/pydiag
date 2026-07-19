@@ -6,34 +6,102 @@ const TOOLBAR_BUTTONS = [
 const FIT_VIEW_PADDING_X = 64;
 const FIT_VIEW_PADDING_TOP = 48;
 const FIT_VIEW_PADDING_BOTTOM = 64;
-const VIEW_STATE_IDLE_SYNC_MS = 360;
+const PAN_CLICK_SUPPRESS_DISTANCE_PX = 4;
+const CANVAS_STATE_STORE_KEY = "__pydiagFlowCanvasStates";
+const CANVAS_STATE_KEY = "well_drilling_flow_canvas";
 
 export default function(component) {
-  const root = ensureRoot(component.parentElement);
-  const state = ensureState(root, component);
-  state.component = component;
-  state.payload = normalizePayload(component.data);
+  const state = adoptCanvasState(component);
+  const nextPayload = normalizePayload(component.data);
+  if (nextPayload === null) {
+    // Intermediate Streamlit mounts can arrive without valid data.
+    // Keep the current scene instead of flashing the empty state.
+    return () => detachCanvasState(state);
+  }
+  state.payload = nextPayload;
   syncStateFromPayload(state);
   queueRender(state);
 
-  return () => {
-    if (state.resizeObserver) {
-      state.resizeObserver.disconnect();
-      state.resizeObserver = null;
+  // Soft cleanup only: Streamlit remounts the host on fragment/app reruns.
+  // Keep scene/view/selection in a document store so the graph stays static.
+  return () => detachCanvasState(state);
+}
+
+function getCanvasStateStore(ownerDocument) {
+  if (!ownerDocument[CANVAS_STATE_STORE_KEY]) {
+    ownerDocument[CANVAS_STATE_STORE_KEY] = new Map();
+  }
+  return ownerDocument[CANVAS_STATE_STORE_KEY];
+}
+
+function adoptCanvasState(component) {
+  const parentElement = component.parentElement;
+  const ownerDocument = getOwnerDocument(parentElement);
+  const store = getCanvasStateStore(ownerDocument);
+  let state = store.get(CANVAS_STATE_KEY);
+
+  if (state) {
+    if (state.root.parentElement !== parentElement) {
+      for (const child of parentElement.querySelectorAll(".flow-canvas-root")) {
+        if (child !== state.root) {
+          child.remove();
+        }
+      }
+      parentElement.appendChild(state.root);
     }
-    if (state.viewSyncTimer !== null) {
-      clearTimeout(state.viewSyncTimer);
-      state.viewSyncTimer = null;
-    }
-    if (state.fullscreenChangeHandler) {
-      state.ownerDocument.removeEventListener("fullscreenchange", state.fullscreenChangeHandler);
-      state.ownerDocument.removeEventListener(
-        "webkitfullscreenchange",
-        state.fullscreenChangeHandler,
-      );
-      state.fullscreenChangeHandler = null;
-    }
-  };
+    state.component = component;
+    state.ownerDocument = ownerDocument;
+    state.root.__flowCanvasState = state;
+    attachCanvasObservers(state);
+    return state;
+  }
+
+  const root = ensureRoot(parentElement);
+  state = createCanvasState(root, component, ownerDocument);
+  initializeRootStructure(state);
+  attachCanvasObservers(state);
+  root.__flowCanvasState = state;
+  store.set(CANVAS_STATE_KEY, state);
+  return state;
+}
+
+function detachCanvasState(state) {
+  if (state.resizeObserver) {
+    state.resizeObserver.disconnect();
+    state.resizeObserver = null;
+  }
+  if (state.fullscreenChangeHandler) {
+    state.ownerDocument.removeEventListener("fullscreenchange", state.fullscreenChangeHandler);
+    state.ownerDocument.removeEventListener(
+      "webkitfullscreenchange",
+      state.fullscreenChangeHandler,
+    );
+    state.fullscreenChangeHandler = null;
+  }
+}
+
+function attachCanvasObservers(state) {
+  if (!state.resizeObserver) {
+    state.resizeObserver = new ResizeObserver(() => {
+      if (!state.userMovedView) {
+        fitView(state);
+      }
+      queueRender(state);
+    });
+    state.resizeObserver.observe(state.root);
+  }
+  if (!state.fullscreenChangeHandler) {
+    state.fullscreenChangeHandler = () => {
+      syncFullscreenClass(state);
+      queueRender(state);
+    };
+    state.ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);
+    state.ownerDocument.addEventListener(
+      "webkitfullscreenchange",
+      state.fullscreenChangeHandler,
+    );
+  }
+  syncFullscreenClass(state);
 }
 
 function ensureRoot(parentElement) {
@@ -46,16 +114,19 @@ function ensureRoot(parentElement) {
   return root;
 }
 
-function ensureState(root, component) {
-  if (root.__flowCanvasState) {
-    return root.__flowCanvasState;
-  }
-
-  const ownerDocument = getOwnerDocument(component.parentElement);
-  const state = {
+function createCanvasState(root, component, ownerDocument) {
+  return {
     root,
     component,
-    payload: normalizePayload(component.data),
+    payload: normalizePayload(component.data) || {
+      nodes: [],
+      edges: [],
+      canvas: { width: 1200, height: 828 },
+      bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
+      selected_id: null,
+      position_edit_enabled: false,
+      revision: null,
+    },
     nodePayloadsById: new Map(),
     edgePayloadsById: new Map(),
     tokenPayloadsById: new Map(),
@@ -64,6 +135,8 @@ function ensureState(root, component) {
     positions: {},
     positionsVersion: 0,
     selectedId: null,
+    pendingSelectedId: undefined,
+    sessionEpoch: null,
     isPanning: false,
     draggingNodeId: null,
     frameRequested: false,
@@ -73,7 +146,6 @@ function ensureState(root, component) {
     renderedPositionsVersion: -1,
     renderedDraggingNodeId: null,
     resizeObserver: null,
-    viewSyncTimer: null,
     fullscreenChangeHandler: null,
     ownerDocument,
     dom: null,
@@ -82,28 +154,8 @@ function ensureState(root, component) {
     tokenElements: new Map(),
     minimapNodeElements: new Map(),
     minimapBounds: null,
-    lastReportedView: null,
-    lastReportedUserMovedView: false,
+    hasRenderedScene: false,
   };
-
-  initializeRootStructure(state);
-
-  state.resizeObserver = new ResizeObserver(() => {
-    if (!state.userMovedView) {
-      fitView(state);
-    }
-    queueRender(state);
-  });
-  state.resizeObserver.observe(root);
-  state.fullscreenChangeHandler = () => {
-    syncFullscreenClass(state);
-    queueRender(state);
-  };
-  ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);
-  ownerDocument.addEventListener("webkitfullscreenchange", state.fullscreenChangeHandler);
-  syncFullscreenClass(state);
-  root.__flowCanvasState = state;
-  return state;
 }
 
 function initializeRootStructure(state) {
@@ -115,6 +167,7 @@ function initializeRootStructure(state) {
   emptyState.hidden = true;
 
   const toolbar = createElement("div", "flow-canvas-toolbar", root);
+  toolbar.hidden = true;
   const toolbarButtons = {};
   for (const buttonDef of TOOLBAR_BUTTONS) {
     const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
@@ -129,7 +182,6 @@ function initializeRootStructure(state) {
         state.userMovedView = false;
         fitView(state);
       }
-      syncViewState(state);
       queueRender(state);
     });
     toolbarButtons[buttonDef.id] = button;
@@ -142,6 +194,7 @@ function initializeRootStructure(state) {
   });
 
   const viewport = createElement("div", "flow-canvas-viewport", root);
+  viewport.hidden = true;
   attachViewportHandlers(viewport, state);
 
   const stage = createElement("div", "flow-canvas-stage", viewport);
@@ -158,6 +211,7 @@ function initializeRootStructure(state) {
   const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
 
   const minimap = createElement("div", "flow-canvas-minimap", root);
+  minimap.hidden = true;
   minimap.setAttribute("role", "img");
   minimap.setAttribute("aria-label", "Миникарта схемы");
   attachMinimapHandlers(minimap, state);
@@ -203,24 +257,35 @@ function initializeRootStructure(state) {
 }
 
 function normalizePayload(data) {
-  if (!data || typeof data !== "object") {
-    return {
-      nodes: [],
-      edges: [],
-      canvas: { width: 1200, height: 828 },
-      bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
-      selected_id: null,
-      position_edit_enabled: false,
-      persisted_view_state: null,
-      revision: 0,
-    };
+  if (!data || typeof data !== "object" || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+    return null;
+  }
+  if (!data.canvas || typeof data.canvas !== "object" || !data.bounds || typeof data.bounds !== "object") {
+    return null;
   }
   return data;
 }
 
 function syncStateFromPayload(state) {
   const payload = state.payload;
-  const persistedViewState = normalizePersistedViewState(payload.persisted_view_state);
+  if (Object.prototype.hasOwnProperty.call(payload, "session_epoch")) {
+    if (state.sessionEpoch === null) {
+      state.sessionEpoch = payload.session_epoch;
+    } else if (state.sessionEpoch !== payload.session_epoch) {
+      state.sessionEpoch = payload.session_epoch;
+      state.userMovedView = false;
+      state.hasRenderedScene = false;
+      state.sceneRevision = null;
+      state.lastRevision = null;
+      state.selectedId = null;
+      state.pendingSelectedId = undefined;
+      state.renderedSelectedId = null;
+      state.draggingNodeId = null;
+      state.positions = {};
+      state.positionsVersion += 1;
+    }
+  }
+
   const graphChanged = state.lastRevision !== payload.revision;
   const nextPositions = nodePositionMap(payload.nodes);
 
@@ -233,16 +298,24 @@ function syncStateFromPayload(state) {
     state.positionsVersion += 1;
   }
 
-  state.selectedId = payload.selected_id ?? state.selectedId ?? null;
-  if (persistedViewState && state.lastRevision === null) {
-    state.view = persistedViewState.view;
-    state.userMovedView = persistedViewState.userMovedView;
-    state.lastReportedView = { ...persistedViewState.view };
-    state.lastReportedUserMovedView = persistedViewState.userMovedView;
+  if (Object.prototype.hasOwnProperty.call(payload, "selected_id")) {
+    const payloadSelectedId = payload.selected_id ?? null;
+    if (state.pendingSelectedId !== undefined) {
+      // Keep the local selection until Streamlit echoes it back. A stale null
+      // payload during fragment remount was wiping the highlight.
+      if (payloadSelectedId === state.pendingSelectedId) {
+        state.pendingSelectedId = undefined;
+      }
+      state.selectedId = state.pendingSelectedId !== undefined
+        ? state.pendingSelectedId
+        : payloadSelectedId;
+    } else {
+      state.selectedId = payloadSelectedId;
+    }
   }
   if (graphChanged) {
     state.lastRevision = payload.revision;
-    if (!persistedViewState && !state.userMovedView) {
+    if (!state.userMovedView) {
       fitView(state);
     }
   }
@@ -261,6 +334,10 @@ function queueRender(state) {
 
 function renderState(state) {
   const payload = state.payload;
+  if (!payload || !Array.isArray(payload.nodes)) {
+    return;
+  }
+
   syncFullscreenClass(state);
   syncToolbarState(state);
   syncViewportState(state);
@@ -272,7 +349,8 @@ function renderState(state) {
     state.dom.toolbar.hidden = true;
     state.dom.viewport.hidden = true;
     state.dom.minimap.hidden = true;
-    state.sceneRevision = null;
+    state.sceneRevision = payload.revision;
+    state.hasRenderedScene = false;
     state.renderedSelectedId = state.selectedId;
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
@@ -284,17 +362,22 @@ function renderState(state) {
   state.dom.viewport.hidden = false;
   state.dom.minimap.hidden = false;
 
-  const graphChanged = state.sceneRevision !== payload.revision;
+  const graphChanged = state.sceneRevision !== payload.revision || !state.hasRenderedScene;
   if (graphChanged) {
     rebuildGraphScene(state);
     state.sceneRevision = payload.revision;
+    state.hasRenderedScene = true;
     state.renderedSelectedId = state.selectedId;
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
   } else {
     if (state.renderedPositionsVersion !== state.positionsVersion) {
-      updateNodePositions(state);
-      updateMinimapNodePositions(state);
+      if (state.draggingNodeId) {
+        updateDraggedNode(state, state.draggingNodeId);
+      } else {
+        updateNodePositions(state);
+        updateMinimapNodePositions(state);
+      }
       state.renderedPositionsVersion = state.positionsVersion;
     }
     if (state.renderedDraggingNodeId !== state.draggingNodeId) {
@@ -533,6 +616,22 @@ function updateMinimapNodePositions(state) {
   }
 }
 
+function updateDraggedNode(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node) {
+    return;
+  }
+  const position = state.positions[nodeId] || node.position;
+  const elements = state.nodeElements.get(nodeId);
+  if (elements) {
+    syncNodeShellPosition(elements.shell, position);
+  }
+  const minimapNode = state.minimapNodeElements.get(nodeId);
+  if (minimapNode) {
+    syncMinimapNodeShape(minimapNode, node, position);
+  }
+}
+
 function updateSelectionState(state, previousSelectedId, nextSelectedId) {
   syncEdgeSelectionById(state, previousSelectedId);
   syncEdgeSelectionById(state, nextSelectedId);
@@ -635,10 +734,9 @@ function setTokenSelectedState(element, tokenPayload, selected) {
   element.title = tokenPayload.title;
   if (selected) {
     element.style.boxShadow =
-      "0 0 0 3px rgba(59, 130, 246, 0.2), 0 12px 28px rgba(37, 99, 235, 0.16)";
-    element.style.transform = "translateY(-1px)";
+      "0 0 0 1px rgba(59, 130, 246, 0.55), 0 0 0 4px rgba(59, 130, 246, 0.14), 0 0 18px rgba(96, 165, 250, 0.35)";
   } else {
-    element.style.transform = "";
+    element.style.boxShadow = "";
   }
 }
 
@@ -657,47 +755,51 @@ function buildNodeSelectionOverlay(node) {
   svg.setAttribute("preserveAspectRatio", "none");
   overlay.appendChild(svg);
 
-  const descriptors = nodeSelectionShapeDescriptors(node.kind);
-  for (const className of [
-    "flow-node-selection__glow",
-    "flow-node-selection__stroke",
-    "flow-node-selection__sheen",
-  ]) {
+  // Soft bloom first, then a thin edge — both use the true silhouette.
+  const descriptors = nodeSelectionShapeDescriptors(node);
+  for (const className of ["flow-node-selection__glow", "flow-node-selection__stroke"]) {
+    const group = createSvgElement("g");
+    group.classList.add(className);
     for (const descriptor of descriptors) {
-      svg.appendChild(buildNodeSelectionShape(descriptor, className));
+      group.appendChild(buildNodeSelectionShape(descriptor));
     }
+    svg.appendChild(group);
   }
   return overlay;
 }
 
-function nodeSelectionShapeDescriptors(kind) {
+function nodeSelectionShapeDescriptors(node) {
+  const kind = node.kind;
+  // Match flow_node_shape_backgrounds.py silhouettes exactly.
   if (kind === "decision_diamond") {
-    return [{ tag: "polygon", attrs: { points: "50,4 96,50 50,96 4,50" } }];
+    return [{ tag: "polygon", attrs: { points: "50,2 98,50 50,98 2,50" } }];
   }
   if (kind === "input_data") {
-    return [{ tag: "polygon", attrs: { points: "14,4 96,4 86,96 4,96" } }];
+    return [{ tag: "polygon", attrs: { points: "13,2 98,2 87,98 2,98" } }];
   }
   if (kind === "database") {
     return [
-      { tag: "path", attrs: { d: "M10 20 L10 78 C10 90 90 90 90 78 L90 20" } },
-      { tag: "ellipse", attrs: { cx: "50", cy: "20", rx: "40", ry: "12" } },
+      {
+        tag: "path",
+        attrs: { d: "M8 20 L8 78 C8 92 92 92 92 78 L92 20 Z" },
+      },
+      { tag: "ellipse", attrs: { cx: "50", cy: "20", rx: "42", ry: "13" } },
     ];
   }
-  if (kind === "event") {
-    return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "28" } }];
-  }
-  if (kind === "decision_card") {
-    return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "22" } }];
-  }
-  if (kind === "figma_text") {
-    return [{ tag: "rect", attrs: { x: "5", y: "5", width: "90", height: "90", rx: "10" } }];
-  }
-  return [{ tag: "rect", attrs: { x: "4", y: "4", width: "92", height: "92", rx: "10" } }];
+
+  // Rounded HTML cards: express CSS border-radius in non-uniform viewBox units
+  // so corners stay circular on screen after preserveAspectRatio=none stretch.
+  const width = Math.max(1, Number(node.size?.w) || 1);
+  const height = Math.max(1, Number(node.size?.h) || 1);
+  const radiusPx =
+    kind === "event" ? 32 : kind === "decision_card" ? 22 : kind === "figma_text" ? 10 : 8;
+  const rx = String(round(Math.min(50, (radiusPx / width) * 100), 3));
+  const ry = String(round(Math.min(50, (radiusPx / height) * 100), 3));
+  return [{ tag: "rect", attrs: { x: "0", y: "0", width: "100", height: "100", rx, ry } }];
 }
 
-function buildNodeSelectionShape(descriptor, className) {
+function buildNodeSelectionShape(descriptor) {
   const shape = createSvgElement(descriptor.tag);
-  shape.classList.add(className);
   for (const [key, value] of Object.entries(descriptor.attrs)) {
     shape.setAttribute(key, value);
   }
@@ -705,15 +807,6 @@ function buildNodeSelectionShape(descriptor, className) {
 }
 
 function attachViewportHandlers(viewport, state) {
-  viewport.addEventListener("click", (event) => {
-    if (isCanvasInteractiveTarget(event.target)) {
-      return;
-    }
-    if (state.selectedId !== null) {
-      selectId(state, null);
-    }
-  });
-
   viewport.addEventListener(
     "wheel",
     (event) => {
@@ -723,7 +816,6 @@ function attachViewportHandlers(viewport, state) {
       const cursor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
       zoomAt(state, cursor, scaleFactor);
       state.userMovedView = true;
-      scheduleViewStateSync(state);
       queueRender(state);
     },
     { passive: false },
@@ -737,10 +829,19 @@ function attachViewportHandlers(viewport, state) {
     clearSelection(state.ownerDocument);
     state.isPanning = true;
     state.userMovedView = true;
+    let panDidMove = false;
+    let panFinished = false;
     const ownerDocument = state.ownerDocument;
     const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
     if (ownerDocument.body) {
       ownerDocument.body.style.userSelect = "none";
+    }
+    if (typeof viewport.setPointerCapture === "function") {
+      try {
+        viewport.setPointerCapture(event.pointerId);
+      } catch (_error) {
+        // Ignore capture failures; document listeners remain as fallback.
+      }
     }
     const start = {
       x: event.clientX,
@@ -749,22 +850,59 @@ function attachViewportHandlers(viewport, state) {
       viewY: state.view.y,
     };
     const move = (moveEvent) => {
+      if (panFinished) {
+        return;
+      }
       moveEvent.preventDefault();
-      state.view.x = start.viewX + (moveEvent.clientX - start.x);
-      state.view.y = start.viewY + (moveEvent.clientY - start.y);
+      const dx = moveEvent.clientX - start.x;
+      const dy = moveEvent.clientY - start.y;
+      if (
+        !panDidMove
+        && (Math.abs(dx) >= PAN_CLICK_SUPPRESS_DISTANCE_PX
+          || Math.abs(dy) >= PAN_CLICK_SUPPRESS_DISTANCE_PX)
+      ) {
+        panDidMove = true;
+      }
+      state.view.x = start.viewX + dx;
+      state.view.y = start.viewY + dy;
       queueRender(state);
     };
-    const stop = () => {
+    const stop = (stopEvent) => {
+      if (panFinished) {
+        return;
+      }
+      panFinished = true;
       state.isPanning = false;
+      // Deselect only on a true background tap. A pan must not clear selection.
+      if (!panDidMove && state.selectedId !== null) {
+        selectId(state, null);
+      }
+      if (
+        stopEvent
+        && typeof viewport.releasePointerCapture === "function"
+        && typeof viewport.hasPointerCapture === "function"
+        && viewport.hasPointerCapture(stopEvent.pointerId)
+      ) {
+        try {
+          viewport.releasePointerCapture(stopEvent.pointerId);
+        } catch (_error) {
+          // no-op
+        }
+      }
       if (ownerDocument.body) {
         ownerDocument.body.style.userSelect = previousUserSelect;
       }
+      viewport.removeEventListener("pointermove", move);
+      viewport.removeEventListener("pointerup", stop);
+      viewport.removeEventListener("pointercancel", stop);
       ownerDocument.removeEventListener("pointermove", move);
       ownerDocument.removeEventListener("pointerup", stop);
       ownerDocument.removeEventListener("pointercancel", stop);
-      syncViewState(state);
       queueRender(state);
     };
+    viewport.addEventListener("pointermove", move, { passive: false });
+    viewport.addEventListener("pointerup", stop);
+    viewport.addEventListener("pointercancel", stop);
     ownerDocument.addEventListener("pointermove", move, { passive: false });
     ownerDocument.addEventListener("pointerup", stop);
     ownerDocument.addEventListener("pointercancel", stop);
@@ -847,11 +985,17 @@ function startNodeDrag(event, state, nodeId) {
 }
 
 function selectId(state, value) {
-  if (state.selectedId === value) {
+  if (state.selectedId === value && state.pendingSelectedId === undefined) {
     return;
   }
+  const previousSelectedId = state.selectedId;
   state.selectedId = value;
+  state.pendingSelectedId = value;
   state.component.setStateValue("selected_id", value);
+  if (state.hasRenderedScene && state.renderedSelectedId !== value) {
+    updateSelectionState(state, previousSelectedId, value);
+    state.renderedSelectedId = value;
+  }
   queueRender(state);
 }
 
@@ -890,34 +1034,6 @@ function fitView(state) {
   state.view.scale = scale;
   state.view.x = round((rect.width - bounds.width * scale) / 2 - bounds.left * scale);
   state.view.y = round(FIT_VIEW_PADDING_TOP - bounds.top * scale);
-}
-
-function syncViewState(state) {
-  const nextView = {
-    x: round(state.view.x, 4),
-    y: round(state.view.y, 4),
-    scale: round(state.view.scale, 4),
-  };
-  if (
-    sameViewState(state.lastReportedView, nextView) &&
-    state.lastReportedUserMovedView === state.userMovedView
-  ) {
-    return;
-  }
-  state.component.setStateValue("view", nextView);
-  state.component.setStateValue("user_moved_view", state.userMovedView);
-  state.lastReportedView = nextView;
-  state.lastReportedUserMovedView = state.userMovedView;
-}
-
-function scheduleViewStateSync(state, delay = VIEW_STATE_IDLE_SYNC_MS) {
-  if (state.viewSyncTimer !== null) {
-    clearTimeout(state.viewSyncTimer);
-  }
-  state.viewSyncTimer = setTimeout(() => {
-    state.viewSyncTimer = null;
-    syncViewState(state);
-  }, delay);
 }
 
 function toggleFullscreen(state) {
@@ -968,22 +1084,6 @@ function syncFullscreenClass(state) {
   state.root.classList.toggle("is-fullscreen", isRootFullscreen(state));
 }
 
-function normalizePersistedViewState(value) {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const x = finiteNumber(value.x);
-  const y = finiteNumber(value.y);
-  const scale = finiteNumber(value.scale);
-  if (x === null || y === null || scale === null || scale <= 0) {
-    return null;
-  }
-  return {
-    view: { x, y, scale },
-    userMovedView: Boolean(value.user_moved_view),
-  };
-}
-
 function attachMinimapHandlers(minimap, state) {
   minimap.addEventListener("pointerdown", (event) => {
     if (
@@ -1018,7 +1118,6 @@ function attachMinimapHandlers(minimap, state) {
       ownerDocument.removeEventListener("pointermove", move);
       ownerDocument.removeEventListener("pointerup", stop);
       ownerDocument.removeEventListener("pointercancel", stop);
-      syncViewState(state);
     };
     ownerDocument.addEventListener("pointermove", move, { passive: false });
     ownerDocument.addEventListener("pointerup", stop);
@@ -1240,17 +1339,6 @@ function samePositionMaps(first, second) {
   return true;
 }
 
-function sameViewState(first, second) {
-  if (!first || !second) {
-    return false;
-  }
-  return (
-    first.x === second.x &&
-    first.y === second.y &&
-    first.scale === second.scale
-  );
-}
-
 function createElement(tagName, className, parent) {
   const element = document.createElement(tagName);
   if (className) {
@@ -1295,13 +1383,6 @@ function isCollinear(first, second, third) {
 
 function clamp(value, minValue, maxValue) {
   return Math.max(minValue, Math.min(maxValue, value));
-}
-
-function finiteNumber(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return null;
-  }
-  return value;
 }
 
 function round(value, digits = 2) {

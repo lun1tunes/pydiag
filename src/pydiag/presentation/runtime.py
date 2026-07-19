@@ -356,44 +356,53 @@ class StreamlitAppRuntime:
             self._render_sidebar(graph)
         )
         layout_mode = SOURCE_LAYOUT_MODE
-        diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
 
+        # Canvas + inspector share one fragment so selection/drag callbacks update
+        # the inspector without a full-app st.rerun() that remounts the graph host.
+        # Columns MUST be created inside the fragment: Streamlit forbids writing
+        # fragment widgets into containers owned by the outer script run.
         @self.st_module.fragment
-        def render_canvas_fragment() -> None:
-            self._render_flow(
-                graph,
-                wells,
-                search=search,
-                responsible_filter=responsible_filter,
-                kind_filter=kind_filter,
-                layout_mode=layout_mode,
-                position_edit_enabled=position_edit_enabled,
-            )
-            if session.consume_flow_selection_rerun_request():
-                self.st_module.rerun()
+        def render_workspace_fragment() -> None:
+            diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
+            try:
+                with diagram_col:
+                    selected_id = self._render_flow(
+                        graph,
+                        wells,
+                        search=search,
+                        responsible_filter=responsible_filter,
+                        kind_filter=kind_filter,
+                        layout_mode=layout_mode,
+                        position_edit_enabled=position_edit_enabled,
+                    )
+            except Exception as exc:
+                self.st_module.error(f"Ошибка отрисовки схемы: {exc}")
+                selected_id = None
 
-        @self.st_module.fragment
-        def render_inspector_fragment() -> None:
-            selected_id = self.st_module.session_state.get("selected_id")
+            if not isinstance(selected_id, str) or not selected_id:
+                selected_id = self.st_module.session_state.get("selected_id")
             if not isinstance(selected_id, str) or not selected_id:
                 selected_id = None
 
-            with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
-                self._render_layout_draft_panel(
-                    graph,
-                    wells,
-                    selected_id,
-                    layout_mode=layout_mode,
-                    position_edit_enabled=position_edit_enabled,
-                )
-                self._render_inspector(graph, wells, selected_id)
+            try:
+                with side_col:
+                    with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
+                        self._render_layout_draft_panel(
+                            graph,
+                            wells,
+                            selected_id,
+                            layout_mode=layout_mode,
+                            position_edit_enabled=position_edit_enabled,
+                        )
+                        self._render_inspector(graph, wells, selected_id)
+            except Exception as exc:
+                self.st_module.error(f"Ошибка панели инспектора: {exc}")
+
+            # Sidebar save/enable flags live outside this fragment.
             if session.consume_position_edit_rerun_request():
                 self.st_module.rerun()
 
-        with diagram_col:
-            render_canvas_fragment()
-        with side_col:
-            render_inspector_fragment()
+        render_workspace_fragment()
 
 
 def parse_layout_draft_xy(

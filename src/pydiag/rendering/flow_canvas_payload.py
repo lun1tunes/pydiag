@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from pydiag.domain.models import FlowGraphDocument, FlowNode, Well, WellsDocument
@@ -45,8 +45,26 @@ def build_flow_canvas_payload(
     layout_mode: str = "snake",
     domain_nodes_draggable: bool = False,
     revision: int | None = None,
+    snapshot: FlowRenderSnapshot | None = None,
+    snapshot_cache: MutableMapping[Any, Any] | None = None,
+    session_epoch: int | None = None,
 ) -> dict[str, Any]:
-    snapshot = build_flow_render_snapshot(graph, wells_doc, layout_mode)
+    cache_key = (
+        revision,
+        layout_mode,
+        graph.version,
+        wells_doc.version,
+        tuple((node.id, node.position.x, node.position.y) for node in graph.nodes),
+    )
+    if snapshot is None and snapshot_cache is not None:
+        cached = snapshot_cache.get(cache_key)
+        if isinstance(cached, FlowRenderSnapshot):
+            snapshot = cached
+    if snapshot is None:
+        snapshot = build_flow_render_snapshot(graph, wells_doc, layout_mode)
+        if snapshot_cache is not None:
+            snapshot_cache.clear()
+            snapshot_cache[cache_key] = snapshot
     nodes, active_node_ids = build_flow_canvas_nodes_from_snapshot(
         snapshot,
         search=search,
@@ -62,7 +80,7 @@ def build_flow_canvas_payload(
     )
 
     bounds = flow_canvas_bounds(nodes=nodes, edges=edges)
-    return {
+    payload = {
         "nodes": nodes,
         "edges": edges,
         "selected_id": selected_id,
@@ -75,6 +93,9 @@ def build_flow_canvas_payload(
         },
         "bounds": bounds,
     }
+    if session_epoch is not None:
+        payload["session_epoch"] = session_epoch
+    return payload
 
 
 def build_flow_canvas_nodes_from_snapshot(
@@ -329,7 +350,48 @@ def edge_route_points(
         else port_point(source, source_side)
     )
     end = port_point(target, target_side)
-    return [start, *(anchor.pos for anchor in route.anchors), end]
+    sx, sy = route.source_slot_offset
+    tx, ty = route.target_slot_offset
+    start = (start[0] + sx, start[1] + sy)
+    end = (end[0] + tx, end[1] + ty)
+    middle: list[tuple[float, float]] = []
+    for index, anchor in enumerate(route.anchors):
+        x, y = anchor.pos
+        if index == 0:
+            x += sx
+            y += sy
+        if index == len(route.anchors) - 1:
+            x += tx
+            y += ty
+        middle.append((x, y))
+    return ensure_orthogonal_polyline([start, *middle, end])
+
+
+def ensure_orthogonal_polyline(
+    points: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    if len(points) < 2:
+        return points
+    result: list[tuple[float, float]] = [points[0]]
+    for next_point in points[1:]:
+        previous = result[-1]
+        if previous == next_point:
+            continue
+        if previous[0] == next_point[0] or previous[1] == next_point[1]:
+            result.append(next_point)
+            continue
+        corner = (next_point[0], previous[1])
+        if corner != previous:
+            result.append(corner)
+        if corner != next_point:
+            result.append(next_point)
+    simplified: list[tuple[float, float]] = [result[0]]
+    for previous, current, nxt in zip(result[:-2], result[1:-1], result[2:], strict=True):
+        if (previous[0] == current[0] == nxt[0]) or (previous[1] == current[1] == nxt[1]):
+            continue
+        simplified.append(current)
+    simplified.append(result[-1])
+    return simplified
 
 
 def component_style(style: Mapping[str, Any], *, interactive: bool = False) -> dict[str, Any]:

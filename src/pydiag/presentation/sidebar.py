@@ -38,9 +38,7 @@ KIND_FILTER_LABELS = {
 @dataclass(frozen=True)
 class SidebarAuthenticatedUser:
     display_name: str
-    username_caption: str | None
-    show_admin_caption: bool
-    show_super_admin_caption: bool
+    rights_caption: str
 
 
 @dataclass(frozen=True)
@@ -156,12 +154,15 @@ def build_authenticated_user_state(
     is_super_admin: bool,
 ) -> SidebarAuthenticatedUser:
     display_name = str(user.get("display_name") or "Пользователь")
-    username = str(user.get("username") or "")
+    if is_super_admin:
+        rights = "Super Admin"
+    elif is_admin:
+        rights = "Админ"
+    else:
+        rights = "Пользователь"
     return SidebarAuthenticatedUser(
         display_name=display_name,
-        username_caption=f"Логин: {username}" if username and username != display_name else None,
-        show_admin_caption=is_admin,
-        show_super_admin_caption=is_super_admin,
+        rights_caption=f"Права: {rights}",
     )
 
 
@@ -257,12 +258,7 @@ def render_access_section(st_module, *, auth: SidebarAuthContext) -> None:
             is_super_admin=auth.current_user_is_super_admin(),
         )
         st_module.success(f"Пользователь: {user_state.display_name}")
-        if user_state.username_caption is not None:
-            st_module.caption(user_state.username_caption)
-        if user_state.show_admin_caption:
-            st_module.caption("Режим управления активен")
-        if user_state.show_super_admin_caption:
-            st_module.caption("Роль: super_admin")
+        st_module.caption(user_state.rights_caption)
         if st_module.button("Выйти", width="stretch"):
             auth.logout_user()
             st_module.rerun()

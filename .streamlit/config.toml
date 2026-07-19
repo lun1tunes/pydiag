@@ -1,4 +1,10 @@
 browser.gatherUsageStats = false
+
+[client]
+# Hide developer menu actions (Clear cache / Rerun) so the bare "C"/"R"
+# hotkeys cannot steal Ctrl+C / Ctrl+V clipboard shortcuts.
+toolbarMode = "viewer"
+
 [server]
 headless = true
 runOnSave = false

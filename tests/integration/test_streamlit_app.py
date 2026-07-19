@@ -150,7 +150,9 @@ def test_streamlit_admin_login_reveals_management_panel(
     login_as_admin(app)
 
     assert any("Пользователь: Иван Планировщик" in item.value for item in app.success)
-    assert any(item.value == "Режим управления активен" for item in app.caption)
+    assert any(item.value == "Права: Админ" for item in app.caption)
+    assert not any(item.value == "Режим управления активен" for item in app.caption)
+    assert not any(str(item.value).startswith("Логин:") for item in app.caption)
     assert {button.label for button in app.button} >= {
         "Продвинуть",
         "Откатить",

@@ -7,9 +7,11 @@ from pydiag.presentation.html_utils import safe_text
 
 __all__ = [
     "APP_CSS",
+    "CLIPBOARD_SHORTCUT_GUARD_HTML",
     "build_header_model",
     "build_legend_model",
     "inject_css",
+    "install_clipboard_shortcut_guard",
     "legend_html",
     "legend_type_icon",
     "render_header",
@@ -352,8 +354,47 @@ def build_legend_model(graph: FlowGraphDocument) -> LegendModel:
     )
 
 
+CLIPBOARD_SHORTCUT_GUARD_HTML = """
+<script>
+(() => {
+  const doc = window.parent.document;
+  if (doc.documentElement.dataset.pydiagClipboardGuard === "1") {
+    return;
+  }
+  doc.documentElement.dataset.pydiagClipboardGuard = "1";
+  // Streamlit binds bare "c"/"r" hotkeys and overwrites the library filter that
+  // would ignore Ctrl/Meta, so Ctrl+C outside inputs opens "Clear caches".
+  doc.addEventListener(
+    "keydown",
+    (event) => {
+      if (!(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      const key = String(event.key || "").toLowerCase();
+      if (key === "c" || key === "v" || key === "x" || key === "a") {
+        event.stopPropagation();
+      }
+    },
+    true,
+  );
+})();
+</script>
+"""
+
+
+def install_clipboard_shortcut_guard(st_module) -> None:
+    import streamlit.components.v1 as components
+
+    components.html(CLIPBOARD_SHORTCUT_GUARD_HTML, height=0, width=0)
+
+
 def inject_css(st_module) -> None:
     st_module.markdown(APP_CSS, unsafe_allow_html=True)
+    try:
+        st_module.set_option("client.toolbarMode", "viewer")
+    except Exception:
+        pass
+    install_clipboard_shortcut_guard(st_module)
 
 
 def render_legend(st_module, graph: FlowGraphDocument) -> None:

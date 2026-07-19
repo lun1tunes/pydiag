@@ -67,6 +67,73 @@ def test_build_edge_routes_for_geometries_reselects_ports_after_manual_move(docu
     assert len(route.anchors) >= 2
 
 
+def test_manual_layout_snapshot_builds_without_route_graph_blowup() -> None:
+    import time
+
+    from pydiag.infrastructure import JsonDocumentsGateway
+
+    graph, wells = JsonDocumentsGateway().load_documents()
+    started = time.perf_counter()
+    snapshot = build_flow_render_snapshot(graph, wells, "manual")
+    elapsed = time.perf_counter() - started
+
+    assert len(snapshot.routes) == len(graph.edges)
+    assert elapsed < 5.0
+
+
+def test_manual_real_document_routes_are_orthogonal_and_avoid_nodes() -> None:
+    from pydiag.infrastructure import JsonDocumentsGateway
+    from pydiag.rendering.flow_canvas_payload import edge_route_points
+    from pydiag.rendering.flow_route_lanes import ROUTE_OBSTACLE_MARGIN
+
+    graph, wells = JsonDocumentsGateway().load_documents()
+    snapshot = build_flow_render_snapshot(graph, wells, "manual")
+    geometries = snapshot.geometries
+    obstacles = {
+        node_id: node_rect(geometry, ROUTE_OBSTACLE_MARGIN)
+        for node_id, geometry in geometries.items()
+    }
+
+    for route in snapshot.routes:
+        if route.edge.source == route.edge.target:
+            continue
+        assert route.anchors, route.edge.id
+        points = edge_route_points(
+            route,
+            source=geometries[route.edge.source],
+            target=geometries[route.edge.target],
+            layout_mode="manual",
+        )
+        for start, end in zip(points[:-1], points[1:], strict=True):
+            assert start[0] == end[0] or start[1] == end[1], (route.edge.id, start, end)
+
+        segments = list(zip(points[:-1], points[1:], strict=True))
+        for node_id, rect in obstacles.items():
+            if node_id in {route.edge.source, route.edge.target}:
+                continue
+            for index, (start, end) in enumerate(segments):
+                if index in {0, len(segments) - 1}:
+                    continue
+                assert not line_intersects_rect(start, end, rect), (
+                    route.edge.id,
+                    node_id,
+                    start,
+                    end,
+                )
+
+
+def test_quick_orthogonal_route_rejects_diagonal_shortcuts() -> None:
+    from pydiag.rendering.flow_route_paths import quick_orthogonal_route
+
+    start = (0.0, 0.0)
+    end = (40.0, 30.0)
+    route = quick_orthogonal_route(start, end, ())
+    assert route is not None
+    assert len(route) >= 3
+    for first, second in zip(route[:-1], route[1:], strict=True):
+        assert first[0] == second[0] or first[1] == second[1]
+
+
 def test_orthogonal_route_for_edge_validates_against_obstacles_outside_bounded_window() -> None:
     source = NodeGeometry(id="s", index=0, x=0, y=0, width=100, height=60, row=0, visual_col=0)
     target = NodeGeometry(

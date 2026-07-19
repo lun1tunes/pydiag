@@ -64,6 +64,25 @@ def logout_user(session_state: MutableMapping[str, Any]) -> None:
     session_state.pop("authenticated_user", None)
     session_state["admin_authenticated"] = False
     clear_persistent_auth_session(session_state)
+    clear_workspace_ui_state(session_state)
+
+
+def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
+    """Drop selection/draft/canvas caches so the next login cannot inherit UI state."""
+    for key in (
+        "selected_id",
+        "position_edit_positions",
+        "position_edit_dirty",
+        "well_drilling_flow_canvas",
+        "_layout_draft_error",
+        "_position_edit_rerun_requested",
+        "_flow_selection_rerun_requested",
+        "_flow_render_snapshot_cache",
+    ):
+        session_state.pop(key, None)
+    session_state["_flow_canvas_session_epoch"] = (
+        int(session_state.get("_flow_canvas_session_epoch", 0) or 0) + 1
+    )
 
 
 def set_persistent_auth_session(

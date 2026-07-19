@@ -13,6 +13,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# Keep developer hotkeys ("C" clear-cache, "R" rerun) out of the way of clipboard shortcuts.
+st.set_option("client.toolbarMode", "viewer")
 
 
 def runtime() -> StreamlitAppRuntime:

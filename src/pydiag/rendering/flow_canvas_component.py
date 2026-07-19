@@ -20,36 +20,17 @@ def render_flow_canvas(
     key: str,
     default_selected_id: str | None,
     default_positions: dict[str, dict[str, float]],
-    persisted_view_state: dict[str, float | bool] | None = None,
 ) -> Any:
-    component_payload = dict(payload)
-    component_payload["persisted_view_state"] = persisted_view_state
     return flow_canvas_component()(
         key=key,
-        data=component_payload,
+        data=payload,
         default={
             "selected_id": default_selected_id,
             "positions": default_positions,
-            "view": (
-                {
-                    "x": float(persisted_view_state["x"]),
-                    "y": float(persisted_view_state["y"]),
-                    "scale": float(persisted_view_state["scale"]),
-                }
-                if persisted_view_state is not None
-                else None
-            ),
-            "user_moved_view": (
-                bool(persisted_view_state.get("user_moved_view"))
-                if persisted_view_state is not None
-                else False
-            ),
         },
         height="content",
         on_selected_id_change=lambda: None,
         on_positions_change=lambda: None,
-        on_view_change=lambda: None,
-        on_user_moved_view_change=lambda: None,
     )
 
 

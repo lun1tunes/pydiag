@@ -42,7 +42,7 @@ def test_render_flow_prefers_component_state_selection(documents) -> None:
 
     assert selected_id == "e_review_decision"
     assert session_state["selected_id"] == "e_review_decision"
-    assert session_state[FLOW_SELECTION_RERUN_REQUEST_KEY] is True
+    assert FLOW_SELECTION_RERUN_REQUEST_KEY not in session_state
 
 
 def test_render_flow_allows_component_state_to_clear_selection(documents) -> None:
@@ -69,7 +69,7 @@ def test_render_flow_allows_component_state_to_clear_selection(documents) -> Non
 
     assert selected_id is None
     assert session_state["selected_id"] is None
-    assert session_state[FLOW_SELECTION_RERUN_REQUEST_KEY] is True
+    assert FLOW_SELECTION_RERUN_REQUEST_KEY not in session_state
 
 
 def test_render_flow_switches_to_manual_layout_in_position_edit_mode(documents) -> None:
@@ -101,7 +101,7 @@ def test_render_flow_switches_to_manual_layout_in_position_edit_mode(documents) 
     assert len(captured["default_positions"]) == len(graph.nodes)
 
 
-def test_render_flow_passes_persisted_view_state_back_to_canvas(documents) -> None:
+def test_render_flow_does_not_pass_persisted_view_state_to_canvas(documents) -> None:
     graph, wells = documents
     session_state = FakeSessionState(
         {
@@ -115,7 +115,7 @@ def test_render_flow_passes_persisted_view_state_back_to_canvas(documents) -> No
 
     def fake_render_canvas(payload, **kwargs):
         captured["payload"] = payload
-        captured["persisted_view_state"] = kwargs["persisted_view_state"]
+        captured["kwargs"] = kwargs
         return {}
 
     render_flow(
@@ -132,12 +132,8 @@ def test_render_flow_passes_persisted_view_state_back_to_canvas(documents) -> No
     )
 
     assert captured["payload"] is not None
-    assert captured["persisted_view_state"] == {
-        "x": 140.1257,
-        "y": -88.3334,
-        "scale": 0.9423,
-        "user_moved_view": True,
-    }
+    assert "persisted_view_state" not in captured["kwargs"]
+    assert "persisted_view_state" not in captured["payload"]
 
 
 def test_render_flow_does_not_request_rerun_when_selection_is_unchanged(documents) -> None:
