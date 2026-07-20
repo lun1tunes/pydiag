@@ -173,7 +173,6 @@ FLOW_NODE_CSS = """
 .react-flow__node-flow-node:hover,
 .react-flow__node-flow-node-process:hover,
 .react-flow__node-flow-node-decision-diamond:hover,
-.react-flow__node-flow-node-decision-card:hover,
 .react-flow__node-flow-node-database:hover,
 .react-flow__node-flow-node-input-data:hover,
 .react-flow__node-flow-node-event:hover,
@@ -229,7 +228,7 @@ def node_content(node: FlowNode, graph: FlowGraphDocument, wells_here: list[Well
 
 
 def _uses_responsible_card_content(node: FlowNode) -> bool:
-    return node.kind in {"process", "decision_diamond", "decision_card"} and bool(node.responsible)
+    return node.kind in {"process", "decision_diamond"} and bool(node.responsible)
 
 
 def _responsible_node_content(node: FlowNode) -> str:

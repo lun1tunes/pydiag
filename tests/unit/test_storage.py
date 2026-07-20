@@ -325,7 +325,35 @@ def test_env_paths_are_resolved_at_runtime(data_paths, monkeypatch) -> None:
     assert len(wells.wells) == 1
 
 
-def test_load_documents_bootstraps_empty_wells_yaml_from_raw_export(
+def test_load_documents_returns_empty_runtime_when_only_raw_figma_exists(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Raw Figma JSON is import-only; runtime must not treat it as a live schema."""
+    import pydiag.infrastructure.storage_paths as storage_paths
+
+    raw_file = tmp_path / "real_true_data.json"
+    graph_file = tmp_path / "flow_graph.json"
+    wells_file = tmp_path / "wells.yaml"
+    source_dir = tmp_path / "flow_sources"
+    source_dir.mkdir()
+    raw_file.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", source_dir / "flow_source.yaml")
+    monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_file))
+    monkeypatch.setenv("PYDIAG_RAW_GRAPH_PATH", str(raw_file))
+    monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_file))
+    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(source_dir / "flow_source.yaml"))
+
+    graph, wells = load_documents()
+
+    assert graph.nodes == []
+    assert wells.wells == []
+    assert wells_file.exists() is False
+    assert preferred_graph_source_path() == raw_file
+    assert can_import_raw_graph_source() is True
+
+
+def test_load_documents_bootstraps_empty_wells_yaml_after_live_import(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -334,16 +362,20 @@ def test_load_documents_bootstraps_empty_wells_yaml_from_raw_export(
     raw_file = tmp_path / "real_true_data.json"
     graph_file = tmp_path / "flow_graph.json"
     wells_file = tmp_path / "wells.yaml"
+    live_source = tmp_path / "flow_source.yaml"
     raw_file.write_text(json.dumps(raw_figma_payload()), encoding="utf-8")
-    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", tmp_path / "flow_source.yaml")
+    monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", live_source)
     monkeypatch.setenv("PYDIAG_GRAPH_PATH", str(graph_file))
     monkeypatch.setenv("PYDIAG_RAW_GRAPH_PATH", str(raw_file))
     monkeypatch.setenv("PYDIAG_WELLS_PATH", str(wells_file))
-    monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
+    monkeypatch.setenv("PYDIAG_SOURCE_GRAPH_PATH", str(live_source))
 
+    result = import_live_graph_source_from_raw()
     graph, wells = load_documents()
     template = wells_file.read_text(encoding="utf-8")
 
+    assert result.changed is True
+    assert live_source.exists() is True
     assert graph.version == 3
     assert [node.id for node in graph.nodes] == ["start", "end"]
     assert wells.version == 1
@@ -445,7 +477,7 @@ def test_materialize_new_graph_version_from_live_source_writes_versioned_yaml(
     payload = load_structured_payload(version.path.read_bytes())
 
     assert version.id == "flow_source.v0001.yaml"
-    assert version.label == "flow_source.v0001.yaml"
+    assert version.label == "v0001"
     assert payload["schema_version"] == "flow-source/1.0"
     assert payload["graph_id"] == "pilot-drilling"
     assert payload["nodes"]["review_data"]["title"] == "Проверка комплекта данных"
@@ -471,6 +503,7 @@ def test_materialize_new_graph_version_from_raw_source_writes_versioned_yaml(
     payload = load_structured_payload(version.path.read_bytes())
 
     assert version.id == "flow_source.v0001.yaml"
+    assert version.label == "v0001"
     assert payload["schema_version"] == "flow-source/1.0"
     assert payload["version"] == 3
     assert payload["nodes"]["start"]["title"] == "Start"
@@ -670,7 +703,6 @@ def test_load_graph_doc_reads_default_graph_directly_from_yaml_source(
 
     monkeypatch.setattr(storage_paths, "GRAPH_PATH", flow_graph)
     monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", source)
-    monkeypatch.setattr(storage_loading, "GRAPH_PATH", flow_graph)
     monkeypatch.delenv("PYDIAG_GRAPH_PATH", raising=False)
     monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
     monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
@@ -698,7 +730,6 @@ def test_load_graph_doc_uses_existing_materialized_graph_when_no_source_availabl
     monkeypatch.setattr(storage_paths, "GRAPH_PATH", flow_graph)
     monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", missing_source)
     monkeypatch.setattr(storage_paths, "RAW_GRAPH_PATH", missing_raw)
-    monkeypatch.setattr(storage_loading, "GRAPH_PATH", flow_graph)
     monkeypatch.delenv("PYDIAG_GRAPH_PATH", raising=False)
     monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
     monkeypatch.delenv("PYDIAG_RAW_GRAPH_PATH", raising=False)
@@ -726,7 +757,6 @@ def test_load_graph_doc_prefers_live_source_over_existing_materialized_graph(
 
     monkeypatch.setattr(storage_paths, "GRAPH_PATH", flow_graph)
     monkeypatch.setattr(storage_paths, "SOURCE_GRAPH_PATH", source)
-    monkeypatch.setattr(storage_loading, "GRAPH_PATH", flow_graph)
     monkeypatch.delenv("PYDIAG_GRAPH_PATH", raising=False)
     monkeypatch.delenv("PYDIAG_SOURCE_GRAPH_PATH", raising=False)
 
@@ -913,6 +943,7 @@ def test_import_live_graph_source_from_raw_creates_backup_before_replacing_live_
     assert result.changed is True
     assert result.backup_version is not None
     assert result.backup_version.path == backup_path
+    assert result.backup_version.label == "v0001"
     assert backup_payload["nodes"]["review_data"]["title"] == "Проверка комплекта данных"
     assert live_payload["nodes"]["start"]["title"] == "Start"
     assert live_payload["version"] == 8

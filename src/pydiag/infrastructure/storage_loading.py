@@ -5,7 +5,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from pydiag.domain.models import FlowGraphDocument, WellsDocument, validate_wells_against_graph
+from pydiag.domain.models import (
+    FlowGraphDocument,
+    ResponsibleStyle,
+    WellsDocument,
+    validate_wells_against_graph,
+)
 
 from .editable_flow_graph import (
     EditableFlowGraphDocument,
@@ -25,17 +30,23 @@ from .storage_materialization import (
     ensure_wells_doc_exists as ensure_wells_doc_bootstrap,
 )
 from .storage_paths import (
-    GRAPH_PATH,
-    configured_graph_path,
-    preferred_graph_source_path,
+    existing_default_graph_path,
     wells_path,
 )
 
 __all__ = [
+    "empty_runtime_documents",
     "load_documents",
     "load_graph_doc",
     "load_wells_doc",
 ]
+
+_EMPTY_RESPONSIBLE = ResponsibleStyle(
+    label="Не назначено",
+    fill="#eef2f6",
+    border="#94a3b8",
+    text="#172033",
+)
 
 
 def load_graph_doc(path: str | Path | None = None) -> FlowGraphDocument:
@@ -74,10 +85,29 @@ def load_wells_doc(path: str | Path | None = None) -> WellsDocument:
         )
 
 
+def empty_runtime_documents() -> tuple[FlowGraphDocument, WellsDocument]:
+    """Placeholder documents when no live/archived schema is available yet."""
+    graph = FlowGraphDocument(
+        version=1,
+        responsibles={"unassigned": _EMPTY_RESPONSIBLE},
+        nodes=[],
+        edges=[],
+    )
+    wells = WellsDocument(version=1, wells=[])
+    return graph, wells
+
+
 def load_documents(
     graph_doc_path: str | Path | None = None,
     wells_doc_path: str | Path | None = None,
 ) -> tuple[FlowGraphDocument, WellsDocument]:
+    if graph_doc_path is None:
+        try:
+            graph_doc_path = resolve_graph_read_path(None)
+        except FileNotFoundError:
+            # Raw-only / empty workspaces stay file-free until a schema exists.
+            return empty_runtime_documents()
+
     graph = load_graph_doc(graph_doc_path)
     wells = load_wells_doc(wells_doc_path)
     validate_wells_against_graph(graph, wells)
@@ -86,15 +116,12 @@ def load_documents(
 
 def resolve_graph_read_path(path: str | Path | None) -> Path:
     if path is not None:
-        return Path(path)
+        resolved = Path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"Graph source not found: {resolved}")
+        return resolved
 
-    source = preferred_graph_source_path()
-    if source is not None:
-        return source
-
-    configured = configured_graph_path()
-    if configured is not None:
-        return configured
-    if GRAPH_PATH.exists():
-        return GRAPH_PATH
-    return GRAPH_PATH
+    found = existing_default_graph_path()
+    if found is None:
+        raise FileNotFoundError("No graph source available")
+    return found

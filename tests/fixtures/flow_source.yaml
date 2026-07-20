@@ -103,7 +103,7 @@ nodes:
         id: "e_data_no"
   card_data_rework:
     title: "Запросить недостающие данные"
-    kind: "decision_card"
+    kind: "process"
     responsible: "planning"
     participants:
       - "geology"
@@ -218,7 +218,7 @@ nodes:
         id: "e_issue_no"
   card_mitigation:
     title: "План ликвидации осложнения"
-    kind: "decision_card"
+    kind: "process"
     responsible: "drilling"
     participants:
       - "hse"

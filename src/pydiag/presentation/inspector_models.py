@@ -87,7 +87,6 @@ def build_node_inspector_model(
     transitions_rows = [
         {
             "тип": edge.kind,
-            "метка": edge.label or "",
             "куда": nodes[edge.target].text,
         }
         for edge in outgoing_edges(graph, node.id)

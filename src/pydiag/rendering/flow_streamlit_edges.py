@@ -80,7 +80,7 @@ def route_to_streamlit_edges(
                 focusable=False,
                 style=edge_style(edge, opacity, is_route_segment=bool(route.anchors)),
                 pathOptions={
-                    "borderRadius": 18,
+                    "borderRadius": 14,
                     "offset": 22 if route.anchors else 14,
                 },
                 data={"domainEdgeId": edge.id},

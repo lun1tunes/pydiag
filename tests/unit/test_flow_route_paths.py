@@ -46,7 +46,9 @@ def test_build_edge_routes_for_geometries_keeps_branch_anchor_and_routed_segment
 
     assert route_by_edge_id["e_data_yes"].source_anchor is not None
     assert route_by_edge_id["e_data_yes"].source_anchor.id == "route-anchor::e_data_yes::source"
-    assert len(route_by_edge_id["e_data_yes"].anchors) >= 2
+    # Prefer a short clear route; intermediate elbows are optional.
+    assert route_by_edge_id["e_data_yes"].source_side in {"bottom", "right", "left"}
+    assert route_by_edge_id["e_data_yes"].target_side in {"top", "left", "right"}
     assert route_by_edge_id["e_review_decision"].anchors == ()
 
 
@@ -132,6 +134,30 @@ def test_quick_orthogonal_route_rejects_diagonal_shortcuts() -> None:
     assert len(route) >= 3
     for first, second in zip(route[:-1], route[1:], strict=True):
         assert first[0] == second[0] or first[1] == second[1]
+
+
+def test_quick_orthogonal_route_prefers_single_bend_over_z_detour() -> None:
+    from pydiag.rendering.flow_route_paths import quick_orthogonal_route
+
+    start = (0.0, 0.0)
+    end = (80.0, 60.0)
+    route = quick_orthogonal_route(start, end, ())
+    assert route is not None
+    # One elbow (3 points), not a mid-lane Z (4 points).
+    assert len(route) == 3
+
+
+def test_quick_orthogonal_route_keeps_long_approach_for_near_vertical_misalignment() -> None:
+    from pydiag.rendering.flow_route_paths import quick_orthogonal_route
+
+    start = (100.0, 0.0)
+    end = (112.0, 140.0)
+    route = quick_orthogonal_route(start, end, ())
+    assert route is not None
+    # Bend near the source (or mid-gap), never a tiny horizontal stub into the target.
+    last_leg = abs(route[-1][0] - route[-2][0]) + abs(route[-1][1] - route[-2][1])
+    assert last_leg >= 40
+    assert route[-2] != (100.0, 140.0)
 
 
 def test_orthogonal_route_for_edge_validates_against_obstacles_outside_bounded_window() -> None:

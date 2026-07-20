@@ -188,7 +188,6 @@ def editable_flow_graph_payload_from_figma_payload(payload: object) -> dict[str,
         if node.visible
     ]
     edges = normalize_imported_edges(raw_edges)
-    drafts = apply_decision_card_kinds(drafts, edges)
     drafts = ensure_required_node_responsibles(drafts)
     responsibles = build_responsibles_payload(payload, drafts, responsible_labels)
 
@@ -226,7 +225,6 @@ def normalize_editable_flow_graph_payload(payload: object) -> object:
         if node.visible
     ]
     edges = raw_edges
-    drafts = apply_decision_card_kinds(drafts, edges)
     drafts = ensure_required_node_responsibles(drafts)
     for raw_item, draft in zip((item for item, _ in text_items), drafts, strict=True):
         raw_item["editableNode"] = {
@@ -380,42 +378,6 @@ def infer_labels_from_draft(draft: NodeDraft) -> dict[str, str]:
     return labels
 
 
-def apply_decision_card_kinds(
-    drafts: list[NodeDraft],
-    edges: list[dict[str, Any]],
-) -> list[NodeDraft]:
-    incoming_kinds: dict[str, set[str]] = defaultdict(set)
-    for edge in edges:
-        incoming_kinds[str(edge["target"])].add(str(edge["kind"]))
-
-    result: list[NodeDraft] = []
-    for draft in drafts:
-        if (
-            draft.kind == "process"
-            and incoming_kinds.get(draft.id, set()) & {"yes", "no"}
-            and not DATABASE_PREFIX_RE.search(draft.title)
-            and not INPUT_PREFIX_RE.search(draft.title)
-            and not EVENT_PREFIX_RE.search(draft.title)
-        ):
-            result.append(
-                NodeDraft(
-                    id=draft.id,
-                    kind="decision_card",
-                    title=draft.title,
-                    position=draft.position,
-                    size=draft.size,
-                    responsible=draft.responsible,
-                    participants=draft.participants,
-                    approvers=draft.approvers,
-                    duration=draft.duration,
-                    metadata=draft.metadata,
-                )
-            )
-            continue
-        result.append(draft)
-    return result
-
-
 def draft_to_payload(draft: NodeDraft) -> dict[str, Any]:
     return {
         "id": draft.id,
@@ -491,7 +453,7 @@ def build_responsibles_payload(
 
 
 def ensure_required_node_responsibles(drafts: list[NodeDraft]) -> list[NodeDraft]:
-    required_kinds = {"process", "decision_diamond", "decision_card"}
+    required_kinds = {"process", "decision_diamond"}
     return [
         NodeDraft(
             id=draft.id,
@@ -637,10 +599,11 @@ def infer_node_kind(
     *,
     explicit_kind: str | None,
 ) -> EditableNodeKind:
+    if explicit_kind == "decision_card":
+        return "process"
     if explicit_kind in {
         "process",
         "decision_diamond",
-        "decision_card",
         "database",
         "input_data",
         "event",

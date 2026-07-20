@@ -29,14 +29,143 @@
   border-radius: 0;
 }
 
-.flow-canvas-toolbar {
+.flow-canvas-topbar {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: 12px;
+  left: 12px;
+  right: 12px;
   z-index: 8;
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.flow-canvas-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: calc(100% - 168px);
+  max-height: 96px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.flow-canvas-legend__item {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid rgba(100, 116, 139, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.flow-canvas-legend__item.is-filter-active,
+.flow-canvas-legend__item.is-highlighted {
+  border-color: rgba(var(--flow-accent-rgb), 0.72);
+  background: rgba(255, 255, 255, 1);
+  box-shadow:
+    0 0 0 2px var(--flow-accent-soft),
+    0 12px 28px rgba(15, 23, 42, 0.14);
+}
+
+.flow-canvas-legend.has-filter .flow-canvas-legend__item:not(.is-filter-active),
+.flow-canvas-legend.has-highlight .flow-canvas-legend__item:not(.is-highlighted) {
+  opacity: 0.55;
+}
+
+.flow-node-shell.is-filter-dimmed,
+.flow-canvas-minimap__node.is-filter-dimmed {
+  opacity: 0.28;
+}
+
+.flow-edge-label.is-filter-dimmed {
+  opacity: 0.24;
+}
+
+.flow-canvas-legend__swatch {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.flow-canvas-legend__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-canvas-legend__clear {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+  color: #334155;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.flow-canvas-legend__clear[hidden] {
+  display: none !important;
+}
+
+.flow-canvas-legend__clear:hover {
+  border-color: rgba(var(--flow-accent-rgb), 0.55);
+  color: rgb(var(--flow-accent-rgb));
+  background: #fff;
+}
+
+.flow-canvas-legend__clear svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.flow-canvas-toolbar {
+  position: relative;
+  z-index: 8;
+  display: flex;
+  flex: 0 0 auto;
   gap: 8px;
   align-items: center;
+  pointer-events: auto;
+  margin-left: auto;
 }
 
 .flow-canvas-toolbar__button {
@@ -52,6 +181,21 @@
   font-weight: 700;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
   cursor: pointer;
+}
+
+.flow-canvas-toolbar__button--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+}
+
+.flow-canvas-toolbar__icon {
+  width: 18px;
+  height: 18px;
+  display: block;
 }
 
 .flow-canvas-toolbar__button:hover {
@@ -90,13 +234,13 @@
 
 .flow-canvas-minimap {
   position: absolute;
-  right: 18px;
-  bottom: 18px;
+  right: 14px;
+  bottom: 14px;
   z-index: 9;
-  width: 204px;
-  height: 148px;
-  padding: 10px;
-  border-radius: 18px;
+  width: 108px;
+  height: 118px;
+  padding: 7px;
+  border-radius: 14px;
   border: 1px solid rgba(100, 116, 139, 0.24);
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
@@ -130,8 +274,7 @@
   stroke-width: 4;
 }
 
-.flow-canvas-minimap__node.is-process,
-.flow-canvas-minimap__node.is-decision-card {
+.flow-canvas-minimap__node.is-process {
   fill: rgba(20, 184, 166, 0.16);
 }
 
@@ -322,11 +465,17 @@
   align-items: center;
   justify-content: center;
   text-align: inherit;
-  font-weight: 760;
-  line-height: 1.24;
+  font-size: inherit;
+  font-weight: 700;
+  line-height: inherit;
   overflow-wrap: anywhere;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Keep diamond labels inside the inscribed band, not the bounding box. */
+.flow-node-card.is-decision-diamond .flow-node-text {
+  max-width: 72%;
 }
 
 .flow-node-top-rail {
@@ -389,11 +538,11 @@
   }
 
   .flow-canvas-minimap {
-    right: 12px;
-    bottom: 12px;
-    width: 144px;
-    height: 112px;
-    padding: 8px;
+    right: 10px;
+    bottom: 10px;
+    width: 96px;
+    height: 100px;
+    padding: 6px;
   }
 
 }

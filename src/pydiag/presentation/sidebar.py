@@ -20,14 +20,13 @@ LIVE_GRAPH_OPTION = "__live__"
 SOURCE_LAYOUT_MODE = "manual"
 DATA_CONTROLS_TITLE = "### Схема и данные"
 GRAPH_VERSION_LABEL = "Версия схемы"
-LIVE_GRAPH_LABEL = "Текущая схема"
+LIVE_GRAPH_LABEL = "Текущая"
 REFRESH_DATA_BUTTON_LABEL = "Обновить данные"
 CREATE_VERSION_BUTTON_LABEL = "Создать версию"
-IMPORT_ACTUAL_DATA_BUTTON_LABEL = "Импортировать факт"
+IMPORT_ACTUAL_DATA_BUTTON_LABEL = "Импорт json figma"
 KIND_FILTER_LABELS = {
     "process": "Процесс",
-    "decision_diamond": "Решение (ромб)",
-    "decision_card": "Решение (карточка)",
+    "decision_diamond": "Решение",
     "database": "База данных",
     "input_data": "Входные данные",
     "event": "Событие",
@@ -79,6 +78,7 @@ class SidebarActions:
     save_positions_enabled: bool
     graph_versions: list[GraphVersionInfo]
     selected_graph_version_id: str | None
+    live_graph_available: bool
     layout_editable: bool
     layout_edit_block_reason: str | None
 
@@ -111,18 +111,13 @@ def render_sidebar(
             auth=auth,
             versions=actions.graph_versions,
             selected_version_id=actions.selected_graph_version_id,
+            live_available=actions.live_graph_available,
             select_graph_version=actions.select_graph_version,
             materialize_graph_version=actions.materialize_graph_version,
             reload_data=actions.reload_data,
             can_materialize=auth.current_user_is_admin() and actions.can_materialize_graph_version,
             import_live_graph_source_from_raw=actions.import_live_graph_source_from_raw,
             can_import_raw_graph_source=actions.can_import_raw_graph_source,
-        )
-
-        st_module.divider()
-        search, responsible_filter, kind_filter = render_filter_section(
-            st_module,
-            graph,
         )
 
         position_edit_enabled = render_layout_section(
@@ -133,6 +128,12 @@ def render_sidebar(
             reset_positions=actions.reset_positions,
             layout_editable=actions.layout_editable,
             layout_edit_block_reason=actions.layout_edit_block_reason,
+        )
+
+        st_module.divider()
+        search, responsible_filter, kind_filter = render_filter_section(
+            st_module,
+            graph,
         )
 
         st_module.divider()
@@ -203,6 +204,7 @@ def render_data_controls_section(
     auth: SidebarAuthContext,
     versions: list[GraphVersionInfo],
     selected_version_id: str | None,
+    live_available: bool,
     select_graph_version: Callable[[str | None], None],
     materialize_graph_version: Callable[[], None],
     reload_data: Callable[[], None],
@@ -215,14 +217,23 @@ def render_data_controls_section(
     )
     st_module.markdown(DATA_CONTROLS_TITLE)
 
-    if versions:
-        options = [LIVE_GRAPH_OPTION, *(version.id for version in versions)]
-        labels = {
-            LIVE_GRAPH_OPTION: LIVE_GRAPH_LABEL,
-            **{version.id: version.label for version in versions},
-        }
-        selected_option = selected_version_id or LIVE_GRAPH_OPTION
-        index = options.index(selected_option) if selected_option in options else 0
+    if not live_available and not versions:
+        st_module.caption("Схема ещё не загружена. Импортируйте json figma.")
+    elif versions or live_available:
+        options: list[str] = []
+        labels: dict[str, str] = {}
+        if live_available:
+            options.append(LIVE_GRAPH_OPTION)
+            labels[LIVE_GRAPH_OPTION] = LIVE_GRAPH_LABEL
+        options.extend(version.id for version in versions)
+        labels.update({version.id: version.label for version in versions})
+        if selected_version_id and selected_version_id in options:
+            selected_option = selected_version_id
+        elif live_available:
+            selected_option = LIVE_GRAPH_OPTION
+        else:
+            selected_option = options[0]
+        index = options.index(selected_option)
         selected = st_module.selectbox(
             GRAPH_VERSION_LABEL,
             options=options,
@@ -302,6 +313,8 @@ def render_filter_section(
         "Ответственные",
         options=list(graph.responsibles.keys()),
         format_func=lambda key: graph.responsibles[key].label,
+        # Distinct from canvas component state field "responsible_filter".
+        key="sidebar_responsible_filter",
     )
     kind_filter = st_module.multiselect(
         "Тип узла",
@@ -335,6 +348,8 @@ def render_layout_section(
 
     st_module.divider()
     st_module.markdown("### Положение")
+    if not position_edit_state.editable and layout_edit_block_reason:
+        st_module.caption(layout_edit_block_reason)
     position_edit_enabled = st_module.toggle(
         "Редактировать положение",
         key="position_edit_enabled",

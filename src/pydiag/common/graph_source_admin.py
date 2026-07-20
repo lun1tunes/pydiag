@@ -6,7 +6,6 @@ from typing import Literal
 GraphSourceNodeKind = Literal[
     "process",
     "decision_diamond",
-    "decision_card",
     "database",
     "input_data",
     "event",
@@ -76,3 +75,4 @@ class UpdateGraphSourceEdgeCommand:
     label: str | None
     condition: str | None
     note: str | None
+    deleted: bool | None = None

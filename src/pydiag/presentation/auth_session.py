@@ -71,15 +71,24 @@ def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
     """Drop selection/draft/canvas caches so the next login cannot inherit UI state."""
     for key in (
         "selected_id",
+        "responsible_filter",
+        "sidebar_responsible_filter",
+        "_responsible_filter_last",
         "position_edit_positions",
         "position_edit_dirty",
         "well_drilling_flow_canvas",
-        "_layout_draft_error",
+        "_card_layout_sync_token",
         "_position_edit_rerun_requested",
         "_flow_selection_rerun_requested",
+        "_flow_responsible_filter_rerun_requested",
         "_flow_render_snapshot_cache",
     ):
         session_state.pop(key, None)
+    for key in list(session_state):
+        if isinstance(key, str) and (
+            key.startswith("graph_source_node_") or key.startswith("graph_source_edge_")
+        ):
+            session_state.pop(key, None)
     session_state["_flow_canvas_session_epoch"] = (
         int(session_state.get("_flow_canvas_session_epoch", 0) or 0) + 1
     )

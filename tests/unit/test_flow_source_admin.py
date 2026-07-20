@@ -95,6 +95,33 @@ def test_graph_source_edge_draft_and_update_can_move_transition() -> None:
     assert moved["id"] == "e_review_decision"
 
 
+def test_graph_source_edge_update_can_delete_transition() -> None:
+    payload = load_fixture_payload()
+    before = graph_source_edge_draft_from_payload(payload, "e_review_decision")
+
+    updated = update_flow_source_payload_edge(
+        payload,
+        command=UpdateGraphSourceEdgeCommand(
+            edge_id="e_review_decision",
+            source=before.source,
+            target=before.target,
+            kind=before.kind,
+            label=before.label,
+            condition=before.condition,
+            note=before.note,
+            deleted=True,
+        ),
+        expected_version=1,
+    )
+
+    assert updated["version"] == 2
+    transition_ids = [
+        item.get("id")
+        for item in updated["nodes"]["proc_initial_review"].get("transitions", [])
+    ]
+    assert "e_review_decision" not in transition_ids
+
+
 def test_graph_source_custom_layout_update_keeps_source_layout_intact() -> None:
     payload = load_fixture_payload()
 

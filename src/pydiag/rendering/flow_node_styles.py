@@ -47,9 +47,9 @@ def node_style(
         "width": f"{node_width}px",
         "height": f"{node_height}px",
         "boxSizing": "border-box",
-        "padding": "10px 14px",
-        "fontSize": "12px",
-        "lineHeight": "1.22",
+        "padding": "8px 12px",
+        "fontSize": "14px",
+        "lineHeight": "1.28",
         "fontFamily": "Inter, system-ui, sans-serif",
         "textAlign": "center",
         "wordBreak": "break-word",
@@ -82,24 +82,15 @@ def node_style(
                 "backgroundRepeat": "no-repeat",
                 "backgroundSize": "100% 100%",
                 "border": "0",
-                "padding": "24px 52px",
+                # Extra side inset: multi-line labels sit above/below the equator
+                # where the diamond is already tapering inward.
+                "padding": "20px 56px",
                 "display": "flex",
                 "alignItems": "center",
                 "justifyContent": "center",
                 "textAlign": "center",
                 "color": responsible.text,
                 "filter": "drop-shadow(0 12px 18px rgba(51, 65, 85, 0.12))",
-            }
-        )
-    elif node.kind == "decision_card":
-        responsible = primary_responsible_style(node, graph)
-        style.update(
-            {
-                "backgroundColor": responsible.fill,
-                "border": f"2px solid {responsible.border}",
-                "borderRadius": "22px",
-                "color": responsible.text,
-                "boxShadow": "0 12px 24px rgba(15, 23, 42, 0.10)",
             }
         )
     elif node.kind == "database":
@@ -112,9 +103,9 @@ def node_style(
                 "backgroundSize": "100% 100%",
                 "border": "0",
                 "borderRadius": "0",
-                "padding": "38px 40px",
-                "fontSize": "11.5px",
-                "lineHeight": "1.2",
+                "padding": "28px 32px",
+                "fontSize": "13.5px",
+                "lineHeight": "1.25",
                 "textAlign": "center",
                 "color": "#111827",
                 "filter": "drop-shadow(0 12px 18px rgba(15, 23, 42, 0.13))",
@@ -129,7 +120,7 @@ def node_style(
                 "backgroundRepeat": "no-repeat",
                 "backgroundSize": "100% 100%",
                 "border": "0",
-                "padding": "16px 48px",
+                "padding": "12px 36px",
                 "color": "#183557",
                 "filter": "drop-shadow(0 12px 18px rgba(30, 64, 175, 0.10))",
             }
@@ -140,7 +131,7 @@ def node_style(
                 "backgroundColor": "#ffffff",
                 "border": "2px solid #111827",
                 "borderRadius": "32px",
-                "padding": "12px 28px",
+                "padding": "10px 22px",
                 "color": "#111827",
                 "boxShadow": "0 12px 22px rgba(15, 23, 42, 0.10)",
             }

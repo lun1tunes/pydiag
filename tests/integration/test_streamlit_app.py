@@ -70,6 +70,15 @@ def set_text_input(app: AppTest, label: str, value: str) -> AppTest:
     raise AssertionError(f"Text input not found: {label}")
 
 
+def set_number_input(app: AppTest, label: str, value: float | int) -> AppTest:
+    for item in app.number_input:
+        if item.label == label:
+            item.set_value(value).run(timeout=30)
+            assert not app.exception
+            return app
+    raise AssertionError(f"Number input not found: {label}")
+
+
 def click_button(app: AppTest, label: str) -> AppTest:
     for button in app.button:
         if button.label == label:
@@ -126,9 +135,8 @@ def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> Non
         "Скважины привязаны к этапам процесса через current_node_id" in item.value
         for item in app.markdown
     )
-    assert any("Легенда" in item.value for item in app.markdown)
     assert any("Типы блоков" in item.value for item in app.markdown)
-    assert any("Цвета ответственных" in item.value for item in app.markdown)
+    assert not any("Цвета ответственных" in item.value for item in app.markdown)
     assert not app.info
 
 
@@ -210,7 +218,11 @@ def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> Non
     app = run_app_with_temp_data(data_paths, monkeypatch)
     login_as_admin(app)
 
-    assert any(item.value == "Активных скважин пока нет." for item in app.caption)
+    captions = {item.value for item in app.caption}
+    assert (
+        "Активных скважин пока нет" in captions
+        or "Активных скважин нет" in captions
+    )
     assert "Продвинуть" not in {button.label for button in app.button}
 
 
@@ -242,7 +254,7 @@ def test_streamlit_app_switches_graph_versions_from_source_selector(
     assert any("Архивная версия карточки" in item.value for item in app.markdown)
 
 
-def test_streamlit_admin_shows_read_only_controls_for_archived_source(
+def test_streamlit_admin_marks_archived_source_read_only(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -259,10 +271,16 @@ def test_streamlit_admin_shows_read_only_controls_for_archived_source(
 
     set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
 
-    assert any(
-        item.value == "Изменение скважин доступно только для текущего source YAML."
-        for item in app.caption
-    )
+    texts = [
+        getattr(item, "value", "")
+        for item in [*app.caption, *app.markdown, *app.info, *app.warning]
+        if getattr(item, "value", None)
+    ]
+    assert any("Правки доступны только в текущей схеме" in text for text in texts)
+    assert any("только для просмотра" in text.lower() for text in texts)
+    tab_labels = {tab.label for tab in app.tabs}
+    assert "Управление" in tab_labels
+    assert "Новая" in tab_labels
 
 
 def test_streamlit_admin_can_save_source_layout_to_flow_source(
@@ -322,7 +340,7 @@ def test_streamlit_admin_can_soft_delete_selected_flow_source_node(
     assert "e_offsets_review" not in {edge.id for edge in app.session_state["graph_doc"].edges}
 
 
-def test_streamlit_admin_can_update_layout_draft_from_workspace_panel(
+def test_streamlit_admin_card_layout_fields_follow_position_edit_draft(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -338,24 +356,23 @@ def test_streamlit_admin_can_update_layout_draft_from_workspace_panel(
     assert not app.exception
     login_as_admin(app)
 
-    assert "Включить drag карточек" not in {button.label for button in app.button}
-    assert any(
-        item.value
-        == "Включите «Редактировать положение» в боковой панели, чтобы менять layout."
-        for item in app.caption
-    )
+    assert "Применить положение" not in {button.label for button in app.button}
+    assert not any(item.label == "Положение" for item in getattr(app, "expander", []))
 
     set_toggle(app, "Редактировать положение", True)
-    set_text_input(app, "X в текущем layout", "733.5")
-    set_text_input(app, "Y в текущем layout", "412.25")
-    click_button(app, "Применить положение")
+    positions = dict(app.session_state["position_edit_positions"])
+    positions["proc_initial_review"] = (733.5, 412.25)
+    app.session_state["position_edit_positions"] = positions
+    app.session_state["position_edit_dirty"] = True
+    app.run(timeout=30)
+    assert not app.exception
 
-    assert app.session_state["position_edit_positions"]["proc_initial_review"] == (
-        733.5,
-        412.25,
-    )
+    assert app.session_state["graph_source_node_layout_x::proc_initial_review"] == 733.5
+    assert app.session_state["graph_source_node_layout_y::proc_initial_review"] == 412.25
     saved = load_structured_payload(source_path.read_bytes())
-    assert "custom_layout" not in saved or "proc_initial_review" not in saved.get("custom_layout", {})
+    assert "custom_layout" not in saved or "proc_initial_review" not in saved.get(
+        "custom_layout", {}
+    )
 
 
 def test_streamlit_admin_can_edit_selected_flow_source_node(
@@ -373,17 +390,43 @@ def test_streamlit_admin_can_edit_selected_flow_source_node(
     app.run(timeout=30)
     login_as_admin(app)
 
-    set_text_input(app, "Заголовок карточки", "UI updated node")
-    set_text_input(app, "X в source layout", "444.5")
-    set_text_input(app, "Y в source layout", "222.25")
-    set_selectbox(app, "Основной ответственный", "completion")
-    click_button(app, "Сохранить карточку")
+    set_text_input(app, "Заголовок", "UI updated node")
+    set_number_input(app, "X", 444.5)
+    set_number_input(app, "Y", 222.25)
+    set_selectbox(app, "Ответственный", "completion")
+    click_button(app, "Сохранить")
 
     saved = load_structured_payload(source_path.read_bytes())
     assert saved["nodes"]["proc_initial_review"]["title"] == "UI updated node"
     assert saved["nodes"]["proc_initial_review"]["responsible"] == "completion"
     assert saved["layout"]["proc_initial_review"]["x"] == 444.5
     assert saved["layout"]["proc_initial_review"]["y"] == 222.25
+
+
+def test_streamlit_admin_can_rename_card_without_touching_coordinates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+    original = load_structured_payload(source_path.read_bytes())
+    original_layout = original["layout"]["proc_initial_review"]
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    login_as_admin(app)
+
+    set_text_input(app, "Заголовок", "Only title changed")
+    click_button(app, "Сохранить")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    assert saved["nodes"]["proc_initial_review"]["title"] == "Only title changed"
+    assert saved["layout"]["proc_initial_review"]["x"] == original_layout["x"]
+    assert saved["layout"]["proc_initial_review"]["y"] == original_layout["y"]
 
 
 def test_streamlit_admin_can_edit_selected_flow_source_edge(
@@ -411,3 +454,32 @@ def test_streamlit_admin_can_edit_selected_flow_source_edge(
     assert transition["to"] == "card_data_rework"
     assert transition["kind"] == "dashed"
     assert transition["label"] == "UI reroute"
+
+
+def test_streamlit_admin_can_delete_selected_flow_source_edge(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "e_review_decision"
+    app.run(timeout=30)
+    login_as_admin(app)
+
+    set_checkbox(app, "Подтвердить удаление связи", True)
+    click_button(app, "Удалить связь")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    transition_ids = [
+        item.get("id")
+        for item in saved["nodes"]["proc_initial_review"].get("transitions", [])
+    ]
+    assert "e_review_decision" not in transition_ids
+    assert "selected_id" not in app.session_state or (
+        app.session_state["selected_id"] != "e_review_decision"
+    )

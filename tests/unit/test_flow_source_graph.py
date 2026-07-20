@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from pydiag.infrastructure.editable_flow_graph import EditableFlowGraphNode
+from pydiag.infrastructure.figma_metadata import normalize_flow_node_kind
 from pydiag.infrastructure.flow_source_graph import (
     FlowSourceDocument,
     dump_flow_source_payload,
@@ -241,6 +243,32 @@ def test_dump_flow_source_payload_strips_figma_trace_metadata() -> None:
     assert normalized["nodes"]["data_complete"]["transitions"][0]["metadata"] == {
         "note": "keep me"
     }
+
+
+def test_flow_source_document_migrates_decision_card_kind_to_process() -> None:
+    payload = valid_flow_source_payload()
+    payload["nodes"]["well_design"]["kind"] = "decision_card"
+
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+
+    assert document.nodes["well_design"].kind == "process"
+
+
+def test_editable_and_figma_paths_migrate_decision_card_kind_to_process() -> None:
+    node = EditableFlowGraphNode.model_validate(
+        {
+            "id": "legacy_card",
+            "kind": "decision_card",
+            "title": "Legacy follow-up",
+            "position": {"x": 10.0, "y": 20.0},
+            "size": {"w": 320, "h": 120},
+            "responsible": "planning",
+        },
+        strict=True,
+    )
+
+    assert node.kind == "process"
+    assert normalize_flow_node_kind("decision_card") == "process"
 
 
 def test_flow_source_document_rejects_unknown_transition_target() -> None:

@@ -49,8 +49,14 @@ __all__ = [
 
 ROUTE_GRAPH_PADDING = 28
 ROUTE_LINE_EPSILON = 1.0
-ROUTE_BEND_PENALTY = 24.0
+ROUTE_BEND_PENALTY = 42.0
 ROUTE_PORT_PREFERENCE_PENALTY = 16.0
+# Collapse tiny source/target misalignment into a clean L instead of a Z jog.
+ROUTE_NEAR_ALIGN = 18.0
+# Keep elbows away from ports/arrowheads — short final stubs look broken.
+ROUTE_MIN_TERMINAL_APPROACH = 40.0
+ROUTE_SHORT_APPROACH_PENALTY = 96.0
+ROUTE_SHORT_LEAVE_PENALTY = 28.0
 # Full-obstacle fallback can explode to O(obstacles^2) grid points and hang the UI.
 MAX_ROUTE_GRAPH_POINTS = 320
 ROUTE_BOUND_PADDINGS = (28.0, 72.0, 140.0, 260.0)
@@ -148,11 +154,18 @@ def apply_manual_port_slots(routes: list[EdgeRoute]) -> list[EdgeRoute]:
         source_groups[(route.edge.source, route.source_side)].append(index)
         target_groups[(route.edge.target, route.target_side)].append(index)
 
-    source_offsets = [ (0.0, 0.0) for _ in routes ]
-    target_offsets = [ (0.0, 0.0) for _ in routes ]
+    source_offsets = [(0.0, 0.0) for _ in routes]
+    target_offsets = [(0.0, 0.0) for _ in routes]
     for (_, side), indices in source_groups.items():
-        for slot, index in enumerate(indices):
-            source_offsets[index] = side_slot_offset(side, slot, len(indices))
+        # Decision yes/no must stay on diamond vertices; axis-aligned slotting
+        # slides starts onto the slanted bbox edges and looks broken.
+        slottable = [
+            index
+            for index in indices
+            if routes[index].edge.kind not in {"yes", "no"}
+        ]
+        for slot, index in enumerate(slottable):
+            source_offsets[index] = side_slot_offset(side, slot, len(slottable))
     for (_, side), indices in target_groups.items():
         for slot, index in enumerate(indices):
             target_offsets[index] = side_slot_offset(side, slot, len(indices))
@@ -666,26 +679,51 @@ def quick_orthogonal_route(
     if is_axis_aligned(start, end):
         candidates.append((start, end))
     else:
-        candidates.extend(
-            (
-                (start, (start[0], end[1]), end),
-                (start, (end[0], start[1]), end),
-            )
-        )
+        dx = abs(end[0] - start[0])
+        dy = abs(end[1] - start[1])
         mid_x = (start[0] + end[0]) / 2
         mid_y = (start[1] + end[1]) / 2
-        candidates.extend(
-            (
-                (start, (mid_x, start[1]), (mid_x, end[1]), end),
-                (start, (start[0], mid_y), (end[0], mid_y), end),
+        # Near-align: bend near the source (long final approach), then mid-gap Z.
+        # Never prefer an L whose last leg is a tiny stub into the arrowhead.
+        if dx <= ROUTE_NEAR_ALIGN and dy > ROUTE_NEAR_ALIGN:
+            candidates.extend(
+                (
+                    (start, (end[0], start[1]), end),
+                    (start, (start[0], mid_y), (end[0], mid_y), end),
+                    (start, (start[0], end[1]), end),
+                )
             )
-        )
+        elif dy <= ROUTE_NEAR_ALIGN and dx > ROUTE_NEAR_ALIGN:
+            candidates.extend(
+                (
+                    (start, (start[0], end[1]), end),
+                    (start, (mid_x, start[1]), (mid_x, end[1]), end),
+                    (start, (end[0], start[1]), end),
+                )
+            )
+        else:
+            candidates.extend(
+                (
+                    (start, (end[0], start[1]), end),
+                    (start, (start[0], end[1]), end),
+                    (start, (start[0], mid_y), (end[0], mid_y), end),
+                    (start, (mid_x, start[1]), (mid_x, end[1]), end),
+                )
+            )
 
+    best: tuple[Point, ...] | None = None
+    best_cost = float("inf")
     for candidate in candidates:
         simplified = simplify_waypoints(candidate)
-        if path_is_orthogonal(simplified) and orthogonal_candidate_clear(simplified, obstacles):
-            return simplified
-    return None
+        if not path_is_orthogonal(simplified):
+            continue
+        if not orthogonal_candidate_clear(simplified, obstacles):
+            continue
+        cost = orthogonal_path_cost(simplified)
+        if cost < best_cost:
+            best = simplified
+            best_cost = cost
+    return best
 
 
 def orthogonal_candidate_clear(
@@ -846,7 +884,26 @@ def orthogonal_path_cost(points: tuple[Point, ...]) -> float:
         if previous_direction is not None and previous_direction != current_direction:
             turns += 1
         previous_direction = current_direction
-    return distance + turns * ROUTE_BEND_PENALTY
+    return distance + turns * ROUTE_BEND_PENALTY + terminal_approach_penalty(points)
+
+
+def terminal_approach_penalty(points: tuple[Point, ...]) -> float:
+    """Penalize elbows that sit too close to the source leave or target arrow."""
+    if len(points) < 2:
+        return 0.0
+    first_length = abs(points[1][0] - points[0][0]) + abs(points[1][1] - points[0][1])
+    last_length = abs(points[-1][0] - points[-2][0]) + abs(points[-1][1] - points[-2][1])
+    penalty = 0.0
+    if first_length + ROUTE_AXIS_EPSILON < ROUTE_MIN_TERMINAL_APPROACH:
+        penalty += ROUTE_SHORT_LEAVE_PENALTY + (
+            ROUTE_MIN_TERMINAL_APPROACH - first_length
+        )
+    if last_length + ROUTE_AXIS_EPSILON < ROUTE_MIN_TERMINAL_APPROACH:
+        # Short final stubs into the arrowhead are the most visible defect.
+        penalty += ROUTE_SHORT_APPROACH_PENALTY + 2.0 * (
+            ROUTE_MIN_TERMINAL_APPROACH - last_length
+        )
+    return penalty
 
 
 def orthogonal_terminal_cost(start: Point, end: Point) -> float:

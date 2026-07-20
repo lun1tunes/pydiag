@@ -23,11 +23,11 @@ def flow_state_timestamp(
     layout_mode: str,
     position_edit_enabled: bool = False,
 ) -> int:
+    del responsible_filter  # applied client-side; excluded from scene revision
     signature = flow_view_signature(
         graph=graph,
         wells=wells,
         search=search,
-        responsible_filter=responsible_filter,
         kind_filter=kind_filter,
         layout_mode=layout_mode,
         position_edit_enabled=position_edit_enabled,
@@ -44,18 +44,18 @@ def flow_view_signature(
     graph: FlowGraphDocument,
     wells: WellsDocument,
     search: str,
-    responsible_filter: list[str],
     kind_filter: list[str],
     layout_mode: str,
     position_edit_enabled: bool,
 ) -> tuple[Any, ...]:
+    # Responsible legend filtering is applied client-side and must not bump
+    # revision / rebuild the graph scene.
     return (
         graph.version,
         tuple((node.id, node.position.x, node.position.y) for node in graph.nodes),
         wells.version,
         tuple((well.id, well.current_node_id, well.is_archived) for well in wells.wells),
         search.strip().casefold(),
-        tuple(responsible_filter),
         tuple(kind_filter),
         layout_mode,
         position_edit_enabled,

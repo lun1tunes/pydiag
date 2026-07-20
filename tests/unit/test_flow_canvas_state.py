@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydiag.rendering.flow_canvas_state import (
     component_positions_from_state,
+    component_responsible_filter_from_state,
     component_selected_id_from_state,
     component_view_state_from_state,
 )
@@ -43,6 +44,21 @@ def test_component_selected_id_from_state_accepts_domain_edge_and_well(documents
         == "well::well_1001"
     )
     assert component_selected_id_from_state(graph, wells, {"selected_id": "unknown"}) is None
+
+
+def test_component_responsible_filter_from_state_keeps_known_keys(documents) -> None:
+    graph, _ = documents
+
+    assert component_responsible_filter_from_state(graph, None) is None
+    assert component_responsible_filter_from_state(graph, {}) is None
+    assert component_responsible_filter_from_state(
+        graph,
+        {"responsible_filter": ["planning", "unknown", "geology"]},
+    ) == ["planning", "geology"]
+    assert component_responsible_filter_from_state(
+        graph,
+        {"responsible_filter": []},
+    ) == []
 
 
 def test_component_view_state_from_state_extracts_viewport() -> None:

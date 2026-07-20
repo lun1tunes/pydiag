@@ -20,6 +20,7 @@ def render_flow_canvas(
     key: str,
     default_selected_id: str | None,
     default_positions: dict[str, dict[str, float]],
+    default_responsible_filter: list[str] | None = None,
 ) -> Any:
     return flow_canvas_component()(
         key=key,
@@ -27,14 +28,21 @@ def render_flow_canvas(
         default={
             "selected_id": default_selected_id,
             "positions": default_positions,
+            "responsible_filter": list(default_responsible_filter or []),
         },
         height="content",
         on_selected_id_change=lambda: None,
         on_positions_change=lambda: None,
+        on_responsible_filter_change=lambda: None,
     )
 
 
 def flow_canvas_component():
+    """Return the mount callable for the current Streamlit component manager.
+
+    Registration is keyed by the active ``BidiComponentManager`` so a definition
+    from one runtime/session cannot be reused after the manager is replaced.
+    """
     if not Runtime.exists():
         component = _FLOW_CANVAS_COMPONENTS.get(0)
         if component is None:

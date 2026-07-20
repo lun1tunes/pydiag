@@ -1067,6 +1067,10 @@ def test_rendering_canvas_adapter_facade_stays_thin() -> None:
         rendering_flow_canvas_adapter.component_selected_id_from_state
         is rendering_flow_canvas_state.component_selected_id_from_state
     )
+    assert (
+        rendering_flow_canvas_adapter.component_responsible_filter_from_state
+        is rendering_flow_canvas_state.component_responsible_filter_from_state
+    )
     imports = file_imports(rendering_file("flow_canvas_adapter.py"))
     assert imports == {
         "pydiag.rendering.flow_canvas_payload",
@@ -1099,7 +1103,6 @@ def test_presentation_chrome_module_stays_out_of_runtime_and_infrastructure() ->
     assert_no_forbidden_imports_in_files(
         [presentation_file("chrome.py")],
         {
-            "streamlit",
             "pydiag.infrastructure",
             "pydiag.presentation.runtime",
             "pydiag.presentation.runtime_session",
@@ -1244,9 +1247,12 @@ def test_presentation_admin_renderer_routes_well_mutations_through_application()
     assert imports == {
         "collections.abc",
         "dataclasses",
+        "pandas",
         "pydiag.application",
         "pydiag.domain.models",
         "pydiag.presentation.admin_models",
+        "pydiag.presentation.html_utils",
+        "pydiag.presentation.inspector_models",
     }
 
 

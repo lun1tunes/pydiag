@@ -226,3 +226,72 @@ def test_json_documents_gateway_delegates_to_storage_functions(documents) -> Non
         ("can_import_raw_graph_source",),
         ("import_live_graph_source_from_raw",),
     ]
+
+
+def test_json_documents_gateway_saves_positions_to_archive_when_live_missing(
+    documents,
+) -> None:
+    graph, _ = documents
+    archive = Path("/tmp/flow_source.v0003.yaml")
+    calls: list[tuple[object, ...]] = []
+
+    def fake_existing_default_graph_path() -> Path | None:
+        calls.append(("existing_default_graph_path",))
+        return archive
+
+    def fake_save_graph_positions(
+        positions,
+        *,
+        expected_version: int,
+        path: Path,
+        layout_mode: str,
+    ):
+        calls.append(
+            ("save_graph_positions", positions, expected_version, path, layout_mode)
+        )
+        return graph
+
+    gateway = JsonDocumentsGateway(
+        existing_default_graph_path_fn=fake_existing_default_graph_path,
+        save_graph_positions_fn=fake_save_graph_positions,
+    )
+
+    assert (
+        gateway.save_graph_positions(
+            {"proc_initial_review": (11.0, 22.0)},
+            expected_version=graph.version,
+            graph_version_id=None,
+        )
+        == graph
+    )
+    assert calls == [
+        ("existing_default_graph_path",),
+        (
+            "save_graph_positions",
+            {"proc_initial_review": (11.0, 22.0)},
+            graph.version,
+            archive,
+            "manual",
+        ),
+    ]
+
+
+def test_json_documents_gateway_positions_save_errors_clearly_without_source(
+    documents,
+) -> None:
+    graph, _ = documents
+
+    gateway = JsonDocumentsGateway(
+        existing_default_graph_path_fn=lambda: None,
+    )
+
+    try:
+        gateway.save_graph_positions(
+            {"proc_initial_review": (1.0, 2.0)},
+            expected_version=graph.version,
+            graph_version_id=None,
+        )
+    except FileNotFoundError as exc:
+        assert "Нет файла схемы для сохранения положения" in str(exc)
+    else:
+        raise AssertionError("expected FileNotFoundError")

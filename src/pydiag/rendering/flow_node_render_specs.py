@@ -9,8 +9,9 @@ from pydiag.domain.models import FlowGraphDocument, FlowNode, Well
 from .flow_node_markup import node_content
 from .flow_render_math import ceil_to_step
 
-TEXT_LINE_HEIGHT = 16
-TEXT_CHAR_WIDTH = 7.1
+# Tuned for ~14px bold UI font (Cyrillic) so fitted boxes hug readable labels.
+TEXT_LINE_HEIGHT = 19
+TEXT_CHAR_WIDTH = 8.2
 
 __all__ = [
     "NodeRenderSpec",
@@ -53,106 +54,125 @@ def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
     if node.metadata.get("figma_fixed_size") is True:
         return max(20, int(node.size.w)), max(20, int(node.size.h))
     width = preferred_node_width(node, lines)
+    char_width = text_char_width(node)
     wrapped_lines = sum(
-        estimated_wrapped_lines(line, width, horizontal_text_padding(node)) for line in lines
+        estimated_wrapped_lines(
+            line,
+            width,
+            horizontal_text_padding(node),
+            char_width=char_width,
+        )
+        for line in lines
     )
     height = ceil(
         vertical_text_padding(node)
         + wrapped_lines * TEXT_LINE_HEIGHT
         + markdown_vertical_buffer(node)
     )
-    return width, max(node.size.h, minimum_node_height(node), height)
+    # Content-hug: YAML layout size is positional metadata, not a visual floor.
+    return width, max(minimum_node_height(node), height)
 
 
 def preferred_node_width(node: FlowNode, lines: list[str]) -> int:
     longest_line = max((len(plain_canvas_text(line)) for line in lines), default=0)
+    char_width = text_char_width(node)
     desired = (
         horizontal_text_padding(node)
-        + min(longest_line, max_unwrapped_chars(node)) * TEXT_CHAR_WIDTH
+        + min(longest_line, max_unwrapped_chars(node)) * char_width
     )
     width = ceil_to_step(int(ceil(desired)), 10)
-    return max(node.size.w, minimum_node_width(node), min(width, maximum_node_width(node)))
+    return max(minimum_node_width(node), min(width, maximum_node_width(node)))
+
+
+def text_char_width(node: FlowNode) -> float:
+    # Bold Cyrillic in diamonds needs a slightly wider estimate so labels
+    # do not press against the slanted edges.
+    if node.kind == "decision_diamond":
+        return 9.0
+    return TEXT_CHAR_WIDTH
 
 
 def minimum_node_width(node: FlowNode) -> int:
     return {
-        "process": 280,
-        "decision_diamond": 230,
-        "decision_card": 250,
-        "database": 270,
-        "input_data": 260,
-        "event": 240,
+        "process": 200,
+        "decision_diamond": 200,
+        "database": 200,
+        "input_data": 190,
+        "event": 160,
         "figma_text": 20,
     }[node.kind]
 
 
 def maximum_node_width(node: FlowNode) -> int:
     return {
-        "process": 330,
-        "decision_diamond": 300,
-        "decision_card": 320,
-        "database": 330,
-        "input_data": 320,
-        "event": 300,
+        "process": 380,
+        "decision_diamond": 400,
+        "database": 360,
+        "input_data": 340,
+        "event": 320,
         "figma_text": 2000,
     }[node.kind]
 
 
 def minimum_node_height(node: FlowNode) -> int:
     return {
-        "process": 104,
-        "decision_diamond": 112,
-        "decision_card": 98,
-        "database": 158,
-        "input_data": 94,
-        "event": 84,
+        "process": 56,
+        "decision_diamond": 72,
+        "database": 96,
+        "input_data": 56,
+        "event": 48,
         "figma_text": 20,
     }[node.kind]
 
 
 def horizontal_text_padding(node: FlowNode) -> int:
     return {
-        "decision_diamond": 104,
-        "input_data": 96,
-        "database": 80,
-        "event": 56,
+        "decision_diamond": 112,
+        "input_data": 72,
+        "database": 64,
+        "event": 44,
         "figma_text": 0,
-    }.get(node.kind, 28)
+    }.get(node.kind, 24)
 
 
 def vertical_text_padding(node: FlowNode) -> int:
     return {
-        "process": 28,
-        "decision_diamond": 52,
-        "decision_card": 34,
-        "database": 92,
-        "input_data": 36,
-        "event": 32,
+        "process": 20,
+        "decision_diamond": 44,
+        "database": 64,
+        "input_data": 28,
+        "event": 24,
         "figma_text": 0,
     }[node.kind]
 
 
 def markdown_vertical_buffer(node: FlowNode) -> int:
     return {
-        "database": 12,
-        "decision_diamond": 10,
-        "input_data": 8,
+        "database": 8,
+        "decision_diamond": 6,
+        "input_data": 4,
         "figma_text": 0,
-    }.get(node.kind, 8)
+    }.get(node.kind, 4)
 
 
 def max_unwrapped_chars(node: FlowNode) -> int:
     return {
-        "decision_diamond": 22,
-        "input_data": 28,
-        "database": 30,
+        "decision_diamond": 28,
+        "input_data": 34,
+        "database": 34,
         "figma_text": 200,
-    }.get(node.kind, 32)
+    }.get(node.kind, 40)
 
 
-def estimated_wrapped_lines(text: str, width: int, horizontal_padding: int) -> int:
+def estimated_wrapped_lines(
+    text: str,
+    width: int,
+    horizontal_padding: int,
+    *,
+    char_width: float = TEXT_CHAR_WIDTH,
+) -> int:
     available_width = max(96, width - horizontal_padding)
-    chars_per_line = max(12, int(available_width / TEXT_CHAR_WIDTH))
+    chars_per_line = max(12, int(available_width / char_width))
     normalized = plain_canvas_text(text)
     return max(1, (len(normalized) + chars_per_line - 1) // chars_per_line)
 

@@ -30,7 +30,11 @@ from pydiag.application import (
 from pydiag.application import (
     persist_wells_update as persist_wells,
 )
-from pydiag.common.graph_versions import GraphVersionInfo, RawImportResult
+from pydiag.common.graph_versions import (
+    GraphVersionInfo,
+    RawImportResult,
+    newest_graph_version,
+)
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
@@ -50,11 +54,9 @@ class StreamlitSessionCoordinator:
     def load_app_data(
         self, *, force: bool = False
     ) -> tuple[FlowGraphDocument, WellsDocument]:
-        selected_version_id = self.selected_graph_version_id()
-        if selected_version_id is not None:
-            selected_version_id = self.ensure_selected_graph_version(
-                self.documents_gateway.list_graph_versions()
-            )
+        selected_version_id = self.ensure_selected_graph_version(
+            self.documents_gateway.list_graph_versions()
+        )
         if self.session_state.get(LOADED_GRAPH_VERSION_KEY) != selected_version_id:
             force = True
         documents = load_session_documents(
@@ -84,16 +86,24 @@ class StreamlitSessionCoordinator:
         value = self.session_state.get(SELECTED_GRAPH_VERSION_KEY)
         return value if isinstance(value, str) and value else None
 
+    def live_graph_source_exists(self) -> bool:
+        return self.documents_gateway.live_graph_source_exists()
+
     def ensure_selected_graph_version(
         self,
         versions: list[GraphVersionInfo],
     ) -> str | None:
         selected = self.selected_graph_version_id()
         valid_ids = {version.id for version in versions}
-        if selected is None or selected in valid_ids:
-            return selected
-        self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
-        return None
+        if selected is not None and selected not in valid_ids:
+            self.session_state.pop(SELECTED_GRAPH_VERSION_KEY, None)
+            selected = None
+        # Without a live schema, bind to the newest archive so the app still loads.
+        if selected is None and not self.live_graph_source_exists() and versions:
+            newest_id = newest_graph_version(versions).id
+            self._set_selected_graph_version(newest_id)
+            return newest_id
+        return selected
 
     def select_graph_version(self, version_id: str | None) -> None:
         previous_version_id = self.selected_graph_version_id()
@@ -239,17 +249,22 @@ class StreamlitSessionCoordinator:
         graph: FlowGraphDocument,
         positions: dict[str, tuple[float, float]],
     ) -> None:
-        selected_version_id = self.selected_graph_version_id()
-        if selected_version_id is not None:
+        if not self.position_edit_available():
             self.st_module.error(
-                "Версии source YAML доступны только для просмотра. Переключитесь на текущий source YAML."
+                self.position_edit_block_reason()
+                or (
+                    "Версии схемы доступны только для просмотра. "
+                    "Переключитесь на текущую схему."
+                )
             )
             return
 
         def save() -> FlowGraphDocument:
+            # Always write the live schema — archived versions are read-only.
             return self.documents_gateway.save_graph_positions(
                 positions,
                 expected_version=graph.version,
+                graph_version_id=None,
             )
 
         result = persist_graph_positions(
@@ -283,7 +298,7 @@ class StreamlitSessionCoordinator:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
-                or "Редактирование source YAML сейчас недоступно."
+                or "Редактирование схемы сейчас недоступно."
             )
             return
 
@@ -292,6 +307,7 @@ class StreamlitSessionCoordinator:
             save=lambda: self.documents_gateway.save_graph_source_node(
                 command,
                 expected_version=graph.version,
+                graph_version_id=None,
             ),
             reload_data=self.load_app_data,
             success_message=(
@@ -310,7 +326,7 @@ class StreamlitSessionCoordinator:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
-                or "Редактирование source YAML сейчас недоступно."
+                or "Редактирование схемы сейчас недоступно."
             )
             return
 
@@ -319,10 +335,17 @@ class StreamlitSessionCoordinator:
             save=lambda: self.documents_gateway.save_graph_source_edge(
                 command,
                 expected_version=graph.version,
+                graph_version_id=None,
             ),
             reload_data=self.load_app_data,
-            success_message="Связь схемы обновлена",
+            success_message=(
+                "Связь схемы удалена"
+                if command.deleted is True
+                else "Связь схемы обновлена"
+            ),
         )
+        if command.deleted is True and self.session_state.get("selected_id") == command.edge_id:
+            self.session_state.pop("selected_id", None)
         self.finalize_persistence(result.should_rerun, result.error_message)
 
     def position_edit_available(self) -> bool:
@@ -331,7 +354,10 @@ class StreamlitSessionCoordinator:
     def position_edit_block_reason(self) -> str | None:
         if self.position_edit_available():
             return None
-        return "Редактирование layout доступно только для текущего source YAML."
+        return (
+            "Версии схемы доступны только для просмотра. "
+            "Переключитесь на текущую схему."
+        )
 
     def wells_edit_available(self) -> bool:
         return self.selected_graph_version_id() is None
@@ -339,7 +365,10 @@ class StreamlitSessionCoordinator:
     def wells_edit_block_reason(self) -> str | None:
         if self.wells_edit_available():
             return None
-        return "Изменение скважин доступно только для текущего source YAML."
+        return (
+            "Изменение скважин доступно только в текущей схеме. "
+            "Переключитесь на текущую схему."
+        )
 
     def graph_source_edit_available(self) -> bool:
         return self.selected_graph_version_id() is None
@@ -347,7 +376,10 @@ class StreamlitSessionCoordinator:
     def graph_source_edit_block_reason(self) -> str | None:
         if self.graph_source_edit_available():
             return None
-        return "Редактирование карточек и связей доступно только для текущего source YAML."
+        return (
+            "Правки доступны только в текущей схеме. "
+            "Архивная версия открыта только для просмотра."
+        )
 
     def finalize_persistence(
         self, should_rerun: bool, error_message: str | None

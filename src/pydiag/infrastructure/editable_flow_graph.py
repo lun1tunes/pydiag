@@ -9,7 +9,6 @@ from pydiag.domain.models import FlowGraphDocument, MetaValue, parse_node_time
 EditableNodeKind = Literal[
     "process",
     "decision_diamond",
-    "decision_card",
     "database",
     "input_data",
     "event",
@@ -75,6 +74,8 @@ class EditableFlowGraphNode(EditableStrictModel):
             return data
 
         normalized = dict(data)
+        if normalized.get("kind") == "decision_card":
+            normalized["kind"] = "process"
         if "participants" not in normalized:
             normalized["participants"] = []
 
@@ -220,7 +221,7 @@ def runtime_node_responsibles(
     if deduplicated:
         return deduplicated
     if (
-        node.kind in {"process", "decision_diamond", "decision_card"}
+        node.kind in {"process", "decision_diamond"}
         and "unassigned" in available_responsibles
     ):
         return ["unassigned"]

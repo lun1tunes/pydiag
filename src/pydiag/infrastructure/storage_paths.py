@@ -42,9 +42,13 @@ __all__ = [
     "graph_path",
     "graph_versions_dir",
     "graph_version_paths",
+    "graph_version_display_label",
     "latest_graph_version_path",
     "next_graph_version_path",
+    "existing_default_graph_path",
+    "live_graph_source_exists",
     "preferred_graph_source_path",
+    "readable_graph_source_path",
     "source_graph_path",
     "raw_graph_path",
     "wells_path",
@@ -92,6 +96,15 @@ def graph_version_paths() -> list[Path]:
     return [path for _, path in sorted(candidates)]
 
 
+def graph_version_display_label(path: Path | str) -> str:
+    """Short UI label for a versioned flow source file (e.g. v0002)."""
+    name = Path(path).name
+    match = GRAPH_VERSION_FILENAME_RE.fullmatch(name)
+    if match is not None:
+        return f"v{match.group('sequence')}"
+    return name
+
+
 def latest_graph_version_path() -> Path | None:
     candidates = graph_version_paths()
     if not candidates:
@@ -125,7 +138,41 @@ def raw_graph_path() -> Path:
     return RAW_GRAPH_PATH
 
 
+def live_graph_source_exists() -> bool:
+    return source_graph_path().exists()
+
+
+def readable_graph_source_path() -> Path | None:
+    """Path used to render the app: live schema, else newest archived version.
+
+    Raw Figma JSON is intentionally excluded — it is only an import source.
+    """
+    source = source_graph_path()
+    if source.exists():
+        return source
+    return latest_graph_version_path()
+
+
+def existing_default_graph_path() -> Path | None:
+    """Existing file for default read/write when no version id is selected.
+
+    Preference: live YAML → newest archive → configured/materialized JSON.
+    Never returns a path that does not exist on disk.
+    """
+    source = readable_graph_source_path()
+    if source is not None:
+        return source
+    configured = configured_graph_path()
+    if configured is not None and configured.exists():
+        return configured
+    target = graph_path()
+    if target.exists():
+        return target
+    return None
+
+
 def preferred_graph_source_path() -> Path | None:
+    """Best source for materialize/import helpers: live schema, else raw Figma JSON."""
     source = source_graph_path()
     if source.exists():
         return source

@@ -12,8 +12,8 @@ def test_build_node_render_specs_keeps_content_and_minimum_process_size(document
     spec = render_specs[node.id]
 
     assert node.text in spec.content
-    assert spec.width >= 280
-    assert spec.height >= 104
+    assert spec.width >= 200
+    assert spec.height >= 56
 
 
 def test_node_render_spec_grows_for_longer_text(documents) -> None:
@@ -36,6 +36,23 @@ def test_node_render_spec_grows_for_longer_text(documents) -> None:
     long_spec = node_render_spec(long_graph.nodes[node_index], long_graph, [])
 
     assert long_spec.height > short_spec.height
+
+
+def test_node_render_spec_hugs_text_instead_of_yaml_floor(documents) -> None:
+    graph, _ = documents
+    payload = graph.model_dump(mode="json")
+    node_index = next(
+        index for index, node in enumerate(payload["nodes"]) if node["id"] == "proc_initial_review"
+    )
+    payload["nodes"][node_index]["metadata"] = {}
+    payload["nodes"][node_index]["text"] = "Короткий текст"
+    payload["nodes"][node_index]["size"] = {"w": 460, "h": 300}
+    oversized = type(graph).model_validate(payload, strict=True)
+
+    spec = node_render_spec(oversized.nodes[node_index], oversized, [])
+
+    assert spec.width < 460
+    assert spec.height < 300
 
 
 def test_figma_fixed_size_preserves_imported_dimensions(documents) -> None:

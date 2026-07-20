@@ -63,12 +63,13 @@ def build_flow_canvas_payload(
     if snapshot is None:
         snapshot = build_flow_render_snapshot(graph, wells_doc, layout_mode)
         if snapshot_cache is not None:
-            snapshot_cache.clear()
             snapshot_cache[cache_key] = snapshot
+    # Responsible filter is applied in the canvas JS so legend toggles stay
+    # instant and do not rebuild the scene. Search/kind still dim server-side.
     nodes, active_node_ids = build_flow_canvas_nodes_from_snapshot(
         snapshot,
         search=search,
-        responsible_filter=responsible_filter,
+        responsible_filter=[],
         kind_filter=kind_filter,
         selected_id=selected_id,
         domain_nodes_draggable=domain_nodes_draggable,
@@ -92,6 +93,8 @@ def build_flow_canvas_payload(
             "height": max(canvas_height_for_snapshot(snapshot), 828),
         },
         "bounds": bounds,
+        "responsible_legend": build_responsible_legend(snapshot.graph),
+        "responsible_filter": list(responsible_filter or []),
     }
     if session_epoch is not None:
         payload["session_epoch"] = session_epoch
@@ -171,6 +174,8 @@ def build_flow_canvas_node(
         "target_position": target_position,
         "position": {"x": round(geometry.x, 2), "y": round(geometry.y, 2)},
         "size": {"w": geometry.width, "h": geometry.height},
+        "responsible": list(node.responsible),
+        "primary_responsible": node.primary_responsible,
         "style": node_style(
             node,
             graph,
@@ -260,6 +265,18 @@ def build_time_badge(node: FlowNode, active: bool) -> dict[str, Any] | None:
         "style": component_style(duration_badge_style(active, node.time)),
         "title": node.time,
     }
+
+
+def build_responsible_legend(graph: FlowGraphDocument) -> list[dict[str, str]]:
+    return [
+        {
+            "key": key,
+            "label": style.label,
+            "fill": style.fill,
+            "border": style.border,
+        }
+        for key, style in graph.responsibles.items()
+    ]
 
 
 def build_responsible_badges(
@@ -355,12 +372,15 @@ def edge_route_points(
     start = (start[0] + sx, start[1] + sy)
     end = (end[0] + tx, end[1] + ty)
     middle: list[tuple[float, float]] = []
+    last_index = len(route.anchors) - 1
     for index, anchor in enumerate(route.anchors):
         x, y = anchor.pos
         if index == 0:
             x += sx
             y += sy
-        if index == len(route.anchors) - 1:
+        elif index == last_index:
+            # Mutually exclusive with the first-anchor branch so a sole waypoint
+            # does not receive both source and target slot offsets.
             x += tx
             y += ty
         middle.append((x, y))

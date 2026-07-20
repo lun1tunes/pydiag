@@ -82,7 +82,7 @@ def test_sidebar_labels_expose_expected_public_values() -> None:
     labels = list(KIND_FILTER_LABELS.values())
 
     assert len(labels) == len(set(labels))
-    assert KIND_FILTER_LABELS["decision_diamond"] == "Решение (ромб)"
-    assert KIND_FILTER_LABELS["decision_card"] == "Решение (карточка)"
+    assert KIND_FILTER_LABELS["decision_diamond"] == "Решение"
+    assert "decision_card" not in KIND_FILTER_LABELS
     assert KIND_FILTER_LABELS["event"] == "Событие"
     assert KIND_FILTER_LABELS["figma_text"] == "Текст Figma"

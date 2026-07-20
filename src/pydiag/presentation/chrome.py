@@ -52,14 +52,17 @@ APP_CSS = """
     --app-status-gap-top: 0.16rem;
     --app-status-gap-bottom: 0.44rem;
     --app-status-pad-top: 6px;
-    --app-muted-gap-bottom: 0.4rem;
-    --app-kv-gap-top: 0.34rem;
-    --app-kv-gap-bottom: 0.52rem;
+    --app-muted-gap-bottom: 0.18rem;
+    --app-kv-gap-top: 0.18rem;
+    --app-kv-gap-bottom: 0.28rem;
     --app-legend-gap-top: 0.12rem;
     --app-legend-gap-bottom: 0.36rem;
     --app-control-height: 2rem;
     --app-alert-gap: 0.05rem;
     --app-mobile-inspector-gap: 0.75rem;
+    --app-inspector-stack-gap: 0.42rem;
+    --app-inspector-form-gap: 0.22rem;
+    --app-inspector-control-height: 1.7rem;
 }
 .stApp {
     background:
@@ -102,6 +105,17 @@ APP_CSS = """
 [data-testid="stDecoration"],
 .stDeployButton {
     display: none !important;
+}
+/* Clipboard shortcut guard iframe: must be non-zero for st.iframe, but invisible. */
+iframe[title="st.iframe"],
+[data-testid="stIFrame"] {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    overflow: hidden !important;
+    border: 0 !important;
 }
 .block-container {
     max-width: none;
@@ -175,29 +189,154 @@ div[data-testid="stExpander"] {
     font-size: 1.08rem;
     margin-top: 2px;
 }
-.inspector-shell {
-    padding-top: 0.15rem;
-    margin-top: 0;
-    min-height: auto;
+.inspector-kicker {
+    color: #64748b;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin: 0;
+    padding: 0 0 0.12rem;
+}
+.inspector-entity {
+    color: #111827;
+    font-size: 1.02rem;
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0 !important;
+    padding: 0 0 0.1rem;
+}
+.inspector-sub {
+    color: #64748b;
+    font-size: 0.78rem;
+    margin: 0 !important;
+    padding: 0.04rem 0 0.28rem;
+}
+.inspector-status {
+    color: #64748b;
+    font-size: 0.76rem;
+    margin: 0 !important;
+    padding: 0 0 0.28rem;
+}
+.inspector-section-label {
+    color: #526173;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    /* padding (not margin): Streamlit markdown parents collapse margins and
+       let section titles paint over the previous block. */
+    margin: 0 !important;
+    padding: 0.85rem 0 0.4rem;
+}
+/*
+ * Inspector density (Streamlit 1.57+):
+ * bordered panels use stLayoutWrapper; forms set gap via emotion (spacing.lg).
+ * Keep the panel readable: only forms get ultra-tight field spacing.
+ */
+[data-testid="stLayoutWrapper"] [data-testid="stVerticalBlock"] {
+    gap: var(--app-inspector-stack-gap) !important;
+}
+[data-testid="stForm"] {
+    padding: 0.45rem 0.55rem !important;
+}
+[data-testid="stForm"] [data-testid="stVerticalBlock"] {
+    gap: var(--app-inspector-form-gap) !important;
+}
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] {
+    gap: 0.35rem !important;
+}
+[data-testid="stForm"] [data-testid="stElementContainer"] {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+/*
+ * Height-limited inspector panels use a flex column. Streamlit element
+ * containers default to flex-shrink:1, and markdown containers get a negative
+ * bottom margin from emotion CSS — both crush blocks so titles paint over
+ * neighbors. Force natural height and kill the negative margin.
+ */
+[data-testid="stLayoutWrapper"] [data-testid="stElementContainer"] {
+    flex-shrink: 0 !important;
+    height: auto !important;
+    min-height: fit-content !important;
+    overflow: visible !important;
+}
+[data-testid="stLayoutWrapper"] [data-testid="stElementContainer"]:has(.stMarkdown),
+[data-testid="stLayoutWrapper"] .stMarkdown,
+[data-testid="stLayoutWrapper"] [data-testid="stMarkdownContainer"] {
+    display: flow-root;
+    height: auto !important;
+    min-height: fit-content !important;
+    overflow: visible;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+[data-testid="stForm"] div[data-testid="stMarkdownContainer"] p {
+    margin: 0.02rem 0 0.06rem;
+}
+[data-testid="stLayoutWrapper"] .mini-kv {
+    margin: 0 !important;
+    padding: 0.2rem 0 0.35rem;
+}
+[data-testid="stLayoutWrapper"] div[data-testid="stCaptionContainer"],
+[data-testid="stLayoutWrapper"] [data-testid="stCaption"],
+[data-testid="stForm"] div[data-testid="stCaptionContainer"],
+[data-testid="stForm"] [data-testid="stCaption"] {
+    margin-top: 0 !important;
+    margin-bottom: 0.2rem !important;
+}
+[data-testid="stLayoutWrapper"] div[data-testid="stTabs"] {
+    margin-top: 0.2rem;
+}
+[data-testid="stLayoutWrapper"] div[data-testid="stButton"] button,
+[data-testid="stLayoutWrapper"] div[data-testid="stFormSubmitButton"] button,
+[data-testid="stForm"] div[data-testid="stButton"] button,
+[data-testid="stForm"] div[data-testid="stFormSubmitButton"] button {
+    min-height: var(--app-inspector-control-height);
+}
+[data-testid="stForm"] div[data-testid="stTextInput"],
+[data-testid="stForm"] div[data-testid="stSelectbox"],
+[data-testid="stForm"] div[data-testid="stMultiSelect"],
+[data-testid="stForm"] div[data-testid="stTextArea"],
+[data-testid="stForm"] div[data-testid="stCheckbox"],
+[data-testid="stForm"] div[data-testid="stNumberInput"] {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+[data-testid="stForm"] label[data-testid="stWidgetLabel"] {
+    margin-bottom: 0.02rem !important;
+    min-height: 0 !important;
+    padding-bottom: 0 !important;
+}
+[data-testid="stLayoutWrapper"] [data-testid="InputInstructions"],
+[data-testid="stForm"] [data-testid="InputInstructions"] {
+    display: none !important;
+}
+[data-testid="stLayoutWrapper"] div[data-testid="stExpander"],
+[data-testid="stForm"] div[data-testid="stExpander"] {
+    margin: 0.12rem 0 0.16rem;
 }
 .muted-line {
     color: #64748b;
-    font-size: 0.86rem;
-    margin: 0.06rem 0 var(--app-muted-gap-bottom);
+    font-size: 0.8rem;
+    margin: 0.04rem 0 var(--app-muted-gap-bottom);
 }
 .mini-kv {
     display: grid;
-    grid-template-columns: 112px minmax(0, 1fr);
-    gap: 7px 10px;
-    font-size: 0.88rem;
-    margin: var(--app-kv-gap-top) 0 var(--app-kv-gap-bottom);
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 4px 8px;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    margin: 0;
+    padding: var(--app-kv-gap-top) 0 var(--app-kv-gap-bottom);
 }
 .mini-kv span:nth-child(odd) {
     color: #64748b;
 }
 .mini-kv span:nth-child(even) {
     color: #111827;
-    font-weight: 620;
+    font-weight: 600;
 }
 .legend-shell {
     display: grid;
@@ -277,11 +416,6 @@ div[data-testid="stAlert"] {
 @media (max-width: 900px) {
     .status-row {
         grid-template-columns: repeat(2, minmax(120px, 1fr));
-    }
-    .inspector-shell {
-        border-top: 1px solid rgba(100, 116, 139, 0.20);
-        padding-top: var(--app-mobile-inspector-gap);
-        min-height: auto;
     }
 }
 </style>
@@ -382,10 +516,18 @@ CLIPBOARD_SHORTCUT_GUARD_HTML = """
 """
 
 
-def install_clipboard_shortcut_guard(st_module) -> None:
-    import streamlit.components.v1 as components
+CLIPBOARD_GUARD_SESSION_KEY = "_pydiag_clipboard_guard_installed"
 
-    components.html(CLIPBOARD_SHORTCUT_GUARD_HTML, height=0, width=0)
+
+def install_clipboard_shortcut_guard(st_module) -> None:
+    session_state = getattr(st_module, "session_state", None)
+    if isinstance(session_state, dict) or hasattr(session_state, "__contains__"):
+        if session_state.get(CLIPBOARD_GUARD_SESSION_KEY):
+            return
+        session_state[CLIPBOARD_GUARD_SESSION_KEY] = True
+    # st.iframe replaces deprecated st.components.v1.html for embedding HTML.
+    # Zero size is rejected by Streamlit; hide the 1px host via CSS instead.
+    st_module.iframe(CLIPBOARD_SHORTCUT_GUARD_HTML, height=1, width=1)
 
 
 def inject_css(st_module) -> None:
@@ -398,7 +540,7 @@ def inject_css(st_module) -> None:
 
 
 def render_legend(st_module, graph: FlowGraphDocument) -> None:
-    st_module.markdown("### Легенда")
+    st_module.markdown("### Типы блоков")
     st_module.markdown(legend_html(graph), unsafe_allow_html=True)
 
 
@@ -411,26 +553,12 @@ def legend_html(graph: FlowGraphDocument) -> str:
         )
         for item in model.kind_items
     )
-    department_items = "\n".join(
-        (
-            '<div class="legend-dept">'
-            f'<span class="legend-swatch" style="background-color: {item.fill}; '
-            f'border-color: {item.border};"></span>'
-            f'<span class="legend-dept-label">{safe_text(item.label)}</span>'
-            f'<span class="legend-dept-code">{safe_text(item.key)}</span>'
-            "</div>"
-        )
-        for item in model.responsible_items
-    )
+    # Responsible colors live on the canvas topbar next to zoom controls.
     return f"""
     <div class="legend-shell">
       <div>
         <div class="legend-title">{safe_text(model.kind_title)}</div>
         <div class="legend-list">{type_items}</div>
-      </div>
-      <div>
-        <div class="legend-title">{safe_text(model.responsible_title)}</div>
-        <div class="legend-dept-list">{department_items}</div>
       </div>
     </div>
     """

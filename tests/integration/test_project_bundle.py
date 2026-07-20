@@ -142,24 +142,27 @@ if app.exception:
 wells_path = Path({str(restore / "data" / "wells.yaml")!r})
 wells_example_path = Path({str(restore / "data" / "wells.example.yaml")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
-if not wells_path.exists():
-    raise SystemExit("missing wells.yaml")
+if wells_path.exists():
+    raise SystemExit("wells.yaml should not exist before live schema import")
 if not wells_example_path.exists():
     raise SystemExit("missing wells.example.yaml")
 if source_path.exists():
     raise SystemExit("flow_source.yaml should not exist before explicit import")
 
-wells_text = wells_path.read_text(encoding="utf-8")
-if "wells: []" not in wells_text:
-    raise SystemExit("empty wells bootstrap was not created")
 if not any("Пользователи не настроены" in item.value for item in app.warning):
     raise SystemExit("expected missing-users warning was not rendered")
 
-click_button(app, "Импортировать факт")
+click_button(app, "Импорт json figma")
 if app.exception:
     raise SystemExit(f"app exception after import: {{app.exception!r}}")
 if not source_path.exists():
     raise SystemExit("missing flow_source.yaml after import")
+if not wells_path.exists():
+    raise SystemExit("missing wells.yaml after live import")
+
+wells_text = wells_path.read_text(encoding="utf-8")
+if "wells: []" not in wells_text:
+    raise SystemExit("empty wells bootstrap was not created")
 
 source_text = source_path.read_text(encoding="utf-8")
 if 'schema_version: "flow-source/1.0"' not in source_text:
@@ -205,7 +208,7 @@ raw_path = Path({str(restore / "data" / "real_true_data.json")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
 backup_path = Path({str(restore / "data" / "flow_sources" / "flow_source.v0001.yaml")!r})
 
-click_button(app, "Импортировать факт")
+click_button(app, "Импорт json figma")
 if app.exception:
     raise SystemExit(f"app exception after first import: {{app.exception!r}}")
 if not source_path.exists():
@@ -221,7 +224,7 @@ for element in raw_payload["elements"]:
         element["characters"] = "Raw Start Updated"
 raw_path.write_text(json.dumps(raw_payload), encoding="utf-8")
 
-click_button(app, "Импортировать факт")
+click_button(app, "Импорт json figma")
 if app.exception:
     raise SystemExit(f"app exception after second import: {{app.exception!r}}")
 
@@ -270,7 +273,7 @@ raw_path = Path({str(restore / "data" / "real_true_data.json")!r})
 source_path = Path({str(restore / "data" / "flow_sources" / "flow_source.yaml")!r})
 
 raw_path.write_text("{{broken json", encoding="utf-8")
-click_button(app, "Импортировать факт")
+click_button(app, "Импорт json figma")
 
 if app.exception:
     raise SystemExit(f"app exception after import failure: {{app.exception!r}}")

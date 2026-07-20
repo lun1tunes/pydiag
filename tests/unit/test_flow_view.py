@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pydiag.application.flow_view import (
     FLOW_CANVAS_COMPONENT_KEY,
+    FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
+    RESPONSIBLE_FILTER_LAST_KEY,
+    RESPONSIBLE_FILTER_SESSION_KEY,
     render_flow,
 )
 
@@ -155,3 +158,88 @@ def test_render_flow_does_not_request_rerun_when_selection_is_unchanged(document
 
     assert selected_id == "proc_initial_review"
     assert FLOW_SELECTION_RERUN_REQUEST_KEY not in session_state
+
+
+def test_render_flow_mirrors_legend_responsible_filter_without_full_rerun(
+    documents,
+) -> None:
+    graph, wells = documents
+    session_state = FakeSessionState(
+        {
+            FLOW_CANVAS_COMPONENT_KEY: {"responsible_filter": ["planning"]},
+            RESPONSIBLE_FILTER_SESSION_KEY: [],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    def fake_render_canvas(payload, **kwargs):
+        captured["payload"] = payload
+        captured["kwargs"] = kwargs
+        return {}
+
+    render_flow(
+        session_state,
+        graph=graph,
+        wells=wells,
+        search="",
+        responsible_filter=[],
+        kind_filter=[],
+        layout_mode="snake",
+        position_edit_enabled=False,
+        render_canvas=fake_render_canvas,
+        component_key=FLOW_CANVAS_COMPONENT_KEY,
+    )
+
+    assert captured["payload"]["responsible_filter"] == ["planning"]
+    assert captured["kwargs"]["default_responsible_filter"] == ["planning"]
+    node = next(
+        item
+        for item in captured["payload"]["nodes"]
+        if item["id"] == "proc_initial_review"
+    )
+    # Responsible dimming is client-side; payload keeps search/kind active flags.
+    assert node["active"] is True
+    assert "planning" in node["responsible"]
+    assert session_state[RESPONSIBLE_FILTER_SESSION_KEY] == ["planning"]
+    assert session_state[RESPONSIBLE_FILTER_LAST_KEY] == ["planning"]
+    assert FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY not in session_state
+
+
+def test_render_flow_sidebar_filter_wins_over_stale_legend_component_state(
+    documents,
+) -> None:
+    graph, wells = documents
+    session_state = FakeSessionState(
+        {
+            FLOW_CANVAS_COMPONENT_KEY: {"responsible_filter": ["planning"]},
+            RESPONSIBLE_FILTER_SESSION_KEY: ["geology"],
+            RESPONSIBLE_FILTER_LAST_KEY: ["planning"],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    def fake_render_canvas(payload, **kwargs):
+        captured["payload"] = payload
+        return {}
+
+    render_flow(
+        session_state,
+        graph=graph,
+        wells=wells,
+        search="",
+        responsible_filter=["geology"],
+        kind_filter=[],
+        layout_mode="snake",
+        position_edit_enabled=False,
+        render_canvas=fake_render_canvas,
+        component_key=FLOW_CANVAS_COMPONENT_KEY,
+    )
+
+    assert captured["payload"]["responsible_filter"] == ["geology"]
+    assert session_state[RESPONSIBLE_FILTER_LAST_KEY] == ["geology"]
+    assert session_state[FLOW_CANVAS_COMPONENT_KEY]["responsible_filter"] == ["geology"]
+
+
+def test_responsible_filter_session_key_is_not_canvas_component_field() -> None:
+    assert RESPONSIBLE_FILTER_SESSION_KEY == "sidebar_responsible_filter"
+    assert RESPONSIBLE_FILTER_SESSION_KEY != "responsible_filter"

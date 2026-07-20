@@ -7,8 +7,9 @@ const FIT_VIEW_PADDING_X = 64;
 const FIT_VIEW_PADDING_TOP = 48;
 const FIT_VIEW_PADDING_BOTTOM = 64;
 const PAN_CLICK_SUPPRESS_DISTANCE_PX = 4;
+const NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const CANVAS_STATE_STORE_KEY = "__pydiagFlowCanvasStates";
-const CANVAS_STATE_KEY = "well_drilling_flow_canvas";
+const CANVAS_STATE_KEY = "well_drilling_flow_canvas_v2";
 
 export default function(component) {
   const state = adoptCanvasState(component);
@@ -136,15 +137,23 @@ function createCanvasState(root, component, ownerDocument) {
     positionsVersion: 0,
     selectedId: null,
     pendingSelectedId: undefined,
+    selectedNodeIds: new Set(),
+    suppressNextNodeClick: false,
+    responsibleFilter: [],
+    pendingResponsibleFilter: undefined,
+    lastHostResponsibleFilter: [],
     sessionEpoch: null,
     isPanning: false,
     draggingNodeId: null,
+    draggingNodeIds: [],
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
     renderedSelectedId: null,
+    renderedSelectedNodeIds: new Set(),
     renderedPositionsVersion: -1,
     renderedDraggingNodeId: null,
+    renderedDraggingNodeIds: [],
     resizeObserver: null,
     fullscreenChangeHandler: null,
     ownerDocument,
@@ -166,8 +175,12 @@ function initializeRootStructure(state) {
   emptyState.textContent = "На схеме пока нет элементов.";
   emptyState.hidden = true;
 
-  const toolbar = createElement("div", "flow-canvas-toolbar", root);
-  toolbar.hidden = true;
+  const topbar = createElement("div", "flow-canvas-topbar", root);
+  topbar.hidden = true;
+  const legend = createElement("div", "flow-canvas-legend", topbar);
+  legend.setAttribute("aria-label", "Ответственные");
+
+  const toolbar = createElement("div", "flow-canvas-toolbar", topbar);
   const toolbarButtons = {};
   for (const buttonDef of TOOLBAR_BUTTONS) {
     const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
@@ -187,10 +200,16 @@ function initializeRootStructure(state) {
     toolbarButtons[buttonDef.id] = button;
   }
 
-  const fullscreenButton = createElement("button", "flow-canvas-toolbar__button", toolbar);
+  const fullscreenButton = createElement(
+    "button",
+    "flow-canvas-toolbar__button flow-canvas-toolbar__button--icon",
+    toolbar,
+  );
   fullscreenButton.type = "button";
   fullscreenButton.addEventListener("click", () => {
     toggleFullscreen(state);
+    // Immediate visual feedback; fullscreenchange will sync again shortly.
+    syncToolbarState(state);
   });
 
   const viewport = createElement("div", "flow-canvas-viewport", root);
@@ -237,6 +256,9 @@ function initializeRootStructure(state) {
 
   state.dom = {
     emptyState,
+    topbar,
+    legend,
+    legendClear: null,
     toolbar,
     toolbarButtons,
     fullscreenButton,
@@ -279,10 +301,17 @@ function syncStateFromPayload(state) {
       state.lastRevision = null;
       state.selectedId = null;
       state.pendingSelectedId = undefined;
+      state.selectedNodeIds = new Set();
       state.renderedSelectedId = null;
+      state.renderedSelectedNodeIds = new Set();
+      state.responsibleFilter = [];
+      state.pendingResponsibleFilter = undefined;
+      state.lastHostResponsibleFilter = [];
       state.draggingNodeId = null;
+      state.draggingNodeIds = [];
       state.positions = {};
-      state.positionsVersion += 1;
+      state.positionsVersion = 0;
+      state.renderedPositionsVersion = -1;
     }
   }
 
@@ -292,6 +321,15 @@ function syncStateFromPayload(state) {
   state.nodePayloadsById = indexPayloadsById(payload.nodes);
   state.edgePayloadsById = indexPayloadsById(payload.edges);
   state.tokenPayloadsById = indexTokenPayloads(payload.nodes);
+  if (state.selectedNodeIds.size) {
+    const retained = new Set();
+    for (const nodeId of state.selectedNodeIds) {
+      if (state.nodePayloadsById.has(nodeId)) {
+        retained.add(nodeId);
+      }
+    }
+    state.selectedNodeIds = retained;
+  }
 
   if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
     state.positions = nextPositions;
@@ -309,9 +347,33 @@ function syncStateFromPayload(state) {
       state.selectedId = state.pendingSelectedId !== undefined
         ? state.pendingSelectedId
         : payloadSelectedId;
+    } else if (state.selectedId !== payloadSelectedId) {
+      state.selectedId = payloadSelectedId;
+      // External selection (inspector / Streamlit) replaces multi-select.
+      state.selectedNodeIds = selectedNodeIdsForPrimary(state, payloadSelectedId);
     } else {
       state.selectedId = payloadSelectedId;
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "responsible_filter")) {
+    const payloadFilter = normalizeResponsibleFilter(payload.responsible_filter);
+    if (state.pendingResponsibleFilter !== undefined) {
+      if (sameResponsibleFilters(payloadFilter, state.pendingResponsibleFilter)) {
+        // Host echoed the legend click.
+        state.pendingResponsibleFilter = undefined;
+        state.responsibleFilter = payloadFilter;
+      } else if (sameResponsibleFilters(payloadFilter, state.lastHostResponsibleFilter)) {
+        // Host still has the pre-click value; keep the local legend edit.
+        state.responsibleFilter = state.pendingResponsibleFilter;
+      } else {
+        // Host sent a different filter (sidebar / external) — accept override.
+        state.pendingResponsibleFilter = undefined;
+        state.responsibleFilter = payloadFilter;
+      }
+    } else {
+      state.responsibleFilter = payloadFilter;
+    }
+    state.lastHostResponsibleFilter = payloadFilter;
   }
   if (graphChanged) {
     state.lastRevision = payload.revision;
@@ -346,21 +408,24 @@ function renderState(state) {
   if (!payload.nodes.length) {
     clearScene(state);
     state.dom.emptyState.hidden = false;
-    state.dom.toolbar.hidden = true;
+    state.dom.topbar.hidden = true;
     state.dom.viewport.hidden = true;
     state.dom.minimap.hidden = true;
     state.sceneRevision = payload.revision;
     state.hasRenderedScene = false;
     state.renderedSelectedId = state.selectedId;
+    state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
+    state.renderedDraggingNodeIds = [...state.draggingNodeIds];
     return;
   }
 
   state.dom.emptyState.hidden = true;
-  state.dom.toolbar.hidden = false;
+  state.dom.topbar.hidden = false;
   state.dom.viewport.hidden = false;
   state.dom.minimap.hidden = false;
+  syncResponsibleLegend(state);
 
   const graphChanged = state.sceneRevision !== payload.revision || !state.hasRenderedScene;
   if (graphChanged) {
@@ -368,11 +433,17 @@ function renderState(state) {
     state.sceneRevision = payload.revision;
     state.hasRenderedScene = true;
     state.renderedSelectedId = state.selectedId;
+    state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
+    state.renderedDraggingNodeIds = [...state.draggingNodeIds];
   } else {
     if (state.renderedPositionsVersion !== state.positionsVersion) {
-      if (state.draggingNodeId) {
+      if (state.draggingNodeIds.length) {
+        for (const nodeId of state.draggingNodeIds) {
+          updateDraggedNode(state, nodeId);
+        }
+      } else if (state.draggingNodeId) {
         updateDraggedNode(state, state.draggingNodeId);
       } else {
         updateNodePositions(state);
@@ -380,16 +451,31 @@ function renderState(state) {
       }
       state.renderedPositionsVersion = state.positionsVersion;
     }
-    if (state.renderedDraggingNodeId !== state.draggingNodeId) {
-      syncDraggingState(state, state.renderedDraggingNodeId, state.draggingNodeId);
+    if (
+      state.renderedDraggingNodeId !== state.draggingNodeId
+      || !sameIdLists(state.renderedDraggingNodeIds, state.draggingNodeIds)
+    ) {
+      syncDraggingState(state, state.renderedDraggingNodeIds, state.draggingNodeIds);
       state.renderedDraggingNodeId = state.draggingNodeId;
+      state.renderedDraggingNodeIds = [...state.draggingNodeIds];
     }
-    if (state.renderedSelectedId !== state.selectedId) {
-      updateSelectionState(state, state.renderedSelectedId, state.selectedId);
+    if (
+      state.renderedSelectedId !== state.selectedId
+      || !sameIdSets(state.renderedSelectedNodeIds, state.selectedNodeIds)
+    ) {
+      updateSelectionState(
+        state,
+        state.renderedSelectedId,
+        state.selectedId,
+        state.renderedSelectedNodeIds,
+        state.selectedNodeIds,
+      );
       state.renderedSelectedId = state.selectedId;
+      state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     }
   }
 
+  syncResponsibleFilterDim(state);
   updateMinimapViewport(state);
 }
 
@@ -403,12 +489,242 @@ function syncToolbarState(state) {
     return;
   }
 
-  fullscreenButton.textContent = fullscreenActive ? "Exit" : "Full";
-  fullscreenButton.title = fullscreenActive
+  const title = fullscreenActive
     ? "Выйти из полноэкранного режима"
     : "Развернуть схему на весь экран";
-  fullscreenButton.setAttribute("aria-label", fullscreenButton.title);
+  if (
+    fullscreenButton.dataset.fullscreenActive !== String(fullscreenActive) ||
+    !fullscreenButton.querySelector("svg")
+  ) {
+    fullscreenButton.dataset.fullscreenActive = String(fullscreenActive);
+    fullscreenButton.replaceChildren(
+      fullscreenActive ? fullscreenExitIcon() : fullscreenEnterIcon(),
+    );
+  }
+  fullscreenButton.title = title;
+  fullscreenButton.setAttribute("aria-label", title);
   fullscreenButton.classList.toggle("is-active", fullscreenActive);
+}
+
+function fullscreenEnterIcon() {
+  return createToolbarIcon(
+    "M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15",
+  );
+}
+
+function fullscreenExitIcon() {
+  return createToolbarIcon(
+    "M9 4 V9 H4 M20 9 H15 V4 M15 20 V15 H20 M4 15 H9 V20",
+  );
+}
+
+function createToolbarIcon(pathD) {
+  const svg = createSvgElement("svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("flow-canvas-toolbar__icon");
+  const path = createSvgElement("path");
+  path.setAttribute("d", pathD);
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.8");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+function syncResponsibleLegend(state) {
+  const legend = state.dom.legend;
+  const items = Array.isArray(state.payload.responsible_legend)
+    ? state.payload.responsible_legend
+    : [];
+  const signature = items
+    .map((item) => `${item.key}|${item.label}|${item.fill}|${item.border}`)
+    .join(";");
+  if (state.legendSignature !== signature) {
+    state.legendSignature = signature;
+    legend.replaceChildren();
+    state.dom.legendClear = null;
+    for (const item of items) {
+      const chip = createElement("button", "flow-canvas-legend__item", legend);
+      chip.type = "button";
+      chip.dataset.responsibleKey = item.key;
+      chip.title = `Фильтр: ${item.label}`;
+      chip.setAttribute("aria-pressed", "false");
+      const swatch = createElement("span", "flow-canvas-legend__swatch", chip);
+      swatch.style.backgroundColor = item.fill;
+      swatch.style.borderColor = item.border;
+      const label = createElement("span", "flow-canvas-legend__label", chip);
+      label.textContent = item.label;
+      chip.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleResponsibleFilter(state, item.key);
+      });
+    }
+    legend.hidden = items.length === 0;
+  }
+  ensureLegendClearButton(state);
+  syncLegendHighlight(state);
+}
+
+function ensureLegendClearButton(state) {
+  const legend = state.dom.legend;
+  let clear = state.dom.legendClear;
+  if (!clear || !legend.contains(clear)) {
+    clear = createElement("button", "flow-canvas-legend__clear");
+    clear.type = "button";
+    clear.title = "Сбросить фильтр";
+    clear.setAttribute("aria-label", "Сбросить фильтр");
+    clear.innerHTML = clearFilterIcon();
+    clear.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setResponsibleFilter(state, []);
+    });
+    state.dom.legendClear = clear;
+    legend.appendChild(clear);
+  } else if (clear.nextSibling !== null) {
+    legend.appendChild(clear);
+  }
+}
+
+function clearFilterIcon() {
+  return (
+    '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">'
+    + '<path d="M4.2 4.2 L11.8 11.8 M11.8 4.2 L4.2 11.8" '
+    + 'fill="none" stroke="currentColor" stroke-width="1.8" '
+    + 'stroke-linecap="round"/>'
+    + "</svg>"
+  );
+}
+
+function toggleResponsibleFilter(state, responsibleKey) {
+  const current = normalizeResponsibleFilter(state.responsibleFilter);
+  const next = current.includes(responsibleKey)
+    ? current.filter((item) => item !== responsibleKey)
+    : [...current, responsibleKey];
+  setResponsibleFilter(state, next);
+}
+
+function setResponsibleFilter(state, value) {
+  const next = normalizeResponsibleFilter(value);
+  if (
+    sameResponsibleFilters(state.responsibleFilter, next)
+    && state.pendingResponsibleFilter === undefined
+  ) {
+    return;
+  }
+  state.responsibleFilter = next;
+  state.pendingResponsibleFilter = next;
+  state.component.setStateValue("responsible_filter", next);
+  syncLegendHighlight(state);
+  syncResponsibleFilterDim(state);
+  queueRender(state);
+}
+
+function nodeMatchesResponsibleFilter(node, filterKeys) {
+  if (!filterKeys.size) {
+    return true;
+  }
+  const keys = Array.isArray(node.responsible) ? node.responsible : [];
+  return keys.some((key) => filterKeys.has(key));
+}
+
+function syncResponsibleFilterDim(state) {
+  if (!state.payload || !Array.isArray(state.payload.nodes)) {
+    return;
+  }
+  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
+  const activeIds = new Set();
+  for (const node of state.payload.nodes) {
+    const active = node.active !== false && nodeMatchesResponsibleFilter(node, filterKeys);
+    if (active) {
+      activeIds.add(node.id);
+    }
+    const elements = state.nodeElements.get(node.id);
+    if (elements && elements.shell) {
+      elements.shell.classList.toggle("is-filter-dimmed", !active);
+    }
+    const minimapNode = state.minimapNodeElements.get(node.id);
+    if (minimapNode) {
+      minimapNode.classList.toggle("is-filter-dimmed", !active);
+    }
+  }
+  for (const edge of state.payload.edges || []) {
+    const filterActive = activeIds.has(edge.source) && activeIds.has(edge.target);
+    const active = edge.active !== false && filterActive;
+    const elements = state.edgeElements.get(edge.id);
+    if (!elements) {
+      continue;
+    }
+    const baseOpacity = Number(edge.style?.opacity ?? 1);
+    const opacity = active ? baseOpacity : Math.min(baseOpacity, 0.16);
+    if (elements.visiblePath) {
+      elements.visiblePath.setAttribute("opacity", String(opacity));
+    }
+    if (elements.label) {
+      elements.label.style.opacity = active ? "1" : "0.24";
+      elements.label.classList.toggle("is-filter-dimmed", !active);
+    }
+  }
+}
+
+function normalizeResponsibleFilter(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  const result = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !item || seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+
+function sameResponsibleFilters(left, right) {
+  const a = normalizeResponsibleFilter(left);
+  const b = normalizeResponsibleFilter(right);
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((item, index) => item === b[index]);
+}
+
+function syncLegendHighlight(state) {
+  const legend = state.dom.legend;
+  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
+  const filterActive = filterKeys.size > 0;
+  let selectionKey = null;
+  if (state.selectedId) {
+    const node = state.nodePayloadsById.get(state.selectedId);
+    if (node && typeof node.primary_responsible === "string" && node.primary_responsible) {
+      selectionKey = node.primary_responsible;
+    }
+  }
+  let hasSelectionHighlight = false;
+  for (const chip of legend.children) {
+    if (!chip.dataset.responsibleKey) {
+      continue;
+    }
+    const key = chip.dataset.responsibleKey;
+    const filtered = filterActive && filterKeys.has(key);
+    const highlighted = selectionKey !== null && key === selectionKey;
+    chip.classList.toggle("is-filter-active", filtered);
+    chip.classList.toggle("is-highlighted", highlighted);
+    chip.setAttribute("aria-pressed", filtered ? "true" : "false");
+    hasSelectionHighlight = hasSelectionHighlight || highlighted;
+  }
+  legend.classList.toggle("has-filter", filterActive);
+  legend.classList.toggle("has-highlight", hasSelectionHighlight && !filterActive);
+  if (state.dom.legendClear) {
+    state.dom.legendClear.hidden = !filterActive;
+  }
 }
 
 function syncViewportState(state) {
@@ -538,17 +854,24 @@ function buildNodeElement(state, node) {
 
   const card = createElement("button", "flow-node-card", shell);
   card.type = "button";
+  if (typeof node.kind === "string" && node.kind) {
+    card.classList.add(`is-${node.kind.replaceAll("_", "-")}`);
+  }
   if (node.draggable && state.payload.position_edit_enabled) {
     card.classList.add("is-draggable");
   }
-  if (state.draggingNodeId === node.id) {
+  if (state.draggingNodeIds.includes(node.id) || state.draggingNodeId === node.id) {
     card.classList.add("is-dragging");
   }
   applyStyles(card, node.style);
   card.dataset.nodeId = node.id;
   card.addEventListener("click", (event) => {
     event.stopPropagation();
-    selectId(state, node.id);
+    if (state.suppressNextNodeClick) {
+      state.suppressNextNodeClick = false;
+      return;
+    }
+    selectId(state, node.id, { additive: isMultiSelectModifier(event) });
   });
   if (node.draggable && state.payload.position_edit_enabled) {
     card.addEventListener("pointerdown", (event) => startNodeDrag(event, state, node.id));
@@ -576,7 +899,7 @@ function buildNodeElement(state, node) {
 
   const elements = { shell, card, overlay: null };
   syncNodeShellPosition(shell, state.positions[node.id] || node.position);
-  setNodeSelectedState(elements, node, state.selectedId === node.id);
+  setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
   state.nodeElements.set(node.id, elements);
 }
 
@@ -590,7 +913,7 @@ function buildMinimapEdgeElement(state, edge) {
 function buildMinimapNodeElement(state, node) {
   const shape = createMinimapNodeShape(node);
   shape.classList.add("flow-canvas-minimap__node", `is-${node.kind.replaceAll("_", "-")}`);
-  shape.classList.toggle("is-selected", state.selectedId === node.id);
+  shape.classList.toggle("is-selected", isNodeSelected(state, node.id));
   syncMinimapNodeShape(shape, node, state.positions[node.id] || node.position);
   state.dom.minimapNodeLayer.appendChild(shape);
   state.minimapNodeElements.set(node.id, shape);
@@ -632,13 +955,30 @@ function updateDraggedNode(state, nodeId) {
   }
 }
 
-function updateSelectionState(state, previousSelectedId, nextSelectedId) {
+function updateSelectionState(
+  state,
+  previousSelectedId,
+  nextSelectedId,
+  previousSelectedNodeIds = null,
+  nextSelectedNodeIds = null,
+) {
   syncEdgeSelectionById(state, previousSelectedId);
   syncEdgeSelectionById(state, nextSelectedId);
-  syncNodeSelectionById(state, previousSelectedId);
-  syncNodeSelectionById(state, nextSelectedId);
+  const previousNodes = previousSelectedNodeIds || selectedNodeIdsForPrimary(state, previousSelectedId);
+  const nextNodes = nextSelectedNodeIds || state.selectedNodeIds;
+  const touchedNodeIds = new Set([...previousNodes, ...nextNodes]);
+  if (previousSelectedId) {
+    touchedNodeIds.add(previousSelectedId);
+  }
+  if (nextSelectedId) {
+    touchedNodeIds.add(nextSelectedId);
+  }
+  for (const nodeId of touchedNodeIds) {
+    syncNodeSelectionById(state, nodeId);
+  }
   syncTokenSelectionById(state, previousSelectedId);
   syncTokenSelectionById(state, nextSelectedId);
+  syncLegendHighlight(state);
 }
 
 function syncEdgeSelectionById(state, selectedId) {
@@ -662,11 +1002,11 @@ function syncNodeSelectionById(state, selectedId) {
   if (!node || !elements) {
     return;
   }
-  setNodeSelectedState(elements, node, state.selectedId === selectedId);
+  setNodeSelectedState(elements, node, isNodeSelected(state, selectedId));
 
   const minimapNode = state.minimapNodeElements.get(selectedId);
   if (minimapNode) {
-    minimapNode.classList.toggle("is-selected", state.selectedId === selectedId);
+    minimapNode.classList.toggle("is-selected", isNodeSelected(state, selectedId));
   }
 }
 
@@ -682,15 +1022,25 @@ function syncTokenSelectionById(state, selectedId) {
   setTokenSelectedState(token, tokenPayload, state.selectedId === selectedId);
 }
 
-function syncDraggingState(state, previousNodeId, nextNodeId) {
-  if (previousNodeId) {
-    const previous = state.nodeElements.get(previousNodeId);
+function syncDraggingState(state, previousNodeIds, nextNodeIds) {
+  const previousIds = Array.isArray(previousNodeIds)
+    ? previousNodeIds
+    : previousNodeIds
+      ? [previousNodeIds]
+      : [];
+  const nextIds = Array.isArray(nextNodeIds)
+    ? nextNodeIds
+    : nextNodeIds
+      ? [nextNodeIds]
+      : [];
+  for (const nodeId of previousIds) {
+    const previous = state.nodeElements.get(nodeId);
     if (previous) {
       previous.card.classList.remove("is-dragging");
     }
   }
-  if (nextNodeId) {
-    const next = state.nodeElements.get(nextNodeId);
+  for (const nodeId of nextIds) {
+    const next = state.nodeElements.get(nodeId);
     if (next) {
       next.card.classList.add("is-dragging");
     }
@@ -792,7 +1142,7 @@ function nodeSelectionShapeDescriptors(node) {
   const width = Math.max(1, Number(node.size?.w) || 1);
   const height = Math.max(1, Number(node.size?.h) || 1);
   const radiusPx =
-    kind === "event" ? 32 : kind === "decision_card" ? 22 : kind === "figma_text" ? 10 : 8;
+    kind === "event" ? 32 : kind === "figma_text" ? 10 : 8;
   const rx = String(round(Math.min(50, (radiusPx / width) * 100), 3));
   const ry = String(round(Math.min(50, (radiusPx / height) * 100), 3));
   return [{ tag: "rect", attrs: { x: "0", y: "0", width: "100", height: "100", rx, ry } }];
@@ -874,7 +1224,7 @@ function attachViewportHandlers(viewport, state) {
       panFinished = true;
       state.isPanning = false;
       // Deselect only on a true background tap. A pan must not clear selection.
-      if (!panDidMove && state.selectedId !== null) {
+      if (!panDidMove && (state.selectedId !== null || state.selectedNodeIds.size > 0)) {
         selectId(state, null);
       }
       if (
@@ -916,7 +1266,7 @@ function isCanvasInteractiveTarget(target) {
   }
   return (
     target.closest(
-      ".flow-canvas-toolbar, .flow-canvas-minimap, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
+      ".flow-canvas-topbar, .flow-canvas-toolbar, .flow-canvas-legend, .flow-canvas-minimap, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
     ) !== null
   );
 }
@@ -940,9 +1290,22 @@ function startNodeDrag(event, state, nodeId) {
   if (!nodePosition) {
     return;
   }
+  const dragIds = resolveDragNodeIds(state, nodeId);
+  const origins = {};
+  for (const id of dragIds) {
+    const position = state.positions[id];
+    if (!position) {
+      continue;
+    }
+    origins[id] = { ...position };
+  }
+  if (!origins[nodeId]) {
+    return;
+  }
   state.draggingNodeId = nodeId;
-  const origin = { ...nodePosition };
+  state.draggingNodeIds = Object.keys(origins);
   const start = { x: event.clientX, y: event.clientY };
+  let dragDistancePx = 0;
   const ownerDocument = state.ownerDocument;
   const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
   const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
@@ -952,17 +1315,31 @@ function startNodeDrag(event, state, nodeId) {
   }
   const move = (moveEvent) => {
     moveEvent.preventDefault();
-    const nextPosition = {
-      x: round(origin.x + (moveEvent.clientX - start.x) / state.view.scale),
-      y: round(origin.y + (moveEvent.clientY - start.y) / state.view.scale),
-    };
-    if (
-      nextPosition.x === state.positions[nodeId].x &&
-      nextPosition.y === state.positions[nodeId].y
-    ) {
+    const dxScreen = moveEvent.clientX - start.x;
+    const dyScreen = moveEvent.clientY - start.y;
+    dragDistancePx = Math.max(dragDistancePx, Math.hypot(dxScreen, dyScreen));
+    const dx = dxScreen / state.view.scale;
+    const dy = dyScreen / state.view.scale;
+    let changed = false;
+    for (const id of state.draggingNodeIds) {
+      const origin = origins[id];
+      if (!origin) {
+        continue;
+      }
+      const nextPosition = {
+        x: round(origin.x + dx),
+        y: round(origin.y + dy),
+      };
+      const current = state.positions[id];
+      if (current && nextPosition.x === current.x && nextPosition.y === current.y) {
+        continue;
+      }
+      state.positions[id] = nextPosition;
+      changed = true;
+    }
+    if (!changed) {
       return;
     }
-    state.positions[nodeId] = nextPosition;
     state.positionsVersion += 1;
     queueRender(state);
   };
@@ -974,7 +1351,12 @@ function startNodeDrag(event, state, nodeId) {
       ownerDocument.body.style.userSelect = previousUserSelect;
       ownerDocument.body.style.cursor = previousCursor;
     }
+    if (dragDistancePx >= NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX) {
+      // Keep multi-select after a real drag; the synthetic click would collapse it.
+      state.suppressNextNodeClick = true;
+    }
     state.draggingNodeId = null;
+    state.draggingNodeIds = [];
     state.component.setStateValue("positions", copyPositionMap(state.positions));
     queueRender(state);
   };
@@ -984,17 +1366,115 @@ function startNodeDrag(event, state, nodeId) {
   queueRender(state);
 }
 
-function selectId(state, value) {
-  if (state.selectedId === value && state.pendingSelectedId === undefined) {
+function resolveDragNodeIds(state, nodeId) {
+  if (state.selectedNodeIds.has(nodeId) && state.selectedNodeIds.size > 1) {
+    return [...state.selectedNodeIds].filter((id) => state.positions[id]);
+  }
+  return [nodeId];
+}
+
+function isMultiSelectModifier(event) {
+  return Boolean(event && (event.ctrlKey || event.metaKey));
+}
+
+function isNodeSelected(state, nodeId) {
+  return state.selectedNodeIds.has(nodeId);
+}
+
+function selectedNodeIdsForPrimary(state, selectedId) {
+  if (selectedId && state.nodePayloadsById.has(selectedId)) {
+    return new Set([selectedId]);
+  }
+  return new Set();
+}
+
+function sameIdSets(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b || a.size !== b.size) {
+    return false;
+  }
+  for (const value of a) {
+    if (!b.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameIdLists(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+    return false;
+  }
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function selectId(state, value, options = {}) {
+  const additive = options.additive === true;
+  const previousSelectedId = state.selectedId;
+  const previousSelectedNodeIds = new Set(state.selectedNodeIds);
+  let nextSelectedId = value;
+  let nextSelectedNodeIds = new Set(state.selectedNodeIds);
+
+  if (value === null) {
+    nextSelectedNodeIds = new Set();
+  } else if (state.nodePayloadsById.has(value)) {
+    if (additive) {
+      if (nextSelectedNodeIds.has(value)) {
+        nextSelectedNodeIds.delete(value);
+        nextSelectedId = nextSelectedNodeIds.size
+          ? [...nextSelectedNodeIds][nextSelectedNodeIds.size - 1]
+          : null;
+      } else {
+        nextSelectedNodeIds.add(value);
+        nextSelectedId = value;
+      }
+    } else {
+      nextSelectedNodeIds = new Set([value]);
+      nextSelectedId = value;
+    }
+  } else {
+    // Edges / well tokens stay single-select and clear node multi-select.
+    nextSelectedNodeIds = new Set();
+  }
+
+  if (
+    state.selectedId === nextSelectedId
+    && sameIdSets(state.selectedNodeIds, nextSelectedNodeIds)
+    && state.pendingSelectedId === undefined
+  ) {
     return;
   }
-  const previousSelectedId = state.selectedId;
-  state.selectedId = value;
-  state.pendingSelectedId = value;
-  state.component.setStateValue("selected_id", value);
-  if (state.hasRenderedScene && state.renderedSelectedId !== value) {
-    updateSelectionState(state, previousSelectedId, value);
-    state.renderedSelectedId = value;
+
+  state.selectedId = nextSelectedId;
+  state.selectedNodeIds = nextSelectedNodeIds;
+  state.pendingSelectedId = nextSelectedId;
+  state.component.setStateValue("selected_id", nextSelectedId);
+  if (
+    state.hasRenderedScene
+    && (
+      state.renderedSelectedId !== nextSelectedId
+      || !sameIdSets(state.renderedSelectedNodeIds, nextSelectedNodeIds)
+    )
+  ) {
+    updateSelectionState(
+      state,
+      previousSelectedId,
+      nextSelectedId,
+      previousSelectedNodeIds,
+      nextSelectedNodeIds,
+    );
+    state.renderedSelectedId = nextSelectedId;
+    state.renderedSelectedNodeIds = new Set(nextSelectedNodeIds);
   }
   queueRender(state);
 }
@@ -1028,7 +1508,7 @@ function fitView(state) {
   );
   const scale = clamp(
     Math.min(availableWidth / bounds.width, availableHeight / bounds.height, 1.2),
-    0.32,
+    0.42,
     1.2,
   );
   state.view.scale = scale;
@@ -1189,7 +1669,7 @@ function syncMinimapNodeShape(shape, node, position) {
   shape.setAttribute("height", String(height));
   shape.setAttribute(
     "rx",
-    node.kind === "event" ? "26" : node.kind === "decision_card" ? "20" : "10",
+    node.kind === "event" ? "26" : "10",
   );
 }
 
@@ -1242,6 +1722,10 @@ function roundedPath(points) {
   if (points.length === 1) {
     return `M ${points[0].x} ${points[0].y}`;
   }
+  // Keep orthogonal 90° elbows; only soften when both legs are long enough that
+  // rounding won't crush the stub into the arrowhead.
+  const CORNER_RADIUS = 14;
+  const MIN_LEG_FOR_ROUND = 28;
   let d = `M ${points[0].x} ${points[0].y}`;
   for (let index = 1; index < points.length - 1; index += 1) {
     const previous = points[index - 1];
@@ -1249,11 +1733,17 @@ function roundedPath(points) {
     const next = points[index + 1];
     const firstLength = distance(previous, current);
     const secondLength = distance(current, next);
-    if (!firstLength || !secondLength || isCollinear(previous, current, next)) {
+    if (
+      !firstLength ||
+      !secondLength ||
+      isCollinear(previous, current, next) ||
+      firstLength < MIN_LEG_FOR_ROUND ||
+      secondLength < MIN_LEG_FOR_ROUND
+    ) {
       d += ` L ${current.x} ${current.y}`;
       continue;
     }
-    const radius = Math.min(18, firstLength / 2, secondLength / 2);
+    const radius = Math.min(CORNER_RADIUS, firstLength / 2, secondLength / 2);
     const start = moveTowards(current, previous, radius);
     const end = moveTowards(current, next, radius);
     d += ` L ${start.x} ${start.y} Q ${current.x} ${current.y} ${end.x} ${end.y}`;

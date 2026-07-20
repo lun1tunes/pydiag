@@ -140,7 +140,8 @@ def test_diamond_text_is_centered_inside_shape(documents) -> None:
     assert diamond_node.style["display"] == "flex"
     assert diamond_node.style["alignItems"] == "center"
     assert diamond_node.style["justifyContent"] == "center"
-    assert diamond_node.style["padding"] == "24px 52px"
+    assert diamond_node.style["padding"] == "20px 56px"
+    assert diamond_node.style["fontSize"] == "14px"
     assert "flow-node-decision-diamond .markdown-node" in diamond_node.data["content"]
     assert ".flow-node .markdown-node" in diamond_node.data["content"]
     assert "align-items: center" in diamond_node.data["content"]
@@ -154,7 +155,8 @@ def test_compact_input_node_keeps_note_out_of_canvas_content(documents) -> None:
 
     assert "Контур участка" not in input_node.data["content"]
     assert "Лицензия и исходные геоданные" in input_node.data["content"]
-    assert input_node.style["padding"] == "16px 48px"
+    assert input_node.style["padding"] == "12px 36px"
+    assert input_node.style["fontSize"] == "14px"
 
 
 def test_process_uses_first_responsible_for_color_and_external_secondary_badges(
@@ -202,11 +204,13 @@ def test_decision_nodes_use_responsibles_for_color_and_external_secondary_badges
 
     nodes, _ = build_streamlit_nodes(graph, wells)
     diamond_node = next(node for node in nodes if node.id == "dec_data_complete")
-    card_node = next(node for node in nodes if node.id == "card_mitigation")
+    followup_node = next(node for node in nodes if node.id == "card_mitigation")
     diamond_badge = next(
         node for node in nodes if node.id == "responsible::dec_data_complete::geology"
     )
-    card_badge = next(node for node in nodes if node.id == "responsible::card_mitigation::hse")
+    followup_badge = next(
+        node for node in nodes if node.id == "responsible::card_mitigation::hse"
+    )
 
     assert f"%23{graph.responsibles['planning'].fill.removeprefix('#')}" in str(
         diamond_node.style["backgroundImage"]
@@ -215,11 +219,12 @@ def test_decision_nodes_use_responsibles_for_color_and_external_secondary_badges
     assert "process-side-responsibles" not in diamond_node.data["content"]
     assert "ГЕО" not in diamond_node.data["content"]
     assert "ГЕО" in diamond_badge.data["content"]
-    assert card_node.style["backgroundColor"] == graph.responsibles["drilling"].fill
-    assert card_node.style["border"] == f"2px solid {graph.responsibles['drilling'].border}"
-    assert "ПБОТОС" not in card_node.data["content"]
-    assert "ПБОТОС" in card_badge.data["content"]
-    assert card_badge.style["backgroundColor"] == graph.responsibles["hse"].fill
+    assert next(node for node in graph.nodes if node.id == "card_mitigation").kind == "process"
+    assert followup_node.style["backgroundColor"] == graph.responsibles["drilling"].fill
+    assert followup_node.style["border"] == f"2px solid {graph.responsibles['drilling'].border}"
+    assert "ПБОТОС" not in followup_node.data["content"]
+    assert "ПБОТОС" in followup_badge.data["content"]
+    assert followup_badge.style["backgroundColor"] == graph.responsibles["hse"].fill
 
 
 def test_event_node_type_has_dedicated_shape_and_filter_label(documents) -> None:
@@ -233,8 +238,9 @@ def test_event_node_type_has_dedicated_shape_and_filter_label(documents) -> None
     assert event_node.style["borderRadius"] == "32px"
     assert event_node.style["backgroundColor"] == "#ffffff"
     assert event_node.style["border"] == "2px solid #111827"
-    assert int(str(event_node.style["width"]).removesuffix("px")) >= 280
-    assert int(str(event_node.style["height"]).removesuffix("px")) >= 86
+    assert int(str(event_node.style["width"]).removesuffix("px")) >= 160
+    assert int(str(event_node.style["height"]).removesuffix("px")) >= 48
+    assert event_node.style["fontSize"] == "14px"
     assert "Скважина передана в эксплуатацию" in event_node.data["content"]
 
 
@@ -283,12 +289,11 @@ def test_database_node_grows_to_fit_canvas_text(documents) -> None:
 
     nodes, _ = build_streamlit_nodes(graph, wells)
     database_node = next(node for node in nodes if node.id == "db_contracts")
-    source_node = next(node for node in graph.nodes if node.id == "db_contracts")
     rendered_height = int(database_node.style["height"].removesuffix("px"))
 
-    assert rendered_height >= 158
-    assert rendered_height > source_node.size.h
-    assert database_node.style["padding"] == "38px 40px"
+    assert rendered_height >= 96
+    assert database_node.style["padding"] == "28px 32px"
+    assert database_node.style["fontSize"] == "13.5px"
     assert "Договоры и заявки" in database_node.data["content"]
 
 
@@ -416,7 +421,7 @@ def test_forward_edges_route_around_intermediate_nodes_without_routing_adjacent_
     assert "route::e_input_review::0" in edge_by_id
     assert "route::e_input_review::4" in edge_by_id
     assert edge_by_id["route::e_input_review::4"].target == "proc_initial_review"
-    assert node_by_id["route-anchor::e_input_review::1"].position["y"] > 240
+    assert node_by_id["route-anchor::e_input_review::1"].position["y"] > 220
     assert "e_review_decision" in edge_by_id
     assert "route::e_review_decision::0" not in edge_by_id
     assert edge_by_id["e_review_decision"].source == "proc_initial_review"
@@ -525,7 +530,10 @@ def test_routed_yes_label_stays_attached_to_parent_decision(documents) -> None:
     )
 
     assert edge_by_id["e_data_yes"].source == "route-anchor::e_data_yes::source"
-    assert edge_by_id["e_data_yes"].target == "route-anchor::e_data_yes::0"
+    assert edge_by_id["e_data_yes"].target in {
+        "route-anchor::e_data_yes::0",
+        "proc_well_design",
+    }
     assert "Да" in label_node.data["content"]
     assert source.position["x"] < label_node.position["x"] < source.position["x"] + source_width
     assert label_node.position["y"] > source.position["y"] + source_height

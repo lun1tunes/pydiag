@@ -163,10 +163,11 @@ def infer_flow_edge_kind(metadata: dict[str, str]) -> str:
 
 def normalize_flow_node_kind(value: str | None) -> str:
     raw_kind = (value or NODE_KIND_FALLBACK).strip().lower()
+    if raw_kind == "decision_card":
+        return "process"
     allowed = {
         "process",
         "decision_diamond",
-        "decision_card",
         "database",
         "input_data",
         "event",

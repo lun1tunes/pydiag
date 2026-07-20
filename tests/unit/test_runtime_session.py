@@ -9,14 +9,15 @@ from pydiag.presentation.runtime_session import StreamlitSessionCoordinator
 
 
 class FakeDocumentsGateway:
-    def __init__(self, *, graph=None, wells=None):
+    def __init__(self, *, graph=None, wells=None, live_exists: bool = True):
         self.graph = graph
         self.wells = wells
+        self.live_exists = live_exists
         self.calls: list[tuple[object, ...]] = []
         self.versions = [
             GraphVersionInfo(
                 id="flow_source.v0001.yaml",
-                label="flow_source.v0001.yaml",
+                label="v0001",
                 path=Path("/tmp/flow_source.v0001.yaml"),
                 is_versioned=True,
             )
@@ -25,6 +26,10 @@ class FakeDocumentsGateway:
     def load_documents(self, graph_version_id: str | None = None):
         self.calls.append(("load_documents", graph_version_id))
         return self.graph, self.wells
+
+    def live_graph_source_exists(self) -> bool:
+        self.calls.append(("live_graph_source_exists", self.live_exists))
+        return self.live_exists
 
     def ensure_live_graph_source(self):
         path = Path("/tmp/flow_source.yaml")
@@ -162,7 +167,11 @@ def test_session_coordinator_reload_and_reset_position_draft(monkeypatch, docume
     coordinator.reset_position_draft()
 
     assert load_calls == [True]
-    assert gateway.calls == [("load_documents", None)]
+    assert gateway.calls == [
+        ("list_graph_versions",),
+        ("live_graph_source_exists", True),
+        ("load_documents", None),
+    ]
     assert st_module.reruns == 2
     assert "position_edit_signature" not in st_module.session_state
     assert "position_edit_positions" not in st_module.session_state
@@ -221,7 +230,11 @@ def test_session_coordinator_reload_reports_error_when_live_source_bootstrap_fai
 
     coordinator.reload_data()
 
-    assert gateway.calls == [("load_documents", None)]
+    assert gateway.calls == [
+        ("list_graph_versions",),
+        ("live_graph_source_exists", True),
+        ("load_documents", None),
+    ]
     assert st_module.messages == [
         ("error", "Не удалось обновить данные: Graph source not found"),
     ]
@@ -246,7 +259,11 @@ def test_session_coordinator_reload_reports_error_when_load_fails_after_bootstra
 
     coordinator.reload_data()
 
-    assert gateway.calls == [("load_documents", None)]
+    assert gateway.calls == [
+        ("list_graph_versions",),
+        ("live_graph_source_exists", True),
+        ("load_documents", None),
+    ]
     assert st_module.messages == [
         ("error", "Не удалось обновить данные: broken source"),
     ]
@@ -341,14 +358,28 @@ def test_session_coordinator_save_wells_runs_storage_workflow(monkeypatch, docum
     assert st_module.reruns == 1
 
 
-def test_session_coordinator_rejects_wells_update_for_archived_source_version(
+def test_session_coordinator_blocks_wells_update_for_archived_schema_version(
+    monkeypatch,
     documents,
 ) -> None:
     graph, wells = documents
     st_module = FakeStreamlitModule()
-    gateway = FakeDocumentsGateway()
+    gateway = FakeDocumentsGateway(graph=graph, wells=wells)
     coordinator = StreamlitSessionCoordinator(st_module, gateway)
     st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+    calls: list[tuple[str, object]] = []
+
+    def fake_persist_wells(session_state, updated, *, save, reload_data, success_message):
+        _ = session_state
+        _ = reload_data
+        calls.append(("persist", updated.version, success_message))
+        save(updated)
+        return PersistenceResult(should_rerun=True)
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.persist_wells",
+        fake_persist_wells,
+    )
 
     coordinator.save_wells(
         wells,
@@ -357,9 +388,63 @@ def test_session_coordinator_rejects_wells_update_for_archived_source_version(
         success_message="saved",
     )
 
+    assert calls == []
     assert gateway.calls == []
+    assert st_module.reruns == 0
     assert st_module.messages == [
-        ("error", "Изменение скважин доступно только для текущего source YAML."),
+        (
+            "error",
+            "Изменение скважин доступно только в текущей схеме. "
+            "Переключитесь на текущую схему.",
+        )
+    ]
+
+
+def test_session_coordinator_blocks_position_save_for_archived_schema_version(
+    monkeypatch,
+    documents,
+) -> None:
+    graph, _ = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph)
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+    st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+    calls: list[tuple[str, object]] = []
+
+    def fake_persist_graph_positions(
+        session_state,
+        *,
+        save,
+        reload_data,
+        reset_position_edit_state,
+        success_message,
+    ):
+        _ = session_state
+        _ = reload_data
+        calls.append(("persist", success_message))
+        save()
+        reset_position_edit_state()
+        return PersistenceResult(should_rerun=True, error_message=None)
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.persist_graph_positions",
+        fake_persist_graph_positions,
+    )
+
+    coordinator.save_graph_positions(
+        graph,
+        {"proc_initial_review": (5.0, 6.0)},
+    )
+
+    assert calls == []
+    assert gateway.calls == []
+    assert st_module.reruns == 0
+    assert st_module.messages == [
+        (
+            "error",
+            "Версии схемы доступны только для просмотра. "
+            "Переключитесь на текущую схему.",
+        )
     ]
 
 
@@ -535,6 +620,8 @@ def test_session_coordinator_imports_live_source_from_raw_and_switches_to_live(
     assert load_calls == [(True, None)]
     assert gateway.calls == [
         ("import_live_graph_source_from_raw", "flow_source.v0002.yaml"),
+        ("list_graph_versions",),
+        ("live_graph_source_exists", True),
         ("load_documents", None),
     ]
     assert "selected_graph_version_id" not in st_module.session_state
@@ -630,8 +717,50 @@ def test_session_coordinator_falls_back_to_live_when_selected_graph_version_disa
 
     assert gateway.calls == [
         ("list_graph_versions",),
+        ("live_graph_source_exists", True),
         ("load_documents", None),
     ]
     assert load_calls == [(False, None)]
     assert "selected_graph_version_id" not in st_module.session_state
     assert st_module.session_state["loaded_graph_version_id"] is None
+
+
+def test_session_coordinator_auto_selects_newest_archive_when_live_missing(
+    monkeypatch,
+    documents,
+) -> None:
+    graph, wells = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph, wells=wells, live_exists=False)
+    # Ascending order on purpose: selection must use sequence, not list[0].
+    gateway.versions = [
+        GraphVersionInfo(
+            id="flow_source.v0001.yaml",
+            label="v0001",
+            path=Path("/tmp/flow_source.v0001.yaml"),
+            is_versioned=True,
+        ),
+        GraphVersionInfo(
+            id="flow_source.v0003.yaml",
+            label="v0003",
+            path=Path("/tmp/flow_source.v0003.yaml"),
+            is_versioned=True,
+        ),
+    ]
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+    load_calls: list[tuple[bool, str | None]] = []
+
+    def fake_load(session_state, loader, *, force: bool = False):
+        loaded_graph, loaded_wells = loader()
+        load_calls.append((force, session_state.get("selected_graph_version_id")))
+        return type("Documents", (), {"graph": loaded_graph, "wells": loaded_wells})()
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.load_session_documents",
+        fake_load,
+    )
+
+    assert coordinator.load_app_data() == (graph, wells)
+    assert st_module.session_state["selected_graph_version_id"] == "flow_source.v0003.yaml"
+    assert load_calls == [(True, "flow_source.v0003.yaml")]
+    assert ("load_documents", "flow_source.v0003.yaml") in gateway.calls

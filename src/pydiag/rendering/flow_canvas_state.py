@@ -30,6 +30,19 @@ def component_positions_from_state(
     return result or None
 
 
+def component_responsible_filter_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> list[str] | None:
+    if component_state is None or "responsible_filter" not in component_state:
+        return None
+    raw_filter = component_state.get("responsible_filter")
+    if not isinstance(raw_filter, list):
+        return None
+    known = set(graph.responsibles)
+    return [item for item in raw_filter if isinstance(item, str) and item in known]
+
+
 def component_selected_id_from_state(
     graph: FlowGraphDocument,
     wells_doc: WellsDocument,

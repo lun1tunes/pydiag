@@ -1,22 +1,30 @@
 from __future__ import annotations
 
-from pydiag.presentation.chrome import inject_css, legend_html
+from pydiag.presentation.chrome import (
+    CLIPBOARD_GUARD_SESSION_KEY,
+    inject_css,
+    legend_html,
+)
 
 
 class CaptureStreamlitModule:
     def __init__(self):
         self.rendered: list[str] = []
-        self.html_calls: list[tuple[str, dict[str, object]]] = []
+        self.iframe_calls: list[tuple[str, dict[str, object]]] = []
+        self.session_state: dict[str, object] = {}
 
     def markdown(self, body: str, *, unsafe_allow_html: bool = False) -> None:
         assert unsafe_allow_html is True
         self.rendered.append(body)
 
-    def html(self, body: str, **kwargs) -> None:
-        self.html_calls.append((body, kwargs))
+    def iframe(self, body: str, **kwargs) -> None:
+        self.iframe_calls.append((body, kwargs))
+
+    def set_option(self, key: str, value: object) -> None:
+        _ = key, value
 
 
-def test_legend_html_explains_block_types_and_responsible_colors(documents) -> None:
+def test_legend_html_explains_block_types_without_responsible_colors(documents) -> None:
     graph, _ = documents
 
     html = legend_html(graph)
@@ -27,10 +35,8 @@ def test_legend_html_explains_block_types_and_responsible_colors(documents) -> N
     assert "База данных" in html
     assert "Входные данные" in html
     assert "Событие" in html
-    assert "Цвета ответственных" in html
-    assert graph.responsibles["planning"].fill in html
-    assert graph.responsibles["planning"].border in html
-    assert "Планирование" in html
+    assert "Цвета ответственных" not in html
+    assert "legend-dept" not in html
     assert html.count('class="legend-symbol-svg"') == 5
     assert 'fill="#ffffff"' in html
     assert 'stroke="#111827"' in html
@@ -67,7 +73,6 @@ def test_css_keeps_sidebar_expand_control_available() -> None:
     assert ".stApp hr {" in css
     hidden_header_actions_block = css.split('[data-testid="stHeaderActionElements"],', maxsplit=1)[1].split(
         "}",
-        maxsplit=1,
     )[0]
     assert '[data-testid="stStatusWidget"]' not in hidden_header_actions_block
     toolbar_block = css.split('[data-testid="stToolbar"] {', maxsplit=1)[1].split(
@@ -75,4 +80,11 @@ def test_css_keeps_sidebar_expand_control_available() -> None:
         maxsplit=1,
     )[0]
     assert "display: none" not in toolbar_block
-    assert st_module.html_calls == []
+    assert len(st_module.iframe_calls) == 1
+    assert "pydiagClipboardGuard" in st_module.iframe_calls[0][0]
+    assert st_module.iframe_calls[0][1] == {"height": 1, "width": 1}
+
+    assert st_module.session_state[CLIPBOARD_GUARD_SESSION_KEY] is True
+
+    inject_css(st_module)
+    assert len(st_module.iframe_calls) == 1

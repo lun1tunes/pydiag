@@ -89,9 +89,9 @@ def decision_branch_source_side(
     dx = target.center_x - source.center_x
     dy = target.center_y - source.center_y
     if layout_mode != "snake":
-        if abs(dy) > abs(dx):
-            return "bottom" if dy >= 0 else "top"
-        return "right" if dx >= 0 else "left"
+        # Normalize by node half-size so wide diamonds still leave from the
+        # top/bottom vertex when the target sits clearly above/below.
+        return shape_normalized_side(source, dx, dy)
 
     if edge.kind == "yes":
         if source.row != target.row:
@@ -103,6 +103,14 @@ def decision_branch_source_side(
     if abs(dy) > abs(dx):
         return "right" if dx >= 0 else "left"
     return "right" if dx >= 0 else "left"
+
+
+def shape_normalized_side(source: NodeGeometry, dx: float, dy: float) -> str:
+    nx = dx / max(source.width / 2.0, 1.0)
+    ny = dy / max(source.height / 2.0, 1.0)
+    if abs(ny) > abs(nx):
+        return "bottom" if ny >= 0 else "top"
+    return "right" if nx >= 0 else "left"
 
 
 def directional_source_side(source: NodeGeometry, target: NodeGeometry) -> str:

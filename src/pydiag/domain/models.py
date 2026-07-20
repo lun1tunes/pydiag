@@ -11,7 +11,6 @@ MetaValue = str | int | float | bool | None
 NodeKind = Literal[
     "process",
     "decision_diamond",
-    "decision_card",
     "database",
     "input_data",
     "event",
@@ -120,10 +119,6 @@ class DecisionDiamondNode(NodeBase):
     type: Literal["decision_diamond"]
 
 
-class DecisionCardNode(NodeBase):
-    type: Literal["decision_card"]
-
-
 class DatabaseNode(NodeBase):
     type: Literal["database"]
 
@@ -143,7 +138,6 @@ class FigmaTextSkeletonNode(NodeBase):
 FlowNode = Annotated[
     ProcessNode
     | DecisionDiamondNode
-    | DecisionCardNode
     | DatabaseNode
     | InputDataNode
     | EventNode
@@ -214,7 +208,7 @@ class FlowGraphDocument(StrictModel):
 
         for node in self.nodes:
             if (
-                node.type in {"process", "decision_diamond", "decision_card"}
+                node.type in {"process", "decision_diamond"}
                 and not node.responsible
             ):
                 raise ValueError(

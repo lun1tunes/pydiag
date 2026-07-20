@@ -17,7 +17,9 @@ from .graph_versions import (
     resolve_graph_version_path,
 )
 from .storage import (
+    existing_default_graph_path,
     graph_path,
+    live_graph_source_exists,
     load_graph_source_edge_draft,
     load_graph_source_node_draft,
     load_documents,
@@ -26,6 +28,7 @@ from .storage import (
     save_graph_source_node_with_version_check,
     save_graph_positions_with_version_check,
     save_wells_with_version_check,
+    source_graph_path,
     wells_path,
 )
 
@@ -48,6 +51,9 @@ class JsonDocumentsGateway:
     )
     graph_path_fn: Callable[[], Path] = graph_path
     preferred_graph_source_path_fn: Callable[[], Path | None] = preferred_graph_source_path
+    existing_default_graph_path_fn: Callable[[], Path | None] = existing_default_graph_path
+    live_graph_source_exists_fn: Callable[[], bool] = live_graph_source_exists
+    source_graph_path_fn: Callable[[], Path] = source_graph_path
     wells_path_fn: Callable[[], Path] = wells_path
     save_graph_positions_fn: Callable[..., FlowGraphDocument] = (
         save_graph_positions_with_version_check
@@ -97,7 +103,13 @@ class JsonDocumentsGateway:
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument:
         if graph_version_id is None:
-            path = self.preferred_graph_source_path_fn() or self.graph_path_fn()
+            # Live YAML, else newest archive, else existing materialized JSON.
+            path = self.existing_default_graph_path_fn()
+            if path is None:
+                raise FileNotFoundError(
+                    "Нет файла схемы для сохранения положения. "
+                    "Выберите версию схемы или импортируйте данные."
+                )
         else:
             path = self.resolve_graph_version_path_fn(graph_version_id)
         return self.save_graph_positions_fn(
@@ -157,6 +169,9 @@ class JsonDocumentsGateway:
 
     def list_graph_versions(self) -> list[GraphVersionInfo]:
         return self.list_graph_versions_fn()
+
+    def live_graph_source_exists(self) -> bool:
+        return self.live_graph_source_exists_fn()
 
     def can_materialize_graph_version(self) -> bool:
         return self.can_materialize_graph_version_fn()

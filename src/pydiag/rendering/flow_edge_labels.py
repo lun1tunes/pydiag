@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import hypot
 
+from .flow_layout_positions import node_ports
 from .flow_route_geometry import EdgeRoute, NodeGeometry, Point, port_point
 
 EDGE_LABEL_GAP = 12

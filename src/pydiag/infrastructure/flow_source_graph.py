@@ -38,7 +38,6 @@ FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
     "process": (320, 120),
     "decision_diamond": (360, 220),
-    "decision_card": (340, 140),
     "database": (320, 120),
     "input_data": (320, 120),
     "event": (320, 96),
@@ -166,6 +165,13 @@ class FlowSourceNode(FlowSourceStrictModel):
     source_ref: dict[str, MetaValue] = Field(default_factory=dict)
     transitions: list[FlowSourceTransition] = Field(default_factory=list)
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def migrate_legacy_kind(cls, value: object) -> object:
+        if value == "decision_card":
+            return "process"
+        return value
 
     @field_validator("duration")
     @classmethod
@@ -665,14 +671,19 @@ def update_flow_source_payload_edge(
         raise RuntimeError(
             f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
         )
-    if command.source not in document.nodes:
-        raise ValueError(f"Unknown edge source node: {command.source}")
-    if command.target not in document.nodes:
-        raise ValueError(f"Unknown edge target node: {command.target}")
 
     source_node_id, transition_index = find_transition_location(document, command.edge_id)
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
+
+    if command.deleted is True:
+        del updated.nodes[source_node_id].transitions[transition_index]
+        return updated.model_dump(mode="json")
+
+    if command.source not in document.nodes:
+        raise ValueError(f"Unknown edge source node: {command.source}")
+    if command.target not in document.nodes:
+        raise ValueError(f"Unknown edge target node: {command.target}")
 
     current_transition = updated.nodes[source_node_id].transitions[transition_index]
     replacement = current_transition.model_copy(

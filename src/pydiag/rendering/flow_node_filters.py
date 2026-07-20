@@ -7,7 +7,6 @@ from pydiag.domain.models import FlowGraphDocument, FlowNode, Well, WellsDocumen
 KIND_LABELS = {
     "process": "Процесс",
     "decision_diamond": "Решение",
-    "decision_card": "Решение",
     "database": "База данных",
     "input_data": "Входные данные",
     "event": "Событие",

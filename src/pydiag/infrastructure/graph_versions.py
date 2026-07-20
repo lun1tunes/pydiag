@@ -22,6 +22,7 @@ from .flow_source_graph import (
 from .storage_io import save_text_atomic
 from .storage_paths import (
     configured_graph_path,
+    graph_version_display_label,
     graph_version_paths,
     next_graph_version_path,
     preferred_graph_source_path,
@@ -55,7 +56,7 @@ def list_graph_versions() -> list[GraphVersionInfo]:
     return [
         GraphVersionInfo(
             id=path.name,
-            label=path.name,
+            label=graph_version_display_label(path),
             path=path,
             is_versioned=True,
         )
@@ -177,7 +178,7 @@ def import_live_graph_source_from_raw(
         changed=True,
         backup_version=GraphVersionInfo(
             id=backup_path.name,
-            label=backup_path.name,
+            label=graph_version_display_label(backup_path),
             path=backup_path,
             is_versioned=True,
         ),
@@ -199,7 +200,7 @@ def materialize_new_graph_version_from_raw_source(
     )
     return GraphVersionInfo(
         id=target.name,
-        label=target.name,
+        label=graph_version_display_label(target),
         path=target,
         is_versioned=True,
     )

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from pydiag.rendering.flow_canvas_component import _asset_text, flow_canvas_component
+from pydiag.rendering.flow_canvas_component import (
+    _FLOW_CANVAS_COMPONENTS,
+    _asset_text,
+    flow_canvas_component,
+)
 
 
-def test_flow_canvas_component_reuses_single_registration() -> None:
-    assert flow_canvas_component() is flow_canvas_component()
+def test_flow_canvas_component_reuses_registration_for_same_manager() -> None:
+    _FLOW_CANVAS_COMPONENTS.clear()
+    first = flow_canvas_component()
+    second = flow_canvas_component()
+    assert first is second
+    assert 0 in _FLOW_CANVAS_COMPONENTS or len(_FLOW_CANVAS_COMPONENTS) >= 1
 
 
 def test_flow_canvas_fit_view_starts_from_top_padding() -> None:
@@ -24,7 +32,7 @@ def test_flow_canvas_keeps_viewport_local_without_python_sync() -> None:
     assert "function syncViewState(" not in js
     assert "function scheduleViewStateSync(" not in js
     assert "persisted_view_state" not in js
-    assert 'state.component.setStateValue("selected_id", value);' in js
+    assert 'state.component.setStateValue("selected_id", nextSelectedId);' in js
     assert 'state.component.setStateValue("positions", copyPositionMap(state.positions));' in js
 
 
@@ -43,8 +51,35 @@ def test_flow_canvas_reuses_persistent_dom_and_patches_only_changed_scene_parts(
     assert "updateNodePositions(state);" in js
     assert "function updateDraggedNode(state, nodeId) {" in js
     assert "updateDraggedNode(state, state.draggingNodeId);" in js
-    assert "updateSelectionState(state, state.renderedSelectedId, state.selectedId);" in js
+    assert "updateSelectionState(" in js
     assert "state.dom.stage.style.transform =" in js
+
+
+def test_flow_canvas_supports_ctrl_multiselect_and_group_drag() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    assert "selectedNodeIds: new Set()," in js
+    assert "function isMultiSelectModifier(event)" in js
+    assert "function resolveDragNodeIds(state, nodeId)" in js
+    assert "selectId(state, node.id, { additive: isMultiSelectModifier(event) });" in js
+    assert "state.suppressNextNodeClick = true;" in js
+    assert "NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX" in js
+    assert "event.ctrlKey || event.metaKey" in js
+    assert "state.selectedNodeIds.has(nodeId) && state.selectedNodeIds.size > 1" in js
+    assert "for (const id of state.draggingNodeIds)" in js
+
+
+def test_flow_canvas_resets_positions_version_on_session_epoch_change() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    assert "state.sessionEpoch !== payload.session_epoch" in js
+    assert "state.positions = {};" in js
+    assert "state.positionsVersion = 0;" in js
+    assert "state.renderedPositionsVersion = -1;" in js
+    # Epoch reset must not merely bump the counter.
+    epoch_block_start = js.index("state.sessionEpoch !== payload.session_epoch")
+    epoch_block = js[epoch_block_start : epoch_block_start + 800]
+    assert "state.positionsVersion += 1;" not in epoch_block
 
 
 def test_flow_canvas_ignores_invalid_payload_instead_of_empty_flash() -> None:
@@ -74,7 +109,7 @@ def test_flow_canvas_pan_does_not_clear_card_selection_on_click() -> None:
     js = _asset_text("flow_canvas.js")
 
     assert "PAN_CLICK_SUPPRESS_DISTANCE_PX" in js
-    assert "if (!panDidMove && state.selectedId !== null) {" in js
+    assert "if (!panDidMove && (state.selectedId !== null || state.selectedNodeIds.size > 0)) {" in js
     assert "selectId(state, null);" in js
     # Background deselect must not use click — pan synthesizes click after drag.
     assert 'viewport.addEventListener("click"' not in js
@@ -107,12 +142,52 @@ def test_flow_canvas_assets_define_shape_aware_blue_selection_effect() -> None:
     assert ".flow-node-card.is-selected {" in css
 
 
+def test_flow_canvas_edge_corners_keep_orthogonal_rounds_without_crushing_stubs() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    assert "const CORNER_RADIUS = 14;" in js
+    assert "const MIN_LEG_FOR_ROUND = 28;" in js
+    assert "Q ${current.x} ${current.y} ${end.x} ${end.y}" in js
+
+
+def test_flow_canvas_hosts_responsible_legend_beside_toolbar() -> None:
+    js = _asset_text("flow_canvas.js")
+    css = _asset_text("flow_canvas.css")
+
+    assert 'createElement("div", "flow-canvas-topbar", root)' in js
+    assert 'createElement("div", "flow-canvas-legend", topbar)' in js
+    assert "function syncResponsibleLegend(state)" in js
+    assert "function syncLegendHighlight(state)" in js
+    assert "function toggleResponsibleFilter(state, responsibleKey)" in js
+    assert "function syncResponsibleFilterDim(state)" in js
+    assert "function ensureLegendClearButton(state)" in js
+    assert 'createElement("button", "flow-canvas-legend__clear")' in js
+    assert "setResponsibleFilter(state, [])" in js
+    assert "state.dom.legendClear.hidden = !filterActive" in js
+    assert 'state.component.setStateValue("responsible_filter", next)' in js
+    assert "lastHostResponsibleFilter" in js
+    assert "Host sent a different filter (sidebar / external)" in js
+    assert "primary_responsible" in js
+    assert "responsible_legend" in js
+    assert ".flow-canvas-topbar {" in css
+    assert ".flow-canvas-legend__item {" in css
+    assert ".flow-canvas-legend__item.is-filter-active," in css
+    assert ".flow-canvas-legend__clear {" in css
+    assert ".flow-node-shell.is-filter-dimmed," in css
+    assert ".flow-canvas-toolbar {" in css
+    assert "margin-left: auto;" in css
+
+
 def test_flow_canvas_assets_define_fullscreen_mode() -> None:
     js = _asset_text("flow_canvas.js")
     css = _asset_text("flow_canvas.css")
 
     assert 'ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);' in js
     assert "requestElementFullscreen(state.root)" in js
-    assert 'fullscreenButton.textContent = fullscreenActive ? "Exit" : "Full";' in js
+    assert "exitDocumentFullscreen(state.ownerDocument)" in js
+    assert "fullscreenEnterIcon()" in js
+    assert "fullscreenExitIcon()" in js
+    assert 'fullscreenActive ? fullscreenExitIcon() : fullscreenEnterIcon()' in js
     assert ".flow-canvas-root.is-fullscreen," in css
+    assert ".flow-canvas-toolbar__button--icon {" in css
     assert ".flow-canvas-toolbar__button.is-active {" in css

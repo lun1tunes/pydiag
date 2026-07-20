@@ -12,6 +12,7 @@ from pydiag.domain.models import (
     Well,
     WellsDocument,
 )
+from pydiag.presentation.html_utils import safe_text
 from pydiag.presentation.inspector_models import (
     build_edge_inspector_model,
     build_node_inspector_model,
@@ -35,9 +36,8 @@ def render_inspector(
     *,
     actions: InspectorActions,
 ) -> None:
-    st_module.markdown('<div class="inspector-shell">', unsafe_allow_html=True)
-    st_module.markdown("### Инспектор")
     selection_kind, selected = resolve_selection(selected_id, graph, wells)
+    is_admin = actions.current_user_is_admin()
 
     if selection_kind == "node" and selected is not None:
         render_node_details(st_module, graph, wells, selected)
@@ -45,14 +45,27 @@ def render_inspector(
         render_well_details(st_module, graph, selected)
     elif selection_kind == "edge" and selected is not None:
         render_edge_details(st_module, graph, selected)
-    else:
+    elif not is_admin:
+        # Для админа распределение живёт в блоке «Скважины».
         render_overview_tables(st_module, graph, wells)
 
-    if actions.current_user_is_admin():
-        st_module.divider()
+    if is_admin:
         actions.render_admin_panel(graph, wells, selected_id)
 
-    st_module.markdown("</div>", unsafe_allow_html=True)
+
+def _render_entity_header(st_module, *, title: str, subtitle_html: str) -> None:
+    st_module.markdown(
+        f'<p class="inspector-entity">{safe_text(title)}</p>'
+        f'<p class="inspector-sub">{subtitle_html}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_section_label(st_module, label: str) -> None:
+    st_module.markdown(
+        f'<p class="inspector-section-label">{safe_text(label)}</p>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_node_details(
@@ -62,16 +75,15 @@ def render_node_details(
     node: FlowNode,
 ) -> None:
     model = build_node_inspector_model(graph, wells, node)
-
-    st_module.markdown(f"#### {model.section.title}")
-    st_module.markdown(
-        f'<p class="muted-line">{model.section.subtitle_html}</p>',
-        unsafe_allow_html=True,
+    _render_entity_header(
+        st_module,
+        title=model.section.title,
+        subtitle_html=model.section.subtitle_html,
     )
     st_module.markdown(model.section.details_html, unsafe_allow_html=True)
 
     if model.wells_rows:
-        st_module.markdown("##### Скважины на этапе")
+        _render_section_label(st_module, "Скважины на этапе")
         st_module.dataframe(
             pd.DataFrame(model.wells_rows),
             width="stretch",
@@ -79,7 +91,7 @@ def render_node_details(
         )
 
     if model.transitions_rows:
-        st_module.markdown("##### Доступные переходы")
+        _render_section_label(st_module, "Связи")
         st_module.dataframe(
             pd.DataFrame(model.transitions_rows),
             width="stretch",
@@ -89,15 +101,14 @@ def render_node_details(
 
 def render_well_details(st_module, graph: FlowGraphDocument, well: Well) -> None:
     model = build_well_inspector_model(graph, well)
-
-    st_module.markdown(f"#### {model.section.title}")
-    st_module.markdown(
-        f'<p class="muted-line">{model.section.subtitle_html}</p>',
-        unsafe_allow_html=True,
+    _render_entity_header(
+        st_module,
+        title=model.section.title,
+        subtitle_html=model.section.subtitle_html,
     )
     st_module.markdown(model.section.details_html, unsafe_allow_html=True)
     if model.history_rows:
-        st_module.markdown("##### Журнал")
+        _render_section_label(st_module, "Журнал")
         st_module.dataframe(
             pd.DataFrame(model.history_rows),
             width="stretch",
@@ -107,10 +118,10 @@ def render_well_details(st_module, graph: FlowGraphDocument, well: Well) -> None
 
 def render_edge_details(st_module, graph: FlowGraphDocument, edge: FlowEdge) -> None:
     model = build_edge_inspector_model(graph, edge)
-    st_module.markdown(f"#### {model.section.title}")
-    st_module.markdown(
-        f'<p class="muted-line">{model.section.subtitle_html}</p>',
-        unsafe_allow_html=True,
+    _render_entity_header(
+        st_module,
+        title=model.section.title,
+        subtitle_html=model.section.subtitle_html,
     )
     st_module.markdown(model.section.details_html, unsafe_allow_html=True)
 
@@ -118,5 +129,10 @@ def render_edge_details(st_module, graph: FlowGraphDocument, edge: FlowEdge) -> 
 def render_overview_tables(st_module, graph: FlowGraphDocument, wells: WellsDocument) -> None:
     top_rows = build_overview_rows(graph, wells)
     if top_rows:
-        st_module.markdown("##### Распределение")
+        _render_section_label(st_module, "Распределение")
         st_module.dataframe(pd.DataFrame(top_rows), width="stretch", hide_index=True)
+    else:
+        st_module.markdown(
+            '<p class="inspector-sub">Выберите элемент на схеме</p>',
+            unsafe_allow_html=True,
+        )

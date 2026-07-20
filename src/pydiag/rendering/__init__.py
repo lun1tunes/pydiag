@@ -27,6 +27,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_canvas_adapter",
         "component_positions_from_state",
     ),
+    "component_responsible_filter_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_responsible_filter_from_state",
+    ),
     "component_selected_id_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_selected_id_from_state",
