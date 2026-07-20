@@ -31,7 +31,7 @@ def test_build_header_model_counts_only_active_wells_and_busy_nodes(documents) -
     model = build_header_model(graph, wells)
     metrics = {item.label: item.value for item in model.metrics}
 
-    assert model.title == "Карта планирования и бурения"
+    assert model.title == "Схема планирования и строительства скважин"
     assert "current_node_id" in model.subtitle
     assert metrics == {
         "Узлы": len(graph.nodes),

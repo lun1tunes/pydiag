@@ -8,7 +8,7 @@ from pydiag.presentation.runtime import StreamlitAppRuntime
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
 st.set_page_config(
-    page_title="Планирование и бурение скважин",
+    page_title="Схема планирования и строительства скважин",
     page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",

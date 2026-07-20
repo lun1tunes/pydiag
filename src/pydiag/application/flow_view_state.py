@@ -22,6 +22,7 @@ def flow_state_timestamp(
     kind_filter: list[str],
     layout_mode: str,
     position_edit_enabled: bool = False,
+    edge_edit_enabled: bool = False,
 ) -> int:
     del responsible_filter  # applied client-side; excluded from scene revision
     signature = flow_view_signature(
@@ -31,6 +32,7 @@ def flow_state_timestamp(
         kind_filter=kind_filter,
         layout_mode=layout_mode,
         position_edit_enabled=position_edit_enabled,
+        edge_edit_enabled=edge_edit_enabled,
     )
     if session_state.get(FLOW_VIEW_SIGNATURE_KEY) != signature:
         previous = int(session_state.get(FLOW_STATE_TIMESTAMP_KEY, 0))
@@ -47,6 +49,7 @@ def flow_view_signature(
     kind_filter: list[str],
     layout_mode: str,
     position_edit_enabled: bool,
+    edge_edit_enabled: bool = False,
 ) -> tuple[Any, ...]:
     # Responsible legend filtering is applied client-side and must not bump
     # revision / rebuild the graph scene.
@@ -59,4 +62,5 @@ def flow_view_signature(
         tuple(kind_filter),
         layout_mode,
         position_edit_enabled,
+        edge_edit_enabled,
     )

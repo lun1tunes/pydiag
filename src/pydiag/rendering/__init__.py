@@ -23,6 +23,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_streamlit_nodes",
         "build_streamlit_nodes",
     ),
+    "component_pending_edge_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_edge_from_state",
+    ),
     "component_positions_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_positions_from_state",

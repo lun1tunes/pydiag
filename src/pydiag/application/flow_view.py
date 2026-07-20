@@ -6,6 +6,7 @@ from typing import Any
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 from pydiag.rendering import (
     build_flow_canvas_payload,
+    component_pending_edge_from_state,
     component_responsible_filter_from_state,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "RESPONSIBLE_FILTER_LAST_KEY",
     "RESPONSIBLE_FILTER_SESSION_KEY",
     "bump_flow_canvas_session_epoch",
+    "consume_pending_canvas_edge",
     "consume_responsible_filter_rerun_request",
     "flow_state_timestamp",
     "render_flow",
@@ -53,6 +55,7 @@ def render_flow(
     kind_filter: list[str],
     layout_mode: str,
     position_edit_enabled: bool,
+    edge_edit_enabled: bool = False,
     render_canvas,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> str | None:
@@ -83,6 +86,7 @@ def render_flow(
         kind_filter=kind_filter,
         layout_mode=render_context.layout_mode,
         position_edit_enabled=position_edit_enabled,
+        edge_edit_enabled=edge_edit_enabled,
     )
     snapshot_cache = session_state.setdefault(FLOW_RENDER_SNAPSHOT_CACHE_KEY, {})
     if not isinstance(snapshot_cache, dict):
@@ -97,6 +101,7 @@ def render_flow(
         selected_id=selected_id,
         layout_mode=render_context.layout_mode,
         domain_nodes_draggable=position_edit_enabled,
+        edge_edit_enabled=edge_edit_enabled,
         revision=revision,
         snapshot_cache=snapshot_cache,
         session_epoch=int(session_state.get(FLOW_CANVAS_SESSION_EPOCH_KEY, 0) or 0),
@@ -111,6 +116,25 @@ def render_flow(
     # Selection stays local in canvas JS; session_state is only mirrored for the
     # inspector in the same fragment. Never request a full-app selection rerun.
     return sync_returned_selected_id(session_state, graph, wells, selected_id, returned)
+
+
+def consume_pending_canvas_edge(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, str] | None:
+    """Take a pending canvas edge once, clearing component state to avoid repeats."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_edge_from_state(graph, component_state)
+    if pending is None:
+        return None
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_edge"] = None
+        session_state[component_key] = updated
+    return pending
 
 
 def resolve_responsible_filter(

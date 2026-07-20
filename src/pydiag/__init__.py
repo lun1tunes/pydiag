@@ -1,4 +1,4 @@
-"""Planning and drilling flow prototype."""
+"""Well planning and construction schema prototype."""
 
 __all__ = [
     "application",

@@ -130,7 +130,9 @@ def prepare_temp_workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
 def test_streamlit_app_renders_default_workspace(data_paths, monkeypatch) -> None:
     app = run_app_with_temp_data(data_paths, monkeypatch)
 
-    assert not any("Карта планирования и бурения" in item.value for item in app.markdown)
+    assert not any(
+        "Схема планирования и строительства скважин" in item.value for item in app.markdown
+    )
     assert not any(
         "Скважины привязаны к этапам процесса через current_node_id" in item.value
         for item in app.markdown
@@ -483,3 +485,59 @@ def test_streamlit_admin_can_delete_selected_flow_source_edge(
     assert "selected_id" not in app.session_state or (
         app.session_state["selected_id"] != "e_review_decision"
     )
+
+
+def test_streamlit_admin_can_create_edge_from_selected_card(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+    before = load_structured_payload(source_path.read_bytes())
+    before_count = len(before["nodes"]["proc_initial_review"].get("transitions", []))
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    login_as_admin(app)
+
+    assert any(
+        "Связи" in getattr(item, "value", "")
+        for item in app.markdown
+        if getattr(item, "value", None)
+    )
+
+    create_prefix = "graph_source_edge_create::proc_initial_review_"
+    target_box = next(
+        item
+        for item in app.selectbox
+        if getattr(item, "key", None) == f"{create_prefix}target"
+    )
+    kind_box = next(
+        item
+        for item in app.selectbox
+        if getattr(item, "key", None) == f"{create_prefix}kind"
+    )
+    label_input = next(
+        item
+        for item in app.text_input
+        if getattr(item, "key", None) == f"{create_prefix}label"
+    )
+    target_box.set_value("card_mitigation").run(timeout=30)
+    assert not app.exception
+    kind_box.set_value("dashed").run(timeout=30)
+    assert not app.exception
+    label_input.set_value("UI create").run(timeout=30)
+    assert not app.exception
+    click_button(app, "Добавить связь")
+
+    saved = load_structured_payload(source_path.read_bytes())
+    transitions = saved["nodes"]["proc_initial_review"]["transitions"]
+    assert len(transitions) == before_count + 1
+    created = transitions[-1]
+    assert created["to"] == "card_mitigation"
+    assert created["kind"] == "dashed"
+    assert created["label"] == "UI create"

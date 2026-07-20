@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from pydiag.application import (
+    CreateGraphSourceEdgeCommand,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
@@ -71,6 +72,10 @@ class AdminActions:
     ]
     persist_graph_source_edge_update: Callable[
         [FlowGraphDocument, UpdateGraphSourceEdgeCommand],
+        None,
+    ]
+    persist_graph_source_edge_create: Callable[
+        [FlowGraphDocument, CreateGraphSourceEdgeCommand],
         None,
     ]
     graph_source_edit_available: Callable[[], bool]
@@ -664,6 +669,7 @@ def render_related_graph_source_edges_for_node(
     *,
     actions: AdminActions,
 ) -> None:
+    _render_section_label(st_module, "Связи")
     related_edges = [
         edge
         for edge in graph.edges
@@ -671,24 +677,118 @@ def render_related_graph_source_edges_for_node(
     ]
     if not related_edges:
         st_module.caption("У карточки пока нет связей.")
+    else:
+        node_map = node_by_id(graph)
+        for edge in related_edges:
+            edge_kind = "default" if edge.kind == "usual" else edge.kind
+            edge_title = (
+                f"{node_map[edge.source].text} -> {node_map[edge.target].text}"
+                f" · {EDGE_KIND_LABELS[edge_kind]}"
+            )
+            with st_module.expander(edge_title, expanded=False):
+                render_graph_source_edge_editor(
+                    st_module,
+                    graph,
+                    edge,
+                    actions=actions,
+                    form_key_prefix=f"graph_source_edge_{edge.id}",
+                    submit_label="Сохранить эту связь",
+                )
+
+    render_create_graph_source_edge_form(
+        st_module,
+        graph,
+        source_node=node,
+        actions=actions,
+    )
+
+
+def render_create_graph_source_edge_form(
+    st_module,
+    graph: FlowGraphDocument,
+    *,
+    source_node: FlowNode,
+    actions: AdminActions,
+) -> None:
+    editable = actions.graph_source_edit_available()
+    node_ids = [item.id for item in graph.nodes]
+    target_options = [node_id for node_id in node_ids if node_id != source_node.id]
+    if not target_options:
+        st_module.caption("Нет других карточек для новой связи.")
         return
 
     node_map = node_by_id(graph)
-    for edge in related_edges:
-        edge_kind = "default" if edge.kind == "usual" else edge.kind
-        edge_title = (
-            f"{node_map[edge.source].text} -> {node_map[edge.target].text}"
-            f" · {EDGE_KIND_LABELS[edge_kind]}"
-        )
-        with st_module.expander(edge_title, expanded=False):
-            render_graph_source_edge_editor(
-                st_module,
-                graph,
-                edge,
-                actions=actions,
-                form_key_prefix=f"graph_source_edge_{edge.id}",
-                submit_label="Сохранить эту связь",
+    edge_kind_options = list(EDGE_KIND_LABELS.keys())
+    form_key = f"graph_source_edge_create::{source_node.id}"
+
+    def field_key(name: str) -> str:
+        return f"{form_key}_{name}"
+
+    with st_module.expander("Новая связь", expanded=False):
+        st_module.caption(f"Откуда: {source_node.text}")
+        with st_module.form(f"{form_key}_form", clear_on_submit=True):
+            target = st_module.selectbox(
+                "Куда",
+                options=target_options,
+                index=0,
+                format_func=lambda value: node_map[value].text,
+                key=field_key("target"),
+                disabled=not editable,
             )
+            kind = st_module.selectbox(
+                "Тип связи",
+                options=edge_kind_options,
+                index=0,
+                format_func=lambda value: EDGE_KIND_LABELS[value],
+                key=field_key("kind"),
+                disabled=not editable,
+            )
+            label = st_module.text_input(
+                "Метка связи",
+                value="",
+                key=field_key("label"),
+                disabled=not editable,
+            )
+            condition = st_module.text_input(
+                "Условие",
+                value="",
+                key=field_key("condition"),
+                disabled=not editable,
+            )
+            note = st_module.text_area(
+                "Заметка",
+                value="",
+                height=68,
+                key=field_key("note"),
+                disabled=not editable,
+            )
+            submitted = st_module.form_submit_button(
+                "Добавить связь",
+                width="stretch",
+                disabled=not editable,
+            )
+
+    if not submitted:
+        return
+
+    if not editable:
+        st_module.error(
+            actions.graph_source_edit_block_reason()
+            or "Редактирование схемы сейчас недоступно."
+        )
+        return
+
+    actions.persist_graph_source_edge_create(
+        graph,
+        CreateGraphSourceEdgeCommand(
+            source=source_node.id,
+            target=target,
+            kind=kind,
+            label=normalized_optional_text(label),
+            condition=normalized_optional_text(condition),
+            note=normalized_optional_text(note),
+        ),
+    )
 
 
 def validate_graph_source_node_form(

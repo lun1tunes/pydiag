@@ -13,6 +13,7 @@ GraphSourceNodeKind = Literal[
 GraphSourceEdgeKind = Literal["default", "yes", "no", "dashed"]
 
 __all__ = [
+    "CreateGraphSourceEdgeCommand",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
     "GraphSourceNodeDraft",
@@ -76,3 +77,13 @@ class UpdateGraphSourceEdgeCommand:
     condition: str | None
     note: str | None
     deleted: bool | None = None
+
+
+@dataclass(frozen=True)
+class CreateGraphSourceEdgeCommand:
+    source: str
+    target: str
+    kind: GraphSourceEdgeKind
+    label: str | None
+    condition: str | None
+    note: str | None

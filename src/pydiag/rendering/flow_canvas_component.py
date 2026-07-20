@@ -29,11 +29,13 @@ def render_flow_canvas(
             "selected_id": default_selected_id,
             "positions": default_positions,
             "responsible_filter": list(default_responsible_filter or []),
+            "pending_edge": None,
         },
         height="content",
         on_selected_id_change=lambda: None,
         on_positions_change=lambda: None,
         on_responsible_filter_change=lambda: None,
+        on_pending_edge_change=lambda: None,
     )
 
 

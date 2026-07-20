@@ -43,6 +43,31 @@ def component_responsible_filter_from_state(
     return [item for item in raw_filter if isinstance(item, str) and item in known]
 
 
+def component_pending_edge_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """Return a validated {source, target, kind} pending edge from canvas state."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_edge")
+    if not isinstance(raw, Mapping):
+        return None
+    source = raw.get("source")
+    target = raw.get("target")
+    kind = raw.get("kind", "default")
+    if not isinstance(source, str) or not isinstance(target, str):
+        return None
+    if not source or not target or source == target:
+        return None
+    node_ids = {node.id for node in graph.nodes}
+    if source not in node_ids or target not in node_ids:
+        return None
+    if kind not in {"default", "yes", "no", "dashed"}:
+        kind = "default"
+    return {"source": source, "target": target, "kind": kind}
+
+
 def component_selected_id_from_state(
     graph: FlowGraphDocument,
     wells_doc: WellsDocument,

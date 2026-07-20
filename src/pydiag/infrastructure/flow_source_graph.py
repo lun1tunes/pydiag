@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pydiag.common.graph_source_admin import (
+    CreateGraphSourceEdgeCommand,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
@@ -92,6 +93,7 @@ __all__ = [
     "graph_source_node_draft_from_payload",
     "is_flow_source_payload",
     "load_structured_payload",
+    "create_flow_source_payload_edge",
     "update_flow_source_payload_custom_layout",
     "update_flow_source_payload_edge",
     "update_flow_source_payload_layout",
@@ -705,6 +707,52 @@ def update_flow_source_payload_edge(
     return updated.model_dump(mode="json")
 
 
+def create_flow_source_payload_edge(
+    payload: object,
+    *,
+    command: CreateGraphSourceEdgeCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    if command.source not in document.nodes:
+        raise ValueError(f"Unknown edge source node: {command.source}")
+    if command.target not in document.nodes:
+        raise ValueError(f"Unknown edge target node: {command.target}")
+    if flow_source_node_deleted(document.nodes[command.source]):
+        raise ValueError(f"Edge source node is deleted: {command.source}")
+    if flow_source_node_deleted(document.nodes[command.target]):
+        raise ValueError(f"Edge target node is deleted: {command.target}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    used_edge_ids = collect_used_edge_ids(updated)
+    transition_index = len(updated.nodes[command.source].transitions)
+    edge_id = unique_edge_id(
+        None,
+        source=command.source,
+        target=command.target,
+        kind=command.kind,
+        label=command.label,
+        index=transition_index,
+        used_ids=used_edge_ids,
+    )
+    updated.nodes[command.source].transitions.append(
+        FlowSourceTransition(
+            to=command.target,
+            kind=command.kind,
+            label=command.label,
+            condition=command.condition,
+            note=command.note,
+            id=edge_id,
+        )
+    )
+    return updated.model_dump(mode="json")
+
+
 def dump_flow_source_payload(payload: object) -> str:
     document = FlowSourceDocument.model_validate(payload, strict=True)
     normalized = sanitize_flow_source_document_payload(document.model_dump(mode="json"))
@@ -777,6 +825,23 @@ def auto_layout_entry(kind: EditableNodeKind, index: int) -> FlowSourceLayoutEnt
         w=width,
         h=height,
     )
+
+
+def collect_used_edge_ids(document: FlowSourceDocument) -> set[str]:
+    used_edge_ids: set[str] = set()
+    for node_id, node in document.nodes.items():
+        for transition_index, transition in enumerate(node.transitions):
+            runtime_edge_id = unique_edge_id(
+                transition.id,
+                source=node_id,
+                target=transition.to,
+                kind=transition.kind,
+                label=transition.label,
+                index=transition_index,
+                used_ids=used_edge_ids,
+            )
+            used_edge_ids.add(runtime_edge_id)
+    return used_edge_ids
 
 
 def find_transition_location(

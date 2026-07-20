@@ -44,6 +44,7 @@ def build_flow_canvas_payload(
     selected_id: str | None = None,
     layout_mode: str = "snake",
     domain_nodes_draggable: bool = False,
+    edge_edit_enabled: bool = False,
     revision: int | None = None,
     snapshot: FlowRenderSnapshot | None = None,
     snapshot_cache: MutableMapping[Any, Any] | None = None,
@@ -86,6 +87,7 @@ def build_flow_canvas_payload(
         "edges": edges,
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
+        "edge_edit_enabled": bool(edge_edit_enabled),
         "layout_mode": snapshot.layout_mode,
         "revision": revision if revision is not None else snapshot.graph.version,
         "canvas": {

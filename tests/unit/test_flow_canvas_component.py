@@ -109,12 +109,26 @@ def test_flow_canvas_pan_does_not_clear_card_selection_on_click() -> None:
     js = _asset_text("flow_canvas.js")
 
     assert "PAN_CLICK_SUPPRESS_DISTANCE_PX" in js
-    assert "if (!panDidMove && (state.selectedId !== null || state.selectedNodeIds.size > 0)) {" in js
+    assert "if (!panDidMove) {" in js
     assert "selectId(state, null);" in js
+    assert "cancelConnectMode(state);" in js
     # Background deselect must not use click — pan synthesizes click after drag.
     assert 'viewport.addEventListener("click"' not in js
     assert "pendingSelectedId" in js
     assert "viewport.setPointerCapture" in js
+
+
+def test_flow_canvas_supports_click_to_connect_handles() -> None:
+    js = _asset_text("flow_canvas.js")
+    css = _asset_text("flow_canvas.css")
+
+    assert "edge_edit_enabled" in js
+    assert "buildConnectionHandles(state, elements.shell, node)" in js
+    assert 'setStateValue("pending_edge"' in js
+    assert "beginConnectMode(state, node.id, side)" in js
+    assert "completeConnectMode(state, node.id)" in js
+    assert ".flow-node-handle" in css
+    assert ".flow-canvas-connect-hint" in css
 
 
 def test_flow_canvas_root_uses_taller_workspace_height() -> None:

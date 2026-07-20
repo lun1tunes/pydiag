@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydiag.application import (
+    CreateGraphSourceEdgeCommand,
     DocumentsGateway,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
     GraphSourceEdgeDraft,
@@ -260,11 +261,10 @@ class StreamlitSessionCoordinator:
             return
 
         def save() -> FlowGraphDocument:
-            # Always write the live schema — archived versions are read-only.
             return self.documents_gateway.save_graph_positions(
                 positions,
                 expected_version=graph.version,
-                graph_version_id=None,
+                graph_version_id=self.editable_graph_version_id(),
             )
 
         result = persist_graph_positions(
@@ -307,7 +307,7 @@ class StreamlitSessionCoordinator:
             save=lambda: self.documents_gateway.save_graph_source_node(
                 command,
                 expected_version=graph.version,
-                graph_version_id=None,
+                graph_version_id=self.editable_graph_version_id(),
             ),
             reload_data=self.load_app_data,
             success_message=(
@@ -335,7 +335,7 @@ class StreamlitSessionCoordinator:
             save=lambda: self.documents_gateway.save_graph_source_edge(
                 command,
                 expected_version=graph.version,
-                graph_version_id=None,
+                graph_version_id=self.editable_graph_version_id(),
             ),
             reload_data=self.load_app_data,
             success_message=(
@@ -348,8 +348,50 @@ class StreamlitSessionCoordinator:
             self.session_state.pop("selected_id", None)
         self.finalize_persistence(result.should_rerun, result.error_message)
 
+    def create_graph_source_edge(
+        self,
+        graph: FlowGraphDocument,
+        command: CreateGraphSourceEdgeCommand,
+    ) -> None:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=lambda: self.documents_gateway.create_graph_source_edge(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            ),
+            reload_data=self.load_app_data,
+            success_message="Связь схемы создана",
+        )
+        self.finalize_persistence(result.should_rerun, result.error_message)
+
+    def working_schema_selected(self) -> bool:
+        """True for the live schema, or the newest archive when no live file exists."""
+        selected = self.selected_graph_version_id()
+        if selected is None:
+            return True
+        if self.live_graph_source_exists():
+            return False
+        versions = self.documents_gateway.list_graph_versions()
+        if not versions:
+            return False
+        return selected == newest_graph_version(versions).id
+
+    def editable_graph_version_id(self) -> str | None:
+        """Version id for writes: None = live/default path; otherwise newest archive."""
+        if not self.working_schema_selected():
+            raise RuntimeError("Editable schema is not selected")
+        return self.selected_graph_version_id()
+
     def position_edit_available(self) -> bool:
-        return self.selected_graph_version_id() is None
+        return self.working_schema_selected()
 
     def position_edit_block_reason(self) -> str | None:
         if self.position_edit_available():
@@ -360,7 +402,7 @@ class StreamlitSessionCoordinator:
         )
 
     def wells_edit_available(self) -> bool:
-        return self.selected_graph_version_id() is None
+        return self.working_schema_selected()
 
     def wells_edit_block_reason(self) -> str | None:
         if self.wells_edit_available():
@@ -371,7 +413,7 @@ class StreamlitSessionCoordinator:
         )
 
     def graph_source_edit_available(self) -> bool:
-        return self.selected_graph_version_id() is None
+        return self.working_schema_selected()
 
     def graph_source_edit_block_reason(self) -> str | None:
         if self.graph_source_edit_available():

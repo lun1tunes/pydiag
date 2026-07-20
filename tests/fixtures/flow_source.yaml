@@ -1,6 +1,6 @@
 schema_version: "flow-source/1.0"
 graph_id: "planning-and-drilling-map"
-title: "Карта планирования и бурения"
+title: "Схема планирования и строительства скважин"
 version: 1
 responsibles:
   planning:

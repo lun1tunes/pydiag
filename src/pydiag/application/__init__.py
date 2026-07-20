@@ -19,11 +19,13 @@ from .flow_view import (
     FLOW_CANVAS_COMPONENT_KEY,
     FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
+    consume_pending_canvas_edge,
     consume_responsible_filter_rerun_request,
     render_flow,
 )
 from .flow_view_state import flow_state_timestamp
 from pydiag.common.graph_source_admin import (
+    CreateGraphSourceEdgeCommand,
     GraphSourceEdgeDraft,
     GraphSourceEdgeKind,
     GraphSourceNodeDraft,
@@ -50,7 +52,9 @@ __all__ = [
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
     "AppDocuments",
+    "consume_pending_canvas_edge",
     "consume_responsible_filter_rerun_request",
+    "CreateGraphSourceEdgeCommand",
     "CreateWellCommand",
     "custom_layout_positions_for_graph",
     "DocumentsGateway",

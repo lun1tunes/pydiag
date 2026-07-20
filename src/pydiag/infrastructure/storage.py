@@ -53,6 +53,7 @@ from .storage_paths import (
     wells_path,
 )
 from .storage_writes import (
+    create_graph_source_edge_with_version_check,
     load_graph_source_edge_draft,
     load_graph_source_node_draft,
     save_graph_positions_with_version_check,
@@ -100,6 +101,7 @@ __all__ = [
     "existing_default_graph_path",
     "release_file_lock",
     "resolve_graph_version_path",
+    "create_graph_source_edge_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",

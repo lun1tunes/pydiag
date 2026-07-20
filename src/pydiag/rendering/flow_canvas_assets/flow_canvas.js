@@ -126,6 +126,7 @@ function createCanvasState(root, component, ownerDocument) {
       bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
       selected_id: null,
       position_edit_enabled: false,
+      edge_edit_enabled: false,
       revision: null,
     },
     nodePayloadsById: new Map(),
@@ -146,6 +147,7 @@ function createCanvasState(root, component, ownerDocument) {
     isPanning: false,
     draggingNodeId: null,
     draggingNodeIds: [],
+    connectMode: null,
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
@@ -156,6 +158,7 @@ function createCanvasState(root, component, ownerDocument) {
     renderedDraggingNodeIds: [],
     resizeObserver: null,
     fullscreenChangeHandler: null,
+    keydownHandler: null,
     ownerDocument,
     dom: null,
     edgeElements: new Map(),
@@ -212,6 +215,9 @@ function initializeRootStructure(state) {
     syncToolbarState(state);
   });
 
+  const connectHint = createElement("div", "flow-canvas-connect-hint", root);
+  connectHint.hidden = true;
+
   const viewport = createElement("div", "flow-canvas-viewport", root);
   viewport.hidden = true;
   attachViewportHandlers(viewport, state);
@@ -262,6 +268,7 @@ function initializeRootStructure(state) {
     toolbar,
     toolbarButtons,
     fullscreenButton,
+    connectHint,
     viewport,
     stage,
     svg,
@@ -276,6 +283,15 @@ function initializeRootStructure(state) {
     minimapNodeLayer,
     minimapViewport,
   };
+
+  if (!state.keydownHandler) {
+    state.keydownHandler = (event) => {
+      if (event.key === "Escape" && state.connectMode) {
+        cancelConnectMode(state);
+      }
+    };
+    state.ownerDocument.addEventListener("keydown", state.keydownHandler);
+  }
 }
 
 function normalizePayload(data) {
@@ -309,6 +325,7 @@ function syncStateFromPayload(state) {
       state.lastHostResponsibleFilter = [];
       state.draggingNodeId = null;
       state.draggingNodeIds = [];
+      state.connectMode = null;
       state.positions = {};
       state.positionsVersion = 0;
       state.renderedPositionsVersion = -1;
@@ -316,6 +333,9 @@ function syncStateFromPayload(state) {
   }
 
   const graphChanged = state.lastRevision !== payload.revision;
+  if (graphChanged && state.connectMode) {
+    state.connectMode = null;
+  }
   const nextPositions = nodePositionMap(payload.nodes);
 
   state.nodePayloadsById = indexPayloadsById(payload.nodes);
@@ -477,6 +497,7 @@ function renderState(state) {
 
   syncResponsibleFilterDim(state);
   updateMinimapViewport(state);
+  syncConnectModeChrome(state);
 }
 
 function syncToolbarState(state) {
@@ -804,6 +825,9 @@ function buildEdgeElement(state, edge) {
   hitPath.setAttribute("d", pathData);
   hitPath.addEventListener("click", (event) => {
     event.stopPropagation();
+    if (state.connectMode) {
+      cancelConnectMode(state);
+    }
     selectId(state, edge.id);
   });
   group.appendChild(hitPath);
@@ -822,6 +846,9 @@ function buildEdgeElement(state, edge) {
     label.style.opacity = String(edge.label.active ? 1 : 0.24);
     label.addEventListener("click", (event) => {
       event.stopPropagation();
+      if (state.connectMode) {
+        cancelConnectMode(state);
+      }
       selectId(state, edge.id);
     });
   }
@@ -871,6 +898,10 @@ function buildNodeElement(state, node) {
       state.suppressNextNodeClick = false;
       return;
     }
+    if (state.connectMode) {
+      completeConnectMode(state, node.id);
+      return;
+    }
     selectId(state, node.id, { additive: isMultiSelectModifier(event) });
   });
   if (node.draggable && state.payload.position_edit_enabled) {
@@ -897,10 +928,11 @@ function buildNodeElement(state, node) {
     }
   }
 
-  const elements = { shell, card, overlay: null };
+  const elements = { shell, card, overlay: null, handles: [] };
   syncNodeShellPosition(shell, state.positions[node.id] || node.position);
   setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
   state.nodeElements.set(node.id, elements);
+  syncConnectionHandlesForNode(state, node.id);
 }
 
 function buildMinimapEdgeElement(state, edge) {
@@ -979,6 +1011,7 @@ function updateSelectionState(
   syncTokenSelectionById(state, previousSelectedId);
   syncTokenSelectionById(state, nextSelectedId);
   syncLegendHighlight(state);
+  syncConnectModeChrome(state);
 }
 
 function syncEdgeSelectionById(state, selectedId) {
@@ -1003,6 +1036,7 @@ function syncNodeSelectionById(state, selectedId) {
     return;
   }
   setNodeSelectedState(elements, node, isNodeSelected(state, selectedId));
+  syncConnectionHandlesForNode(state, selectedId);
 
   const minimapNode = state.minimapNodeElements.get(selectedId);
   if (minimapNode) {
@@ -1224,8 +1258,12 @@ function attachViewportHandlers(viewport, state) {
       panFinished = true;
       state.isPanning = false;
       // Deselect only on a true background tap. A pan must not clear selection.
-      if (!panDidMove && (state.selectedId !== null || state.selectedNodeIds.size > 0)) {
-        selectId(state, null);
+      if (!panDidMove) {
+        if (state.connectMode) {
+          cancelConnectMode(state);
+        } else if (state.selectedId !== null || state.selectedNodeIds.size > 0) {
+          selectId(state, null);
+        }
       }
       if (
         stopEvent
@@ -1416,6 +1454,179 @@ function sameIdLists(a, b) {
     }
   }
   return true;
+}
+
+const CONNECTION_HANDLE_SIDES = ["top", "right", "bottom", "left"];
+
+function clearConnectionHandles(elements) {
+  if (!elements || !Array.isArray(elements.handles)) {
+    return;
+  }
+  for (const handle of elements.handles) {
+    handle.remove();
+  }
+  elements.handles = [];
+}
+
+function preferredSourceSide(node) {
+  const value = node?.source_position;
+  if (CONNECTION_HANDLE_SIDES.includes(value)) {
+    return value;
+  }
+  return "right";
+}
+
+function buildConnectionHandles(state, shell, node) {
+  const handles = [];
+  const preferred = preferredSourceSide(node);
+  for (const side of CONNECTION_HANDLE_SIDES) {
+    const handle = createElement("button", "flow-node-handle", shell);
+    handle.type = "button";
+    handle.classList.add(`is-${side}`);
+    handle.dataset.side = side;
+    handle.dataset.nodeId = node.id;
+    handle.title = side === preferred
+      ? "Начать связь (основной выход)"
+      : "Начать связь";
+    handle.setAttribute("aria-label", `Точка связи: ${side}`);
+    if (side === preferred) {
+      handle.classList.add("is-primary");
+    }
+    handle.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+    });
+    handle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (
+        state.connectMode
+        && state.connectMode.sourceId === node.id
+        && state.connectMode.side === side
+      ) {
+        cancelConnectMode(state);
+        return;
+      }
+      beginConnectMode(state, node.id, side);
+    });
+    handles.push(handle);
+  }
+  return handles;
+}
+
+function syncConnectionHandlesForNode(state, nodeId) {
+  const elements = state.nodeElements.get(nodeId);
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!elements || !node) {
+    return;
+  }
+  clearConnectionHandles(elements);
+  const canEdit = state.payload.edge_edit_enabled === true;
+  if (!canEdit || !isNodeSelected(state, nodeId)) {
+    return;
+  }
+  elements.handles = buildConnectionHandles(state, elements.shell, node);
+  syncHandleActiveStates(state);
+}
+
+function syncHandleActiveStates(state) {
+  for (const elements of state.nodeElements.values()) {
+    for (const handle of elements.handles || []) {
+      const active = Boolean(
+        state.connectMode
+        && state.connectMode.sourceId === handle.dataset.nodeId
+        && state.connectMode.side === handle.dataset.side,
+      );
+      handle.classList.toggle("is-active", active);
+    }
+  }
+}
+
+function syncConnectModeChrome(state) {
+  const connecting = Boolean(state.connectMode);
+  state.root.classList.toggle("is-connecting", connecting);
+  const sourceId = state.connectMode?.sourceId || null;
+  for (const [nodeId, elements] of state.nodeElements) {
+    elements.shell.classList.toggle("is-connect-source", connecting && nodeId === sourceId);
+    elements.shell.classList.toggle(
+      "is-connect-target",
+      connecting && nodeId !== sourceId && state.nodePayloadsById.has(nodeId),
+    );
+  }
+  syncHandleActiveStates(state);
+  updateConnectHint(state);
+}
+
+function updateConnectHint(state) {
+  const hint = state.dom?.connectHint;
+  if (!hint) {
+    return;
+  }
+  const canEdit = state.payload.edge_edit_enabled === true;
+  if (!canEdit) {
+    hint.hidden = true;
+    hint.textContent = "";
+    return;
+  }
+  if (state.connectMode) {
+    hint.hidden = false;
+    hint.textContent = "Выберите целевую карточку · Esc — отмена";
+    hint.classList.add("is-active");
+    return;
+  }
+  const hasSelectedNode = [...state.selectedNodeIds].some((nodeId) => (
+    state.nodePayloadsById.has(nodeId)
+  )) || (
+    typeof state.selectedId === "string" && state.nodePayloadsById.has(state.selectedId)
+  );
+  if (hasSelectedNode) {
+    hint.hidden = false;
+    hint.textContent = "Точки на карточке — начало связи. Клик по точке, затем по цели.";
+    hint.classList.remove("is-active");
+    return;
+  }
+  hint.hidden = true;
+  hint.textContent = "";
+  hint.classList.remove("is-active");
+}
+
+function beginConnectMode(state, sourceId, side) {
+  if (state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  state.connectMode = { sourceId, side };
+  syncConnectModeChrome(state);
+  queueRender(state);
+}
+
+function cancelConnectMode(state) {
+  if (!state.connectMode) {
+    updateConnectHint(state);
+    return;
+  }
+  state.connectMode = null;
+  syncConnectModeChrome(state);
+  queueRender(state);
+}
+
+function completeConnectMode(state, targetId) {
+  const sourceId = state.connectMode?.sourceId;
+  if (!sourceId || sourceId === targetId || !state.nodePayloadsById.has(targetId)) {
+    cancelConnectMode(state);
+    return;
+  }
+  state.component.setStateValue("pending_edge", {
+    source: sourceId,
+    target: targetId,
+    kind: "default",
+  });
+  state.connectMode = null;
+  syncConnectModeChrome(state);
+  // Keep the source card selected so the new edge appears under «Связи».
+  if (state.selectedId !== sourceId) {
+    selectId(state, sourceId);
+  } else {
+    queueRender(state);
+  }
 }
 
 function selectId(state, value, options = {}) {

@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydiag.common.graph_source_admin import (
+    CreateGraphSourceEdgeCommand,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
 )
 from pydiag.infrastructure.flow_source_graph import (
+    create_flow_source_payload_edge,
     graph_source_edge_draft_from_payload,
     graph_source_node_draft_from_payload,
     load_structured_payload,
@@ -120,6 +122,38 @@ def test_graph_source_edge_update_can_delete_transition() -> None:
         for item in updated["nodes"]["proc_initial_review"].get("transitions", [])
     ]
     assert "e_review_decision" not in transition_ids
+
+
+def test_graph_source_edge_create_appends_transition_with_stable_id() -> None:
+    payload = load_fixture_payload()
+    before_count = len(payload["nodes"]["proc_initial_review"].get("transitions", []))
+
+    updated = create_flow_source_payload_edge(
+        payload,
+        command=CreateGraphSourceEdgeCommand(
+            source="proc_initial_review",
+            target="card_mitigation",
+            kind="dashed",
+            label="новая",
+            condition="manual",
+            note="created",
+        ),
+        expected_version=1,
+    )
+
+    transitions = updated["nodes"]["proc_initial_review"]["transitions"]
+    assert updated["version"] == 2
+    assert len(transitions) == before_count + 1
+    created = transitions[-1]
+    assert created["to"] == "card_mitigation"
+    assert created["kind"] == "dashed"
+    assert created["label"] == "новая"
+    assert created["condition"] == "manual"
+    assert created["note"] == "created"
+    assert isinstance(created["id"], str) and created["id"]
+    draft = graph_source_edge_draft_from_payload(updated, created["id"])
+    assert draft.source == "proc_initial_review"
+    assert draft.target == "card_mitigation"
 
 
 def test_graph_source_custom_layout_update_keeps_source_layout_intact() -> None:

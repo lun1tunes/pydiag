@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydiag.application import (
+    CreateGraphSourceEdgeCommand,
     FLOW_CANVAS_COMPONENT_KEY,
     DocumentsGateway,
+    consume_pending_canvas_edge,
 )
 from pydiag.application import (
     render_flow as render_flow_view,
@@ -215,6 +217,7 @@ class StreamlitAppRuntime:
                 load_graph_source_edge=session.load_graph_source_edge,
                 persist_graph_source_node_update=session.save_graph_source_node,
                 persist_graph_source_edge_update=session.save_graph_source_edge,
+                persist_graph_source_edge_create=session.create_graph_source_edge,
                 graph_source_edit_available=session.graph_source_edit_available,
                 graph_source_edit_block_reason=session.graph_source_edit_block_reason,
                 live_layout_xy_for_node=live_layout_xy_for_node,
@@ -253,6 +256,7 @@ class StreamlitAppRuntime:
         layout_mode: str,
         *,
         position_edit_enabled: bool = False,
+        edge_edit_enabled: bool = False,
         render_canvas: Callable[..., object] | None = None,
     ) -> str | None:
         return render_flow_view(
@@ -264,8 +268,39 @@ class StreamlitAppRuntime:
             kind_filter=kind_filter,
             layout_mode=layout_mode,
             position_edit_enabled=position_edit_enabled,
+            edge_edit_enabled=edge_edit_enabled,
             render_canvas=render_canvas or self.render_canvas,
             component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+
+    def _consume_pending_canvas_edge(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_edge(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        kind = pending["kind"]
+        if kind not in {"default", "yes", "no", "dashed"}:
+            kind = "default"
+        session.create_graph_source_edge(
+            graph,
+            CreateGraphSourceEdgeCommand(
+                source=pending["source"],
+                target=pending["target"],
+                kind=kind,  # type: ignore[arg-type]
+                label=None,
+                condition=None,
+                note=None,
+            ),
         )
 
     def run(self) -> None:
@@ -294,6 +329,10 @@ class StreamlitAppRuntime:
             diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
             try:
                 with diagram_col:
+                    edge_edit_enabled = (
+                        self.auth_context().current_user_is_admin()
+                        and session.graph_source_edit_available()
+                    )
                     selected_id = self._render_flow(
                         graph,
                         wells,
@@ -302,7 +341,9 @@ class StreamlitAppRuntime:
                         kind_filter=kind_filter,
                         layout_mode=layout_mode,
                         position_edit_enabled=position_edit_enabled,
+                        edge_edit_enabled=edge_edit_enabled,
                     )
+                    self._consume_pending_canvas_edge(graph)
             except Exception as exc:
                 self.st_module.error(f"Ошибка отрисовки схемы: {exc}")
                 selected_id = None
