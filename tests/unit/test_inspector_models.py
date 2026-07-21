@@ -44,15 +44,17 @@ def test_build_well_inspector_model_contains_history_rows(documents) -> None:
     assert model.history_rows[0]["action"] in {"create", "move", "rollback"}
 
 
-def test_build_edge_inspector_model_contains_endpoints(documents) -> None:
+def test_build_edge_inspector_model_shows_type_only(documents) -> None:
     graph, _ = documents
     edge = next(item for item in graph.edges if item.id == "e_data_yes")
 
     model = build_edge_inspector_model(graph, edge)
 
     assert model.section.title == "Да"
-    assert "Откуда" in model.section.details_html
-    assert "Проект профиля и конструкции" in model.section.details_html
+    assert "Тип" in model.section.details_html
+    assert "Да" in model.section.details_html
+    assert "Откуда" not in model.section.details_html
+    assert "Куда" not in model.section.details_html
 
 
 def test_build_overview_rows_only_includes_nodes_with_wells(documents) -> None:

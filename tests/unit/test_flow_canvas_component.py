@@ -15,14 +15,16 @@ def test_flow_canvas_component_reuses_registration_for_same_manager() -> None:
     assert 0 in _FLOW_CANVAS_COMPONENTS or len(_FLOW_CANVAS_COMPONENTS) >= 1
 
 
-def test_flow_canvas_fit_view_starts_from_top_padding() -> None:
+def test_flow_canvas_fit_view_centers_within_padded_viewport() -> None:
     js = _asset_text("flow_canvas.js")
 
     assert "const FIT_VIEW_PADDING_TOP = 48;" in js
     assert "const FIT_VIEW_PADDING_BOTTOM = 64;" in js
-    assert "state.view.y = round(FIT_VIEW_PADDING_TOP - bounds.top * scale);" in js
+    assert "const FIT_VIEW_PADDING_X = 64;" in js
     assert "rect.height - FIT_VIEW_PADDING_TOP - FIT_VIEW_PADDING_BOTTOM" in js
-
+    assert "(availableHeight - bounds.height * scale) / 2" in js
+    assert "(availableWidth - bounds.width * scale) / 2" in js
+    assert "FIT_VIEW_PADDING_TOP - bounds.top * scale);" not in js
 
 def test_flow_canvas_keeps_viewport_local_without_python_sync() -> None:
     js = _asset_text("flow_canvas.js")
@@ -47,10 +49,24 @@ def test_flow_canvas_reuses_persistent_dom_and_patches_only_changed_scene_parts(
     assert "initializeRootStructure(state);" in js
     assert "const graphChanged = state.sceneRevision !== payload.revision || !state.hasRenderedScene;" in js
     assert "rebuildGraphScene(state);" in js
-    assert "if (state.renderedPositionsVersion !== state.positionsVersion) {" in js
+    assert "const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;" in js
+    assert "const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;" in js
     assert "updateNodePositions(state);" in js
+    assert "updateEdgeGeometry(state);" in js
+    assert "function updateEdgeGeometry(state) {" in js
+    assert "function nodeMatchesClientFilters(node, state) {" in js
+    assert "state.payload?.kind_filter" in js
+    assert "state.payload?.search" in js
     assert "function updateDraggedNode(state, nodeId) {" in js
     assert "updateDraggedNode(state, state.draggingNodeId);" in js
+    assert "updateEdgeGeometry(state);" in js
+    assert "function liveEdgePoints(state, edge) {" in js
+    assert "function nodePositionDelta(state, nodeId) {" in js
+    # Drag path must refresh wires, not only the card shell.
+    drag_block_start = js.index("if (state.draggingNodeIds.length) {")
+    drag_block = js[drag_block_start : drag_block_start + 450]
+    assert "updateDraggedNode(state, nodeId);" in drag_block
+    assert "updateEdgeGeometry(state);" in drag_block
     assert "updateSelectionState(" in js
     assert "state.dom.stage.style.transform =" in js
 
@@ -118,24 +134,70 @@ def test_flow_canvas_pan_does_not_clear_card_selection_on_click() -> None:
     assert "viewport.setPointerCapture" in js
 
 
-def test_flow_canvas_supports_click_to_connect_handles() -> None:
+def test_flow_canvas_edges_are_clickable_through_node_layer() -> None:
+    js = _asset_text("flow_canvas.js")
+    css = _asset_text("flow_canvas.css")
+
+    assert "flow-edge-hit" in js
+    assert "selectId(state, edge.id)" in js
+    assert ".flow-canvas-nodes" in css
+    assert "pointer-events: none;" in css
+    assert ".flow-node-shell" in css
+    assert "pointer-events: auto;" in css
+    assert "pointer-events: stroke;" in css
+    assert 'hitPath.setAttribute("stroke-width", "18")' in js
+
+
+def test_flow_canvas_supports_drag_to_connect_handles() -> None:
     js = _asset_text("flow_canvas.js")
     css = _asset_text("flow_canvas.css")
 
     assert "edge_edit_enabled" in js
     assert "buildConnectionHandles(state, elements.shell, node)" in js
     assert 'setStateValue("pending_edge"' in js
-    assert "beginConnectMode(state, node.id, side)" in js
-    assert "completeConnectMode(state, node.id)" in js
+    assert "startConnectDrag(event, state, node.id, side, handle)" in js
+    assert "completeConnectMode(state, dropId)" in js
+    assert "function syncConnectPreview(state)" in js
+    assert "function nodeIdFromWorldPoint(state, worldX, worldY)" in js
+    assert "nodeIdFromDomPoint(state, clientX, clientY)" in js
+    assert "nodeIdFromWorldPoint(state, world.x, world.y)" in js
+    assert "function nodePaintRank(state, nodeId)" in js
+    assert "flow-connect-preview" in js
     assert ".flow-node-handle" in css
+    assert ".flow-connect-preview" in css
     assert ".flow-canvas-connect-hint" in css
+    assert ".flow-canvas-root.is-connecting .flow-canvas-edges" in css
+    assert "Потяните точку на карточке" in js
 
 
-def test_flow_canvas_root_uses_taller_workspace_height() -> None:
+def test_flow_canvas_refreshes_edge_geometry_without_revision_bump() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    assert "function edgeGeometrySignature(edges)" in js
+    assert "state.edgeGeometryVersion += 1" in js
+    assert "edgeGeometryChanged" in js
+    assert "Same revision + same live positions, but host re-routed edges" in js
+    assert "updateEdgeGeometry(state)" in js
+    assert "Keep wires glued to cards while dragging" in js
+
+
+def test_flow_canvas_root_uses_viewport_workspace_height() -> None:
     css = _asset_text("flow_canvas.css")
 
-    assert "height: clamp(575px, calc(100vh - 5rem), 828px);" in css
-    assert "height: clamp(575px, calc(100dvh - 5rem), 828px);" in css
+    assert "height: var(--pydiag-workspace-height, max(575px, calc(100dvh - 5rem)));" in css
+    assert "828px" not in css
+    assert "clamp(575px" not in css
+
+
+def test_flow_canvas_fit_view_scales_up_on_large_monitors() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    assert "Math.min(availableWidth / bounds.width, availableHeight / bounds.height)," in js
+    assert "1.75," in js
+    assert "FIT_VIEW_PADDING_TOP" in js
+    assert "(availableHeight - bounds.height * scale) / 2" in js
+    # Legacy hard caps that left empty space on 2K monitors.
+    assert "Math.min(availableWidth / bounds.width, availableHeight / bounds.height, 1.2)" not in js
 
 
 def test_flow_canvas_assets_define_shape_aware_blue_selection_effect() -> None:

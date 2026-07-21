@@ -37,11 +37,11 @@ FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
     {"figma_source_id", "figma_parent_id", "figma_source_type"}
 )
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
-    "process": (320, 120),
-    "decision_diamond": (360, 220),
-    "database": (320, 120),
-    "input_data": (320, 120),
-    "event": (320, 96),
+    "process": (280, 72),
+    "decision_diamond": (280, 96),
+    "database": (260, 96),
+    "input_data": (260, 72),
+    "event": (220, 56),
 }
 CYRILLIC_TO_LATIN = {
     "а": "a",
@@ -637,6 +637,14 @@ def update_flow_source_payload_node(
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
     current = updated.nodes[command.node_id]
+    previous_layout = updated.layout.get(command.node_id)
+    size_changed = previous_layout is None or (
+        int(previous_layout.w) != int(command.layout_w)
+        or int(previous_layout.h) != int(command.layout_h)
+    )
+    metadata = dict(current.metadata)
+    if size_changed:
+        metadata["manual_layout_size"] = True
     updated.nodes[command.node_id] = current.model_copy(
         update={
             "title": command.title,
@@ -647,6 +655,7 @@ def update_flow_source_payload_node(
             "duration": command.duration,
             "note": command.note,
             "deleted": current.deleted if command.deleted is None else command.deleted,
+            "metadata": metadata,
         }
     )
     updated.layout[command.node_id] = FlowSourceLayoutEntry(
@@ -1050,6 +1059,13 @@ def render_yaml_mapping(mapping: dict[str, object], *, indent: int) -> str:
     lines: list[str] = []
     for key, value in mapping.items():
         prefix = " " * indent + f"{key}:"
+        if isinstance(value, dict) and not value:
+            # Inline empty mapping — a bare "key:" is parsed as null.
+            lines.append(f"{prefix} {{}}")
+            continue
+        if isinstance(value, list) and not value:
+            lines.append(f"{prefix} []")
+            continue
         if is_yaml_scalar(value):
             lines.append(f"{prefix} {render_yaml_scalar(value)}")
             continue
@@ -1282,6 +1298,8 @@ def is_yaml_sequence_line(value: str) -> bool:
 
 
 def parse_yaml_scalar(value: str) -> object:
+    if value == "{}":
+        return {}
     if value.startswith("[") and value.endswith("]"):
         return parse_yaml_inline_list(value[1:-1])
     if value in {"null", "Null", "NULL", "~"}:

@@ -197,9 +197,12 @@ def test_render_flow_mirrors_legend_responsible_filter_without_full_rerun(
         for item in captured["payload"]["nodes"]
         if item["id"] == "proc_initial_review"
     )
-    # Responsible dimming is client-side; payload keeps search/kind active flags.
+    # Search / kind / responsible dimming is client-side; nodes stay active in payload.
     assert node["active"] is True
     assert "planning" in node["responsible"]
+    assert "search_text" in node
+    assert captured["payload"]["search"] == ""
+    assert captured["payload"]["kind_filter"] == []
     assert session_state[RESPONSIBLE_FILTER_SESSION_KEY] == ["planning"]
     assert session_state[RESPONSIBLE_FILTER_LAST_KEY] == ["planning"]
     assert FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY not in session_state

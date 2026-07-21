@@ -253,10 +253,7 @@ class StreamlitSessionCoordinator:
         if not self.position_edit_available():
             self.st_module.error(
                 self.position_edit_block_reason()
-                or (
-                    "Версии схемы доступны только для просмотра. "
-                    "Переключитесь на текущую схему."
-                )
+                or "Редактирование расположения сейчас недоступно."
             )
             return
 
@@ -373,55 +370,33 @@ class StreamlitSessionCoordinator:
         self.finalize_persistence(result.should_rerun, result.error_message)
 
     def working_schema_selected(self) -> bool:
-        """True for the live schema, or the newest archive when no live file exists."""
-        selected = self.selected_graph_version_id()
-        if selected is None:
-            return True
-        if self.live_graph_source_exists():
-            return False
-        versions = self.documents_gateway.list_graph_versions()
-        if not versions:
-            return False
-        return selected == newest_graph_version(versions).id
+        """True for any selectable schema: live «Текущая» or any archived ``v000x``.
+
+        All versions are equally editable; edits write to the selected file.
+        """
+        return True
 
     def editable_graph_version_id(self) -> str | None:
-        """Version id for writes: None = live/default path; otherwise newest archive."""
-        if not self.working_schema_selected():
-            raise RuntimeError("Editable schema is not selected")
+        """Version id for writes: None = live/default path; otherwise selected archive."""
         return self.selected_graph_version_id()
 
     def position_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def position_edit_block_reason(self) -> str | None:
-        if self.position_edit_available():
-            return None
-        return (
-            "Версии схемы доступны только для просмотра. "
-            "Переключитесь на текущую схему."
-        )
+        return None
 
     def wells_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def wells_edit_block_reason(self) -> str | None:
-        if self.wells_edit_available():
-            return None
-        return (
-            "Изменение скважин доступно только в текущей схеме. "
-            "Переключитесь на текущую схему."
-        )
+        return None
 
     def graph_source_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def graph_source_edit_block_reason(self) -> str | None:
-        if self.graph_source_edit_available():
-            return None
-        return (
-            "Правки доступны только в текущей схеме. "
-            "Архивная версия открыта только для просмотра."
-        )
+        return None
 
     def finalize_persistence(
         self, should_rerun: bool, error_message: str | None

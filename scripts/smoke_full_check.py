@@ -229,17 +229,35 @@ def main() -> int:
             ),
         )
 
-        # Archive read-only for admin
+        # Any archive version is equally editable (writes go to that file only)
+        older = source_path.parent / "flow_source.v0001.yaml"
+        newer = source_path.parent / "flow_source.v0002.yaml"
+        if not older.exists():
+            older.write_bytes(source_path.read_bytes())
+        newer.write_bytes(source_path.read_bytes())
+        app.run(timeout=30)
         set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
+        app.session_state["selected_id"] = "proc_initial_review"
+        app.run(timeout=30)
         texts = [
             getattr(item, "value", "")
             for item in [*app.markdown, *app.caption]
             if getattr(item, "value", None)
         ]
         report.add(
-            "Archived schema read-only messaging",
-            any("Правки доступны только в текущей схеме" in text for text in texts)
-            or any("только для просмотра" in text.lower() for text in texts),
+            "Older archive is editable (no read-only messaging)",
+            not any("только для просмотра" in text.lower() for text in texts)
+            and not any(
+                "Правки доступны в «Текущая» или в новейшей версии" in text
+                for text in texts
+            ),
+        )
+        set_text_input(app, "Заголовок", "smoke-older-archive")
+        click_button(app, "Сохранить")
+        older_saved = load_structured_payload(older.read_bytes())
+        report.add(
+            "Older archive save writes selected file",
+            older_saved["nodes"]["proc_initial_review"]["title"] == "smoke-older-archive",
         )
 
         # Soft-delete check via selected node delete controls presence on live

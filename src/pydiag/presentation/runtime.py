@@ -32,7 +32,9 @@ from pydiag.presentation.sidebar import (
 )
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
-WORKSPACE_PANEL_HEIGHT = 828
+# Streamlit requires a fixed px height; chrome CSS overrides this to
+# --pydiag-workspace-height so the panel tracks the viewport on any monitor.
+WORKSPACE_PANEL_HEIGHT = 1600
 CARD_LAYOUT_SYNC_TOKEN_KEY = "_card_layout_sync_token"
 
 
@@ -333,6 +335,10 @@ class StreamlitAppRuntime:
                         self.auth_context().current_user_is_admin()
                         and session.graph_source_edit_available()
                     )
+                    # Clear pending_edge in session_state BEFORE the canvas
+                    # widget is instantiated — Streamlit forbids mutating
+                    # st.session_state[widget_key] after that point.
+                    self._consume_pending_canvas_edge(graph)
                     selected_id = self._render_flow(
                         graph,
                         wells,
@@ -343,7 +349,6 @@ class StreamlitAppRuntime:
                         position_edit_enabled=position_edit_enabled,
                         edge_edit_enabled=edge_edit_enabled,
                     )
-                    self._consume_pending_canvas_edge(graph)
             except Exception as exc:
                 self.st_module.error(f"Ошибка отрисовки схемы: {exc}")
                 selected_id = None

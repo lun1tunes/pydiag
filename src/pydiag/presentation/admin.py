@@ -104,7 +104,10 @@ def render_admin_panel(
     service = WellAdminService(graph=graph, wells=wells, actor=LOCAL_ADMIN_ACTOR)
     wells_editable = actions.wells_edit_available()
 
-    _render_section_label(st_module, "Карточка")
+    _render_section_label(
+        st_module,
+        "Связь" if selected_kind == "edge" else "Карточка",
+    )
     if not actions.graph_source_edit_available():
         reason = (
             actions.graph_source_edit_block_reason() or "Редактирование сейчас недоступно"
@@ -574,49 +577,17 @@ def render_graph_source_edge_editor(
         st_module.error(f"Не удалось загрузить связь из source YAML: {exc}")
         return
 
-    node_ids = [item.id for item in graph.nodes]
-    node_map = node_by_id(graph)
     edge_kind_options = list(EDGE_KIND_LABELS.keys())
     def field_key(name: str) -> str:
         return f"{form_key_prefix}_{name}::{edge.id}"
 
     with st_module.form(f"{form_key_prefix}_form::{edge.id}", clear_on_submit=False):
-        source = st_module.selectbox(
-            "Откуда",
-            options=node_ids,
-            index=default_option_index(node_ids, draft.source),
-            format_func=lambda value: node_map[value].text,
-            key=field_key("source"),
-        )
-        target = st_module.selectbox(
-            "Куда",
-            options=node_ids,
-            index=default_option_index(node_ids, draft.target),
-            format_func=lambda value: node_map[value].text,
-            key=field_key("target"),
-        )
         kind = st_module.selectbox(
             "Тип связи",
             options=edge_kind_options,
             index=default_option_index(edge_kind_options, draft.kind),
             format_func=lambda value: EDGE_KIND_LABELS[value],
             key=field_key("kind"),
-        )
-        label = st_module.text_input(
-            "Метка связи",
-            value=draft.label or "",
-            key=field_key("label"),
-        )
-        condition = st_module.text_input(
-            "Условие",
-            value=draft.condition or "",
-            key=field_key("condition"),
-        )
-        note = st_module.text_area(
-            "Заметка",
-            value=draft.note or "",
-            height=68,
-            key=field_key("note"),
         )
         submitted = st_module.form_submit_button(submit_label, width="stretch")
 
@@ -652,12 +623,12 @@ def render_graph_source_edge_editor(
         graph,
         UpdateGraphSourceEdgeCommand(
             edge_id=edge.id,
-            source=source,
-            target=target,
+            source=draft.source,
+            target=draft.target,
             kind=kind,
-            label=normalized_optional_text(label),
-            condition=normalized_optional_text(condition),
-            note=normalized_optional_text(note),
+            label=draft.label,
+            condition=draft.condition,
+            note=draft.note,
         ),
     )
 

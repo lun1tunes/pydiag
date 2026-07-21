@@ -358,13 +358,27 @@ def test_session_coordinator_save_wells_runs_storage_workflow(monkeypatch, docum
     assert st_module.reruns == 1
 
 
-def test_session_coordinator_blocks_wells_update_for_archived_schema_version(
+def test_session_coordinator_allows_wells_update_for_older_archived_schema_version(
     monkeypatch,
     documents,
 ) -> None:
     graph, wells = documents
     st_module = FakeStreamlitModule()
     gateway = FakeDocumentsGateway(graph=graph, wells=wells)
+    gateway.versions = [
+        GraphVersionInfo(
+            id="flow_source.v0002.yaml",
+            label="v0002",
+            path=Path("/tmp/flow_source.v0002.yaml"),
+            is_versioned=True,
+        ),
+        GraphVersionInfo(
+            id="flow_source.v0001.yaml",
+            label="v0001",
+            path=Path("/tmp/flow_source.v0001.yaml"),
+            is_versioned=True,
+        ),
+    ]
     coordinator = StreamlitSessionCoordinator(st_module, gateway)
     st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
     calls: list[tuple[str, object]] = []
@@ -388,25 +402,33 @@ def test_session_coordinator_blocks_wells_update_for_archived_schema_version(
         success_message="saved",
     )
 
-    assert calls == []
-    assert not any(call[0] == "save_wells" for call in gateway.calls)
-    assert st_module.reruns == 0
-    assert st_module.messages == [
-        (
-            "error",
-            "Изменение скважин доступно только в текущей схеме. "
-            "Переключитесь на текущую схему.",
-        )
-    ]
+    assert ("persist", wells.version, "saved") in calls
+    assert gateway.calls == [("save_wells", wells.version, wells.version, graph.version)]
+    assert st_module.reruns == 1
+    assert st_module.messages == []
 
 
-def test_session_coordinator_blocks_position_save_for_archived_schema_version(
+def test_session_coordinator_allows_position_save_for_older_archived_schema_version(
     monkeypatch,
     documents,
 ) -> None:
     graph, _ = documents
     st_module = FakeStreamlitModule()
     gateway = FakeDocumentsGateway(graph=graph)
+    gateway.versions = [
+        GraphVersionInfo(
+            id="flow_source.v0002.yaml",
+            label="v0002",
+            path=Path("/tmp/flow_source.v0002.yaml"),
+            is_versioned=True,
+        ),
+        GraphVersionInfo(
+            id="flow_source.v0001.yaml",
+            label="v0001",
+            path=Path("/tmp/flow_source.v0001.yaml"),
+            is_versioned=True,
+        ),
+    ]
     coordinator = StreamlitSessionCoordinator(st_module, gateway)
     st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
     calls: list[tuple[str, object]] = []
@@ -436,16 +458,15 @@ def test_session_coordinator_blocks_position_save_for_archived_schema_version(
         {"proc_initial_review": (5.0, 6.0)},
     )
 
-    assert calls == []
-    assert not any(call[0] == "save_graph_positions" for call in gateway.calls)
-    assert st_module.reruns == 0
-    assert st_module.messages == [
-        (
-            "error",
-            "Версии схемы доступны только для просмотра. "
-            "Переключитесь на текущую схему.",
-        )
-    ]
+    assert ("persist", "Расположение карточек сохранено") in calls
+    assert (
+        "save_graph_positions",
+        {"proc_initial_review": (5.0, 6.0)},
+        graph.version,
+        "flow_source.v0001.yaml",
+    ) in gateway.calls
+    assert st_module.reruns == 1
+    assert st_module.messages == []
 
 
 def test_session_coordinator_allows_position_save_for_newest_archive_without_live(
@@ -508,7 +529,67 @@ def test_session_coordinator_allows_position_save_for_newest_archive_without_liv
     assert st_module.reruns == 1
 
 
-def test_session_coordinator_blocks_position_save_for_older_archive_without_live(
+def test_session_coordinator_allows_position_save_for_newest_archive_with_live(
+    monkeypatch,
+    documents,
+) -> None:
+    graph, _ = documents
+    st_module = FakeStreamlitModule()
+    gateway = FakeDocumentsGateway(graph=graph, live_exists=True)
+    gateway.versions = [
+        GraphVersionInfo(
+            id="flow_source.v0002.yaml",
+            label="v0002",
+            path=Path("/tmp/flow_source.v0002.yaml"),
+            is_versioned=True,
+        ),
+        GraphVersionInfo(
+            id="flow_source.v0001.yaml",
+            label="v0001",
+            path=Path("/tmp/flow_source.v0001.yaml"),
+            is_versioned=True,
+        ),
+    ]
+    coordinator = StreamlitSessionCoordinator(st_module, gateway)
+    st_module.session_state["selected_graph_version_id"] = "flow_source.v0002.yaml"
+    calls: list[tuple[str, object]] = []
+
+    def fake_persist_graph_positions(
+        session_state,
+        *,
+        save,
+        reload_data,
+        reset_position_edit_state,
+        success_message,
+    ):
+        _ = session_state
+        _ = reload_data
+        calls.append(("persist", success_message))
+        save()
+        reset_position_edit_state()
+        return PersistenceResult(should_rerun=True, error_message=None)
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.persist_graph_positions",
+        fake_persist_graph_positions,
+    )
+
+    coordinator.save_graph_positions(
+        graph,
+        {"proc_initial_review": (5.0, 6.0)},
+    )
+
+    assert ("persist", "Расположение карточек сохранено") in calls
+    assert (
+        "save_graph_positions",
+        {"proc_initial_review": (5.0, 6.0)},
+        graph.version,
+        "flow_source.v0002.yaml",
+    ) in gateway.calls
+    assert st_module.reruns == 1
+
+
+def test_session_coordinator_allows_position_save_for_older_archive_without_live(
     monkeypatch,
     documents,
 ) -> None:
@@ -531,20 +612,42 @@ def test_session_coordinator_blocks_position_save_for_older_archive_without_live
     ]
     coordinator = StreamlitSessionCoordinator(st_module, gateway)
     st_module.session_state["selected_graph_version_id"] = "flow_source.v0001.yaml"
+    calls: list[tuple[str, object]] = []
+
+    def fake_persist_graph_positions(
+        session_state,
+        *,
+        save,
+        reload_data,
+        reset_position_edit_state,
+        success_message,
+    ):
+        _ = session_state
+        _ = reload_data
+        calls.append(("persist", success_message))
+        save()
+        reset_position_edit_state()
+        return PersistenceResult(should_rerun=True, error_message=None)
+
+    monkeypatch.setattr(
+        "pydiag.presentation.runtime_session.persist_graph_positions",
+        fake_persist_graph_positions,
+    )
 
     coordinator.save_graph_positions(
         graph,
         {"proc_initial_review": (5.0, 6.0)},
     )
 
-    assert not any(call[0] == "save_graph_positions" for call in gateway.calls)
-    assert st_module.messages == [
-        (
-            "error",
-            "Версии схемы доступны только для просмотра. "
-            "Переключитесь на текущую схему.",
-        )
-    ]
+    assert ("persist", "Расположение карточек сохранено") in calls
+    assert (
+        "save_graph_positions",
+        {"proc_initial_review": (5.0, 6.0)},
+        graph.version,
+        "flow_source.v0001.yaml",
+    ) in gateway.calls
+    assert st_module.reruns == 1
+    assert st_module.messages == []
 
 
 def test_session_coordinator_save_graph_positions_runs_storage_workflow(

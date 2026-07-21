@@ -978,7 +978,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/smoke_full_check.py	9495
+===BEGIN_FILE===	scripts/smoke_full_check.py	10347
 #!/usr/bin/env python3
 """End-to-end AppTest smoke covering core admin + viewer flows."""
 
@@ -1210,17 +1210,35 @@ def main() -> int:
             ),
         )
 
-        # Archive read-only for admin
+        # Any archive version is equally editable (writes go to that file only)
+        older = source_path.parent / "flow_source.v0001.yaml"
+        newer = source_path.parent / "flow_source.v0002.yaml"
+        if not older.exists():
+            older.write_bytes(source_path.read_bytes())
+        newer.write_bytes(source_path.read_bytes())
+        app.run(timeout=30)
         set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
+        app.session_state["selected_id"] = "proc_initial_review"
+        app.run(timeout=30)
         texts = [
             getattr(item, "value", "")
             for item in [*app.markdown, *app.caption]
             if getattr(item, "value", None)
         ]
         report.add(
-            "Archived schema read-only messaging",
-            any("Правки доступны только в текущей схеме" in text for text in texts)
-            or any("только для просмотра" in text.lower() for text in texts),
+            "Older archive is editable (no read-only messaging)",
+            not any("только для просмотра" in text.lower() for text in texts)
+            and not any(
+                "Правки доступны в «Текущая» или в новейшей версии" in text
+                for text in texts
+            ),
+        )
+        set_text_input(app, "Заголовок", "smoke-older-archive")
+        click_button(app, "Сохранить")
+        older_saved = load_structured_payload(older.read_bytes())
+        report.add(
+            "Older archive save writes selected file",
+            older_saved["nodes"]["proc_initial_review"]["title"] == "smoke-older-archive",
         )
 
         # Soft-delete check via selected node delete controls presence on live
@@ -1812,7 +1830,7 @@ def custom_layout_positions_for_graph(
     return positions
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/flow_view.py	7925
+===BEGIN_FILE===	src/pydiag/application/flow_view.py	8136
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -1939,7 +1957,12 @@ def consume_pending_canvas_edge(
     graph: FlowGraphDocument,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> dict[str, str] | None:
-    """Take a pending canvas edge once, clearing component state to avoid repeats."""
+    """Take a pending canvas edge once, clearing component state to avoid repeats.
+
+    Must run before the canvas widget with ``component_key`` is instantiated in
+    the same script/fragment run. Streamlit rejects writes to
+    ``session_state[component_key]`` after that widget exists.
+    """
     component_state = component_state_from_session(session_state, component_key)
     pending = component_pending_edge_from_state(graph, component_state)
     if pending is None:
@@ -2153,7 +2176,7 @@ def sync_returned_selected_id(
     return selected_id
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/flow_view_state.py	2085
+===BEGIN_FILE===	src/pydiag/application/flow_view_state.py	2036
 from __future__ import annotations
 
 import time
@@ -2180,12 +2203,12 @@ def flow_state_timestamp(
     position_edit_enabled: bool = False,
     edge_edit_enabled: bool = False,
 ) -> int:
-    del responsible_filter  # applied client-side; excluded from scene revision
+    # Search / kind / responsible filters and live draft positions are applied
+    # without bumping scene revision (client dim + incremental geometry).
+    del search, responsible_filter, kind_filter
     signature = flow_view_signature(
         graph=graph,
         wells=wells,
-        search=search,
-        kind_filter=kind_filter,
         layout_mode=layout_mode,
         position_edit_enabled=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
@@ -2201,21 +2224,17 @@ def flow_view_signature(
     *,
     graph: FlowGraphDocument,
     wells: WellsDocument,
-    search: str,
-    kind_filter: list[str],
     layout_mode: str,
     position_edit_enabled: bool,
     edge_edit_enabled: bool = False,
 ) -> tuple[Any, ...]:
-    # Responsible legend filtering is applied client-side and must not bump
-    # revision / rebuild the graph scene.
+    # Topology / versions / chrome flags only. Node positions are synced
+    # incrementally via positionsVersion so drag does not clear the scene.
     return (
         graph.version,
-        tuple((node.id, node.position.x, node.position.y) for node in graph.nodes),
+        tuple(node.id for node in graph.nodes),
         wells.version,
         tuple((well.id, well.current_node_id, well.is_archived) for well in wells.wells),
-        search.strip().casefold(),
-        tuple(kind_filter),
         layout_mode,
         position_edit_enabled,
         edge_edit_enabled,
@@ -2766,7 +2785,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/domain/models.py	8967
+===BEGIN_FILE===	src/pydiag/domain/models.py	9218
 from __future__ import annotations
 
 import re
@@ -3037,6 +3056,12 @@ class Well(StrictModel):
     history: list[WellHistoryEntry] = Field(default_factory=list)
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
     is_archived: bool = False
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def coerce_null_metadata(cls, value: object) -> object:
+        # Legacy YAML dumps wrote empty metadata as a bare "metadata:" (null).
+        return {} if value is None else value
 
 
 class WellsDocument(StrictModel):
@@ -5613,7 +5638,7 @@ def text_like_payload(item: dict[str, object]) -> dict[str, object]:
     return normalized
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/flow_source_graph.py	45740
+===BEGIN_FILE===	src/pydiag/infrastructure/flow_source_graph.py	46438
 from __future__ import annotations
 
 import json
@@ -5653,11 +5678,11 @@ FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
     {"figma_source_id", "figma_parent_id", "figma_source_type"}
 )
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
-    "process": (320, 120),
-    "decision_diamond": (360, 220),
-    "database": (320, 120),
-    "input_data": (320, 120),
-    "event": (320, 96),
+    "process": (280, 72),
+    "decision_diamond": (280, 96),
+    "database": (260, 96),
+    "input_data": (260, 72),
+    "event": (220, 56),
 }
 CYRILLIC_TO_LATIN = {
     "а": "a",
@@ -6253,6 +6278,14 @@ def update_flow_source_payload_node(
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
     current = updated.nodes[command.node_id]
+    previous_layout = updated.layout.get(command.node_id)
+    size_changed = previous_layout is None or (
+        int(previous_layout.w) != int(command.layout_w)
+        or int(previous_layout.h) != int(command.layout_h)
+    )
+    metadata = dict(current.metadata)
+    if size_changed:
+        metadata["manual_layout_size"] = True
     updated.nodes[command.node_id] = current.model_copy(
         update={
             "title": command.title,
@@ -6263,6 +6296,7 @@ def update_flow_source_payload_node(
             "duration": command.duration,
             "note": command.note,
             "deleted": current.deleted if command.deleted is None else command.deleted,
+            "metadata": metadata,
         }
     )
     updated.layout[command.node_id] = FlowSourceLayoutEntry(
@@ -6666,6 +6700,13 @@ def render_yaml_mapping(mapping: dict[str, object], *, indent: int) -> str:
     lines: list[str] = []
     for key, value in mapping.items():
         prefix = " " * indent + f"{key}:"
+        if isinstance(value, dict) and not value:
+            # Inline empty mapping — a bare "key:" is parsed as null.
+            lines.append(f"{prefix} {{}}")
+            continue
+        if isinstance(value, list) and not value:
+            lines.append(f"{prefix} []")
+            continue
         if is_yaml_scalar(value):
             lines.append(f"{prefix} {render_yaml_scalar(value)}")
             continue
@@ -6898,6 +6939,8 @@ def is_yaml_sequence_line(value: str) -> bool:
 
 
 def parse_yaml_scalar(value: str) -> object:
+    if value == "{}":
+        return {}
     if value.startswith("[") and value.endswith("]"):
         return parse_yaml_inline_list(value[1:-1])
     if value in {"null", "Null", "NULL", "~"}:
@@ -8385,7 +8428,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/admin.py	28147
+===BEGIN_FILE===	src/pydiag/presentation/admin.py	27093
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -8492,7 +8535,10 @@ def render_admin_panel(
     service = WellAdminService(graph=graph, wells=wells, actor=LOCAL_ADMIN_ACTOR)
     wells_editable = actions.wells_edit_available()
 
-    _render_section_label(st_module, "Карточка")
+    _render_section_label(
+        st_module,
+        "Связь" if selected_kind == "edge" else "Карточка",
+    )
     if not actions.graph_source_edit_available():
         reason = (
             actions.graph_source_edit_block_reason() or "Редактирование сейчас недоступно"
@@ -8962,49 +9008,17 @@ def render_graph_source_edge_editor(
         st_module.error(f"Не удалось загрузить связь из source YAML: {exc}")
         return
 
-    node_ids = [item.id for item in graph.nodes]
-    node_map = node_by_id(graph)
     edge_kind_options = list(EDGE_KIND_LABELS.keys())
     def field_key(name: str) -> str:
         return f"{form_key_prefix}_{name}::{edge.id}"
 
     with st_module.form(f"{form_key_prefix}_form::{edge.id}", clear_on_submit=False):
-        source = st_module.selectbox(
-            "Откуда",
-            options=node_ids,
-            index=default_option_index(node_ids, draft.source),
-            format_func=lambda value: node_map[value].text,
-            key=field_key("source"),
-        )
-        target = st_module.selectbox(
-            "Куда",
-            options=node_ids,
-            index=default_option_index(node_ids, draft.target),
-            format_func=lambda value: node_map[value].text,
-            key=field_key("target"),
-        )
         kind = st_module.selectbox(
             "Тип связи",
             options=edge_kind_options,
             index=default_option_index(edge_kind_options, draft.kind),
             format_func=lambda value: EDGE_KIND_LABELS[value],
             key=field_key("kind"),
-        )
-        label = st_module.text_input(
-            "Метка связи",
-            value=draft.label or "",
-            key=field_key("label"),
-        )
-        condition = st_module.text_input(
-            "Условие",
-            value=draft.condition or "",
-            key=field_key("condition"),
-        )
-        note = st_module.text_area(
-            "Заметка",
-            value=draft.note or "",
-            height=68,
-            key=field_key("note"),
         )
         submitted = st_module.form_submit_button(submit_label, width="stretch")
 
@@ -9040,12 +9054,12 @@ def render_graph_source_edge_editor(
         graph,
         UpdateGraphSourceEdgeCommand(
             edge_id=edge.id,
-            source=source,
-            target=target,
+            source=draft.source,
+            target=draft.target,
             kind=kind,
-            label=normalized_optional_text(label),
-            condition=normalized_optional_text(condition),
-            note=normalized_optional_text(note),
+            label=draft.label,
+            condition=draft.condition,
+            note=draft.note,
         ),
     )
 
@@ -10373,7 +10387,7 @@ def insecure_admin_mode_enabled() -> bool:
     return os.getenv("PYDIAG_ALLOW_INSECURE_ADMIN") == "1"
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/chrome.py	18527
+===BEGIN_FILE===	src/pydiag/presentation/chrome.py	19176
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10412,6 +10426,8 @@ APP_CSS = """
 <style>
 :root {
     /* Compact density profile. Tweak these tokens to relax or tighten the whole UI. */
+    /* Workspace fills the viewport so 22" and 27" 2K share one composition. */
+    --pydiag-workspace-height: max(575px, calc(100dvh - 5rem));
     --app-page-pad-top: 0.32rem;
     --app-page-pad-x: 1.2rem;
     --app-page-pad-bottom: 0.5rem;
@@ -10625,6 +10641,20 @@ div[data-testid="stExpander"] {
 [data-testid="stForm"] [data-testid="stElementContainer"] {
     margin-top: 0 !important;
     margin-bottom: 0 !important;
+}
+/*
+ * Inspector scroll panel: Streamlit needs a fixed px height at render time,
+ * but we override it to the same viewport token as the canvas so both columns
+ * stay aligned across monitor sizes.
+ */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+    height: var(--pydiag-workspace-height) !important;
+    max-height: var(--pydiag-workspace-height) !important;
+}
+@media (max-width: 840px) {
+    :root {
+        --pydiag-workspace-height: max(420px, calc(100dvh - 4.4rem));
+    }
 }
 /*
  * Height-limited inspector panels use a flex column. Streamlit element
@@ -11163,7 +11193,7 @@ def render_overview_tables(st_module, graph: FlowGraphDocument, wells: WellsDocu
         )
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/inspector_models.py	4796
+===BEGIN_FILE===	src/pydiag/presentation/inspector_models.py	4852
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11293,15 +11323,20 @@ def build_well_inspector_model(graph: FlowGraphDocument, well: Well) -> WellInsp
 
 
 def build_edge_inspector_model(graph: FlowGraphDocument, edge: FlowEdge) -> EdgeInspectorModel:
-    nodes = node_by_id(graph)
+    kind_labels = {
+        "default": "Обычная",
+        "usual": "Обычная",
+        "yes": "Да",
+        "no": "Нет",
+        "dashed": "Пунктир",
+    }
+    kind_label = kind_labels.get(edge.kind, edge.kind)
     section = InspectorSection(
-        title=edge.label or edge.kind,
+        title=edge.label or kind_label,
         subtitle_html=safe_text(edge.id),
         details_html=details_grid_html(
             [
-                ("Тип", safe_text(edge.kind)),
-                ("Откуда", safe_text(nodes[edge.source].text)),
-                ("Куда", safe_text(nodes[edge.target].text)),
+                ("Тип", safe_text(kind_label)),
             ]
         ),
     )
@@ -11326,7 +11361,7 @@ def details_grid_html(items: list[tuple[str, str]]) -> str:
     return f'<div class="mini-kv">{cells}</div>'
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime.py	13939
+===BEGIN_FILE===	src/pydiag/presentation/runtime.py	14305
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -11361,7 +11396,9 @@ from pydiag.presentation.sidebar import (
 )
 from pydiag.rendering.flow_canvas_component import render_flow_canvas
 
-WORKSPACE_PANEL_HEIGHT = 828
+# Streamlit requires a fixed px height; chrome CSS overrides this to
+# --pydiag-workspace-height so the panel tracks the viewport on any monitor.
+WORKSPACE_PANEL_HEIGHT = 1600
 CARD_LAYOUT_SYNC_TOKEN_KEY = "_card_layout_sync_token"
 
 
@@ -11662,6 +11699,10 @@ class StreamlitAppRuntime:
                         self.auth_context().current_user_is_admin()
                         and session.graph_source_edit_available()
                     )
+                    # Clear pending_edge in session_state BEFORE the canvas
+                    # widget is instantiated — Streamlit forbids mutating
+                    # st.session_state[widget_key] after that point.
+                    self._consume_pending_canvas_edge(graph)
                     selected_id = self._render_flow(
                         graph,
                         wells,
@@ -11672,7 +11713,6 @@ class StreamlitAppRuntime:
                         position_edit_enabled=position_edit_enabled,
                         edge_edit_enabled=edge_edit_enabled,
                     )
-                    self._consume_pending_canvas_edge(graph)
             except Exception as exc:
                 self.st_module.error(f"Ошибка отрисовки схемы: {exc}")
                 selected_id = None
@@ -11702,7 +11742,7 @@ class StreamlitAppRuntime:
         render_workspace_fragment()
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	16314
+===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	15236
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -11958,10 +11998,7 @@ class StreamlitSessionCoordinator:
         if not self.position_edit_available():
             self.st_module.error(
                 self.position_edit_block_reason()
-                or (
-                    "Версии схемы доступны только для просмотра. "
-                    "Переключитесь на текущую схему."
-                )
+                or "Редактирование расположения сейчас недоступно."
             )
             return
 
@@ -12078,55 +12115,33 @@ class StreamlitSessionCoordinator:
         self.finalize_persistence(result.should_rerun, result.error_message)
 
     def working_schema_selected(self) -> bool:
-        """True for the live schema, or the newest archive when no live file exists."""
-        selected = self.selected_graph_version_id()
-        if selected is None:
-            return True
-        if self.live_graph_source_exists():
-            return False
-        versions = self.documents_gateway.list_graph_versions()
-        if not versions:
-            return False
-        return selected == newest_graph_version(versions).id
+        """True for any selectable schema: live «Текущая» or any archived ``v000x``.
+
+        All versions are equally editable; edits write to the selected file.
+        """
+        return True
 
     def editable_graph_version_id(self) -> str | None:
-        """Version id for writes: None = live/default path; otherwise newest archive."""
-        if not self.working_schema_selected():
-            raise RuntimeError("Editable schema is not selected")
+        """Version id for writes: None = live/default path; otherwise selected archive."""
         return self.selected_graph_version_id()
 
     def position_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def position_edit_block_reason(self) -> str | None:
-        if self.position_edit_available():
-            return None
-        return (
-            "Версии схемы доступны только для просмотра. "
-            "Переключитесь на текущую схему."
-        )
+        return None
 
     def wells_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def wells_edit_block_reason(self) -> str | None:
-        if self.wells_edit_available():
-            return None
-        return (
-            "Изменение скважин доступно только в текущей схеме. "
-            "Переключитесь на текущую схему."
-        )
+        return None
 
     def graph_source_edit_available(self) -> bool:
-        return self.working_schema_selected()
+        return True
 
     def graph_source_edit_block_reason(self) -> str | None:
-        if self.graph_source_edit_available():
-            return None
-        return (
-            "Правки доступны только в текущей схеме. "
-            "Архивная версия открыта только для просмотра."
-        )
+        return None
 
     def finalize_persistence(
         self, should_rerun: bool, error_message: str | None
@@ -12766,7 +12781,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	13696
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	14928
 .flow-canvas-root {
   --flow-accent-rgb: 59, 130, 246;
   --flow-accent-strong: #2563eb;
@@ -12775,8 +12790,8 @@ __all__ = [
   --flow-accent-glow: rgba(96, 165, 250, 0.55);
   position: relative;
   width: 100%;
-  height: clamp(575px, calc(100vh - 5rem), 828px);
-  height: clamp(575px, calc(100dvh - 5rem), 828px);
+  /* Prefer shared token from app chrome; fallback matches --pydiag-workspace-height. */
+  height: var(--pydiag-workspace-height, max(575px, calc(100dvh - 5rem)));
   overflow: hidden;
   border-radius: 18px;
   color: #0f172a;
@@ -13082,19 +13097,41 @@ __all__ = [
   overflow: visible;
 }
 
+.flow-canvas-edges {
+  z-index: 1;
+  pointer-events: auto;
+}
+
+.flow-canvas-labels {
+  z-index: 2;
+  pointer-events: none;
+}
+
+.flow-canvas-nodes {
+  z-index: 3;
+  /* Let clicks pass through empty space to edge hit-targets underneath. */
+  pointer-events: none;
+}
+
 .flow-edge-path {
   fill: none;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
 }
 
 .flow-edge-hit {
   fill: none;
   stroke: transparent;
-  stroke-width: 16px;
+  stroke-width: 18;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
   cursor: pointer;
+  pointer-events: stroke;
 }
 
 .flow-edge-path.is-selected {
+  stroke: var(--flow-accent-strong) !important;
   filter:
     drop-shadow(0 0 10px rgba(var(--flow-accent-rgb), 0.12))
     drop-shadow(0 0 16px rgba(var(--flow-accent-rgb), 0.2));
@@ -13114,7 +13151,16 @@ __all__ = [
   text-align: center;
   user-select: none;
   cursor: pointer;
+  pointer-events: auto;
   transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.flow-edge-label.is-selected {
+  box-shadow:
+    0 0 0 2px rgba(var(--flow-accent-rgb), 0.55),
+    0 0 0 5px rgba(var(--flow-accent-rgb), 0.16),
+    0 12px 26px rgba(15, 23, 42, 0.14);
+  transform: translateY(-1px);
 }
 
 .flow-edge-label:hover {
@@ -13125,6 +13171,7 @@ __all__ = [
 .flow-node-shell {
   position: absolute;
   z-index: 2;
+  pointer-events: auto;
 }
 
 .flow-node-shell.is-selected {
@@ -13266,12 +13313,36 @@ __all__ = [
 
 .flow-canvas-root.is-connecting .flow-node-shell.is-connect-target .flow-node-card {
   box-shadow:
-    0 0 0 1px rgba(59, 130, 246, 0.28),
-    0 10px 24px rgba(37, 99, 235, 0.12);
+    0 0 0 2px rgba(59, 130, 246, 0.45),
+    0 10px 24px rgba(37, 99, 235, 0.16);
 }
 
 .flow-canvas-root.is-connecting .flow-node-shell.is-connect-source .flow-node-card {
   opacity: 0.96;
+}
+
+.flow-canvas-root.is-connecting {
+  cursor: crosshair;
+}
+
+/* While rubber-banding a link, don't let edge hit-targets steal the drop. */
+.flow-canvas-root.is-connecting .flow-canvas-edges,
+.flow-canvas-root.is-connecting .flow-edge-label {
+  pointer-events: none;
+}
+
+.flow-connect-preview {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-dasharray: 6 6;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+.flow-connect-preview[hidden] {
+  display: none;
 }
 
 .flow-node-selection {
@@ -13408,8 +13479,7 @@ __all__ = [
 
 @media (max-width: 840px) {
   .flow-canvas-root {
-    height: clamp(420px, calc(100vh - 4.4rem), 620px);
-    height: clamp(420px, calc(100dvh - 4.4rem), 620px);
+    height: var(--pydiag-workspace-height, max(420px, calc(100dvh - 4.4rem)));
   }
 
   .flow-canvas-minimap {
@@ -13423,7 +13493,7 @@ __all__ = [
 }
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	67356
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	82086
 const TOOLBAR_BUTTONS = [
   { id: "zoom-in", label: "+" },
   { id: "zoom-out", label: "-" },
@@ -13548,8 +13618,8 @@ function createCanvasState(root, component, ownerDocument) {
     payload: normalizePayload(component.data) || {
       nodes: [],
       edges: [],
-      canvas: { width: 1200, height: 828 },
-      bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
+      canvas: { width: 1200, height: 900 },
+      bounds: { left: 0, top: 0, right: 1200, bottom: 900, width: 1200, height: 900 },
       selected_id: null,
       position_edit_enabled: false,
       edge_edit_enabled: false,
@@ -13577,9 +13647,12 @@ function createCanvasState(root, component, ownerDocument) {
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
+    lastEdgeGeometrySignature: null,
+    edgeGeometryVersion: 0,
     renderedSelectedId: null,
     renderedSelectedNodeIds: new Set(),
     renderedPositionsVersion: -1,
+    renderedEdgeGeometryVersion: -1,
     renderedDraggingNodeId: null,
     renderedDraggingNodeIds: [],
     resizeObserver: null,
@@ -13657,6 +13730,10 @@ function initializeRootStructure(state) {
   svg.appendChild(defs);
   const edgeLayer = createSvgElement("g");
   svg.appendChild(edgeLayer);
+  const connectPreview = createSvgElement("path");
+  connectPreview.classList.add("flow-connect-preview");
+  connectPreview.setAttribute("hidden", "");
+  svg.appendChild(connectPreview);
 
   const labelsLayer = createElement("div", "flow-canvas-labels", stage);
   const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
@@ -13700,6 +13777,7 @@ function initializeRootStructure(state) {
     svg,
     defs,
     edgeLayer,
+    connectPreview,
     labelsLayer,
     nodesLayer,
     minimap,
@@ -13755,6 +13833,9 @@ function syncStateFromPayload(state) {
       state.positions = {};
       state.positionsVersion = 0;
       state.renderedPositionsVersion = -1;
+      state.lastEdgeGeometrySignature = null;
+      state.edgeGeometryVersion = 0;
+      state.renderedEdgeGeometryVersion = -1;
     }
   }
 
@@ -13767,6 +13848,11 @@ function syncStateFromPayload(state) {
   state.nodePayloadsById = indexPayloadsById(payload.nodes);
   state.edgePayloadsById = indexPayloadsById(payload.edges);
   state.tokenPayloadsById = indexTokenPayloads(payload.nodes);
+  const nextEdgeGeometrySignature = edgeGeometrySignature(payload.edges);
+  if (state.lastEdgeGeometrySignature !== nextEdgeGeometrySignature) {
+    state.lastEdgeGeometrySignature = nextEdgeGeometrySignature;
+    state.edgeGeometryVersion += 1;
+  }
   if (state.selectedNodeIds.size) {
     const retained = new Set();
     for (const nodeId of state.selectedNodeIds) {
@@ -13862,6 +13948,7 @@ function renderState(state) {
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
     return;
@@ -13881,21 +13968,34 @@ function renderState(state) {
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
   } else {
-    if (state.renderedPositionsVersion !== state.positionsVersion) {
+    const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;
+    const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;
+    if (positionsChanged) {
       if (state.draggingNodeIds.length) {
         for (const nodeId of state.draggingNodeIds) {
           updateDraggedNode(state, nodeId);
         }
+        // Keep wires glued to cards while dragging (before save / server rebuild).
+        updateEdgeGeometry(state);
       } else if (state.draggingNodeId) {
         updateDraggedNode(state, state.draggingNodeId);
+        updateEdgeGeometry(state);
       } else {
         updateNodePositions(state);
         updateMinimapNodePositions(state);
+        updateEdgeGeometry(state);
       }
       state.renderedPositionsVersion = state.positionsVersion;
+      state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
+    } else if (edgeGeometryChanged) {
+      // Same revision + same live positions, but host re-routed edges
+      // (typical after drag echo). Apply the new points without a full rebuild.
+      updateEdgeGeometry(state);
+      state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     }
     if (
       state.renderedDraggingNodeId !== state.draggingNodeId
@@ -14079,14 +14179,32 @@ function nodeMatchesResponsibleFilter(node, filterKeys) {
   return keys.some((key) => filterKeys.has(key));
 }
 
+function nodeMatchesClientFilters(node, state) {
+  const kindFilter = Array.isArray(state.payload?.kind_filter)
+    ? state.payload.kind_filter.filter((item) => typeof item === "string" && item)
+    : [];
+  if (kindFilter.length && !kindFilter.includes(node.kind)) {
+    return false;
+  }
+  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
+  if (!nodeMatchesResponsibleFilter(node, filterKeys)) {
+    return false;
+  }
+  const query = String(state.payload?.search || "").trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  const haystack = String(node.search_text || node.text || node.id || "").toLowerCase();
+  return haystack.includes(query);
+}
+
 function syncResponsibleFilterDim(state) {
   if (!state.payload || !Array.isArray(state.payload.nodes)) {
     return;
   }
-  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
   const activeIds = new Set();
   for (const node of state.payload.nodes) {
-    const active = node.active !== false && nodeMatchesResponsibleFilter(node, filterKeys);
+    const active = node.active !== false && nodeMatchesClientFilters(node, state);
     if (active) {
       activeIds.add(node.id);
     }
@@ -14249,12 +14367,21 @@ function buildEdgeElement(state, edge) {
   const hitPath = createSvgElement("path");
   hitPath.classList.add("flow-edge-hit");
   hitPath.setAttribute("d", pathData);
-  hitPath.addEventListener("click", (event) => {
+  hitPath.setAttribute("stroke-width", "18");
+  hitPath.addEventListener("pointerdown", (event) => {
+    // Prefer pointerdown so selection wins over viewport pan start.
+    if (event.button !== 0) {
+      return;
+    }
     event.stopPropagation();
+    event.preventDefault();
     if (state.connectMode) {
       cancelConnectMode(state);
     }
     selectId(state, edge.id);
+  });
+  hitPath.addEventListener("click", (event) => {
+    event.stopPropagation();
   });
   group.appendChild(hitPath);
 
@@ -14270,16 +14397,22 @@ function buildEdgeElement(state, edge) {
     label.style.border = `1px solid ${edge.label.color}`;
     label.style.color = edge.label.color;
     label.style.opacity = String(edge.label.active ? 1 : 0.24);
-    label.addEventListener("click", (event) => {
+    label.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
       event.stopPropagation();
       if (state.connectMode) {
         cancelConnectMode(state);
       }
       selectId(state, edge.id);
     });
+    label.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
   }
 
-  const elements = { visiblePath, label };
+  const elements = { visiblePath, hitPath, label };
   setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
   state.edgeElements.set(edge.id, elements);
 }
@@ -14364,6 +14497,7 @@ function buildNodeElement(state, node) {
 function buildMinimapEdgeElement(state, edge) {
   const path = createSvgElement("path");
   path.classList.add("flow-canvas-minimap__edge");
+  path.dataset.edgeId = edge.id;
   path.setAttribute("d", roundedPath(edge.points));
   state.dom.minimapEdgeLayer.appendChild(path);
 }
@@ -14385,6 +14519,108 @@ function updateNodePositions(state) {
     }
     syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
   }
+}
+
+function updateEdgeGeometry(state) {
+  for (const edge of state.payload.edges || []) {
+    const elements = state.edgeElements.get(edge.id);
+    if (!elements || !Array.isArray(edge.points) || edge.points.length < 2) {
+      continue;
+    }
+    const points = liveEdgePoints(state, edge);
+    const pathData = roundedPath(points);
+    if (elements.visiblePath) {
+      elements.visiblePath.setAttribute("d", pathData);
+    }
+    if (elements.hitPath) {
+      elements.hitPath.setAttribute("d", pathData);
+    }
+    if (elements.label && edge.label) {
+      const labelPos = liveEdgeLabelPosition(edge, points);
+      elements.label.style.left = `${labelPos.x}px`;
+      elements.label.style.top = `${labelPos.y}px`;
+      elements.label.style.width = `${edge.label.width}px`;
+      elements.label.style.height = `${edge.label.height}px`;
+    }
+  }
+  for (const path of state.dom.minimapEdgeLayer.querySelectorAll("[data-edge-id]")) {
+    const edge = state.edgePayloadsById.get(path.dataset.edgeId);
+    if (!edge || !Array.isArray(edge.points) || edge.points.length < 2) {
+      continue;
+    }
+    path.setAttribute("d", roundedPath(liveEdgePoints(state, edge)));
+  }
+}
+
+function nodePositionDelta(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node || !node.position) {
+    return { x: 0, y: 0 };
+  }
+  const live = state.positions[nodeId] || node.position;
+  return {
+    x: live.x - node.position.x,
+    y: live.y - node.position.y,
+  };
+}
+
+function liveEdgePoints(state, edge) {
+  const points = edge.points;
+  if (!Array.isArray(points) || points.length < 2) {
+    return points || [];
+  }
+  const ds = nodePositionDelta(state, edge.source);
+  const dt = nodePositionDelta(state, edge.target);
+  if (ds.x === 0 && ds.y === 0 && dt.x === 0 && dt.y === 0) {
+    return points;
+  }
+  if (ds.x === dt.x && ds.y === dt.y) {
+    return points.map((point) => ({ x: point.x + ds.x, y: point.y + ds.y }));
+  }
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  return points.map((point, index) => {
+    if (index === 0) {
+      return { x: point.x + ds.x, y: point.y + ds.y };
+    }
+    if (index === points.length - 1) {
+      return { x: point.x + dt.x, y: point.y + dt.y };
+    }
+    // Sticky orthogonal: coords shared with an endpoint follow that card.
+    const shareXWithStart = Math.abs(point.x - first.x) < 0.51;
+    const shareYWithStart = Math.abs(point.y - first.y) < 0.51;
+    const shareXWithEnd = Math.abs(point.x - last.x) < 0.51;
+    const shareYWithEnd = Math.abs(point.y - last.y) < 0.51;
+    let x = point.x;
+    let y = point.y;
+    if (shareXWithStart && !shareXWithEnd) {
+      x += ds.x;
+    } else if (shareXWithEnd && !shareXWithStart) {
+      x += dt.x;
+    } else {
+      x += (ds.x + dt.x) / 2;
+    }
+    if (shareYWithStart && !shareYWithEnd) {
+      y += ds.y;
+    } else if (shareYWithEnd && !shareYWithStart) {
+      y += dt.y;
+    } else {
+      y += (ds.y + dt.y) / 2;
+    }
+    return { x: round(x), y: round(y) };
+  });
+}
+
+function liveEdgeLabelPosition(edge, livePoints) {
+  const label = edge.label;
+  const basePoints = edge.points;
+  const baseMid = basePoints[Math.floor((basePoints.length - 1) / 2)];
+  const liveMid = livePoints[Math.floor((livePoints.length - 1) / 2)];
+  return {
+    x: label.position.x + (liveMid.x - baseMid.x),
+    y: label.position.y + (liveMid.y - baseMid.y),
+  };
 }
 
 function updateMinimapNodePositions(state) {
@@ -14522,6 +14758,7 @@ function setEdgeSelectedState(elements, edge, selected) {
     String(selected ? 3.3 : edge.style.strokeWidth || 2.4),
   );
   if (elements.label) {
+    elements.label.classList.toggle("is-selected", selected);
     elements.label.style.transform = selected ? "translateY(-1px)" : "none";
   }
 }
@@ -14912,27 +15149,14 @@ function buildConnectionHandles(state, shell, node) {
     handle.dataset.side = side;
     handle.dataset.nodeId = node.id;
     handle.title = side === preferred
-      ? "Начать связь (основной выход)"
-      : "Начать связь";
+      ? "Потяните к другой карточке (основной выход)"
+      : "Потяните к другой карточке";
     handle.setAttribute("aria-label", `Точка связи: ${side}`);
     if (side === preferred) {
       handle.classList.add("is-primary");
     }
     handle.addEventListener("pointerdown", (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-    });
-    handle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (
-        state.connectMode
-        && state.connectMode.sourceId === node.id
-        && state.connectMode.side === side
-      ) {
-        cancelConnectMode(state);
-        return;
-      }
-      beginConnectMode(state, node.id, side);
+      startConnectDrag(event, state, node.id, side, handle);
     });
     handles.push(handle);
   }
@@ -14971,15 +15195,17 @@ function syncConnectModeChrome(state) {
   const connecting = Boolean(state.connectMode);
   state.root.classList.toggle("is-connecting", connecting);
   const sourceId = state.connectMode?.sourceId || null;
+  const hoverTargetId = state.connectMode?.targetId || null;
   for (const [nodeId, elements] of state.nodeElements) {
     elements.shell.classList.toggle("is-connect-source", connecting && nodeId === sourceId);
     elements.shell.classList.toggle(
       "is-connect-target",
-      connecting && nodeId !== sourceId && state.nodePayloadsById.has(nodeId),
+      connecting && nodeId !== sourceId && nodeId === hoverTargetId,
     );
   }
   syncHandleActiveStates(state);
   updateConnectHint(state);
+  syncConnectPreview(state);
 }
 
 function updateConnectHint(state) {
@@ -14995,7 +15221,9 @@ function updateConnectHint(state) {
   }
   if (state.connectMode) {
     hint.hidden = false;
-    hint.textContent = "Выберите целевую карточку · Esc — отмена";
+    hint.textContent = state.connectMode.targetId
+      ? "Отпустите кнопку мыши — связь будет создана · Esc — отмена"
+      : "Ведите линию до другой карточки · Esc — отмена";
     hint.classList.add("is-active");
     return;
   }
@@ -15006,7 +15234,7 @@ function updateConnectHint(state) {
   );
   if (hasSelectedNode) {
     hint.hidden = false;
-    hint.textContent = "Точки на карточке — начало связи. Клик по точке, затем по цели.";
+    hint.textContent = "Потяните точку на карточке к другой карточке, чтобы создать связь.";
     hint.classList.remove("is-active");
     return;
   }
@@ -15015,11 +15243,281 @@ function updateConnectHint(state) {
   hint.classList.remove("is-active");
 }
 
+function handleAnchorWorldPoint(state, nodeId, side) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const position = state.positions[nodeId] || node?.position;
+  if (!node || !position) {
+    return null;
+  }
+  const width = Number(node.size?.w) || 0;
+  const height = Number(node.size?.h) || 0;
+  if (side === "top") {
+    return { x: position.x + width / 2, y: position.y };
+  }
+  if (side === "right") {
+    return { x: position.x + width, y: position.y + height / 2 };
+  }
+  if (side === "bottom") {
+    return { x: position.x + width / 2, y: position.y + height };
+  }
+  return { x: position.x, y: position.y + height / 2 };
+}
+
+function clientPointToWorld(state, clientX, clientY) {
+  const rect = state.dom.viewport.getBoundingClientRect();
+  return {
+    x: round((clientX - rect.left - state.view.x) / state.view.scale),
+    y: round((clientY - rect.top - state.view.y) / state.view.scale),
+  };
+}
+
+function nodePaintRank(state, nodeId) {
+  const shell = state.nodeElements.get(nodeId)?.shell;
+  let z = 2;
+  let index = 0;
+  if (shell) {
+    if (shell.classList?.contains("is-selected")) {
+      z = 4;
+    }
+    const inlineZ = shell.style?.zIndex;
+    if (inlineZ && inlineZ !== "auto") {
+      const parsed = Number.parseInt(inlineZ, 10);
+      if (Number.isFinite(parsed)) {
+        z = parsed;
+      }
+    }
+    const parent = shell.parentElement;
+    if (parent) {
+      index = Array.prototype.indexOf.call(parent.children, shell);
+    }
+  } else if (state.selectedId === nodeId || state.selectedNodeIds.has(nodeId)) {
+    z = 4;
+  }
+  return z * 100000 + index;
+}
+
+function nodeIdFromWorldPoint(state, worldX, worldY) {
+  let bestId = null;
+  let bestRank = -Infinity;
+  for (const [nodeId, node] of state.nodePayloadsById) {
+    const position = state.positions[nodeId] || node?.position;
+    if (!position) {
+      continue;
+    }
+    const width = Number(node.size?.w) || 0;
+    const height = Number(node.size?.h) || 0;
+    if (width <= 0 || height <= 0) {
+      continue;
+    }
+    if (
+      worldX < position.x
+      || worldX > position.x + width
+      || worldY < position.y
+      || worldY > position.y + height
+    ) {
+      continue;
+    }
+    const rank = nodePaintRank(state, nodeId);
+    if (rank >= bestRank) {
+      bestRank = rank;
+      bestId = nodeId;
+    }
+  }
+  return bestId;
+}
+
+function hitElementsFromPoint(state, clientX, clientY) {
+  const roots = [];
+  const rootNode = typeof state.root?.getRootNode === "function"
+    ? state.root.getRootNode()
+    : null;
+  if (rootNode && typeof rootNode.elementsFromPoint === "function") {
+    roots.push(rootNode);
+  }
+  if (state.ownerDocument && !roots.includes(state.ownerDocument)) {
+    roots.push(state.ownerDocument);
+  }
+  const seen = new Set();
+  const stack = [];
+  for (const root of roots) {
+    let hits = [];
+    if (typeof root.elementsFromPoint === "function") {
+      hits = root.elementsFromPoint(clientX, clientY) || [];
+    } else if (typeof root.elementFromPoint === "function") {
+      const one = root.elementFromPoint(clientX, clientY);
+      hits = one ? [one] : [];
+    }
+    for (const hit of hits) {
+      if (!hit || seen.has(hit)) {
+        continue;
+      }
+      seen.add(hit);
+      stack.push(hit);
+    }
+  }
+  return stack;
+}
+
+function nodeIdFromDomPoint(state, clientX, clientY) {
+  for (const hit of hitElementsFromPoint(state, clientX, clientY)) {
+    if (typeof hit.closest !== "function") {
+      continue;
+    }
+    const card = hit.closest(".flow-node-card");
+    if (card?.dataset?.nodeId) {
+      return card.dataset.nodeId;
+    }
+    const handle = hit.closest(".flow-node-handle");
+    if (handle?.dataset?.nodeId) {
+      return handle.dataset.nodeId;
+    }
+    const shell = hit.closest(".flow-node-shell");
+    if (!shell) {
+      continue;
+    }
+    const shellCard = shell.querySelector(".flow-node-card");
+    if (shellCard?.dataset?.nodeId) {
+      return shellCard.dataset.nodeId;
+    }
+  }
+  return null;
+}
+
+function nodeIdFromClientPoint(state, clientX, clientY) {
+  // Prefer DOM (paint / z-index order) when a card is under the cursor.
+  // Fall back to world geometry when capture / edge hits make DOM miss.
+  const domId = nodeIdFromDomPoint(state, clientX, clientY);
+  if (domId) {
+    return domId;
+  }
+  const world = clientPointToWorld(state, clientX, clientY);
+  return nodeIdFromWorldPoint(state, world.x, world.y);
+}
+
+function syncConnectPreview(state) {
+  const preview = state.dom?.connectPreview;
+  if (!preview) {
+    return;
+  }
+  if (!state.connectMode?.start || !state.connectMode?.cursor) {
+    preview.setAttribute("hidden", "");
+    preview.removeAttribute("d");
+    return;
+  }
+  const start = state.connectMode.start;
+  const cursor = state.connectMode.cursor;
+  preview.removeAttribute("hidden");
+  preview.setAttribute(
+    "d",
+    `M ${start.x} ${start.y} L ${cursor.x} ${cursor.y}`,
+  );
+}
+
+function startConnectDrag(event, state, sourceId, side, handle) {
+  if (event.button !== 0 || state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  clearSelection(state.ownerDocument);
+
+  const start = handleAnchorWorldPoint(state, sourceId, side);
+  if (!start) {
+    return;
+  }
+  const cursor = clientPointToWorld(state, event.clientX, event.clientY);
+  state.connectMode = {
+    sourceId,
+    side,
+    pointerId: event.pointerId,
+    start,
+    cursor,
+    targetId: null,
+  };
+  syncConnectModeChrome(state);
+  queueRender(state);
+
+  const ownerDocument = state.ownerDocument;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+    ownerDocument.body.style.cursor = "crosshair";
+  }
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch (_error) {
+    // Some environments may reject capture; document listeners still work.
+  }
+
+  const move = (moveEvent) => {
+    if (!state.connectMode || state.connectMode.pointerId !== moveEvent.pointerId) {
+      return;
+    }
+    moveEvent.preventDefault();
+    const nextCursor = clientPointToWorld(state, moveEvent.clientX, moveEvent.clientY);
+    const hoverId = nodeIdFromClientPoint(state, moveEvent.clientX, moveEvent.clientY);
+    const targetId = hoverId && hoverId !== sourceId && state.nodePayloadsById.has(hoverId)
+      ? hoverId
+      : null;
+    state.connectMode.cursor = nextCursor;
+    if (state.connectMode.targetId !== targetId) {
+      state.connectMode.targetId = targetId;
+      syncConnectModeChrome(state);
+    } else {
+      syncConnectPreview(state);
+      updateConnectHint(state);
+    }
+  };
+
+  const stop = (stopEvent) => {
+    if (state.connectMode && state.connectMode.pointerId !== stopEvent.pointerId) {
+      return;
+    }
+    ownerDocument.removeEventListener("pointermove", move);
+    ownerDocument.removeEventListener("pointerup", stop);
+    ownerDocument.removeEventListener("pointercancel", stop);
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+      ownerDocument.body.style.cursor = previousCursor;
+    }
+    try {
+      if (handle.hasPointerCapture?.(stopEvent.pointerId)) {
+        handle.releasePointerCapture(stopEvent.pointerId);
+      }
+    } catch (_error) {
+      // ignore
+    }
+    if (!state.connectMode) {
+      return;
+    }
+    const dropId = nodeIdFromClientPoint(state, stopEvent.clientX, stopEvent.clientY);
+    state.suppressNextNodeClick = true;
+    if (dropId && dropId !== sourceId && state.nodePayloadsById.has(dropId)) {
+      completeConnectMode(state, dropId);
+      return;
+    }
+    cancelConnectMode(state);
+  };
+
+  ownerDocument.addEventListener("pointermove", move);
+  ownerDocument.addEventListener("pointerup", stop);
+  ownerDocument.addEventListener("pointercancel", stop);
+}
+
 function beginConnectMode(state, sourceId, side) {
   if (state.payload.edge_edit_enabled !== true) {
     return;
   }
-  state.connectMode = { sourceId, side };
+  const start = handleAnchorWorldPoint(state, sourceId, side) || { x: 0, y: 0 };
+  state.connectMode = {
+    sourceId,
+    side,
+    pointerId: null,
+    start,
+    cursor: { ...start },
+    targetId: null,
+  };
   syncConnectModeChrome(state);
   queueRender(state);
 }
@@ -15027,6 +15525,7 @@ function beginConnectMode(state, sourceId, side) {
 function cancelConnectMode(state) {
   if (!state.connectMode) {
     updateConnectHint(state);
+    syncConnectPreview(state);
     return;
   }
   state.connectMode = null;
@@ -15143,14 +15642,23 @@ function fitView(state) {
     120,
     rect.height - FIT_VIEW_PADDING_TOP - FIT_VIEW_PADDING_BOTTOM,
   );
+  // Match zoomAt max (1.75) so large monitors can fill the workspace.
   const scale = clamp(
-    Math.min(availableWidth / bounds.width, availableHeight / bounds.height, 1.2),
+    Math.min(availableWidth / bounds.width, availableHeight / bounds.height),
     0.42,
-    1.2,
+    1.75,
   );
   state.view.scale = scale;
-  state.view.x = round((rect.width - bounds.width * scale) / 2 - bounds.left * scale);
-  state.view.y = round(FIT_VIEW_PADDING_TOP - bounds.top * scale);
+  state.view.x = round(
+    FIT_VIEW_PADDING_X
+      + (availableWidth - bounds.width * scale) / 2
+      - bounds.left * scale,
+  );
+  state.view.y = round(
+    FIT_VIEW_PADDING_TOP
+      + (availableHeight - bounds.height * scale) / 2
+      - bounds.top * scale,
+  );
 }
 
 function toggleFullscreen(state) {
@@ -15466,6 +15974,27 @@ function samePositionMaps(first, second) {
   return true;
 }
 
+function edgeGeometrySignature(edges) {
+  if (!Array.isArray(edges) || edges.length === 0) {
+    return "";
+  }
+  const parts = [];
+  for (const edge of edges) {
+    parts.push(String(edge?.id || ""));
+    const points = edge?.points;
+    if (Array.isArray(points)) {
+      for (const point of points) {
+        parts.push(point?.x, point?.y);
+      }
+    }
+    const label = edge?.label;
+    if (label?.position) {
+      parts.push(label.position.x, label.position.y, label.width, label.height);
+    }
+  }
+  return parts.join("\0");
+}
+
 function createElement(tagName, className, parent) {
   const element = document.createElement(tagName);
   if (className) {
@@ -15693,7 +16222,7 @@ def _register_flow_canvas_component():
     )
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_payload.py	13900
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_payload.py	14038
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -15711,7 +16240,7 @@ from .flow_edge_rendering import (
     edge_style,
 )
 from .flow_layout_positions import node_ports
-from .flow_node_filters import KIND_LABELS, node_matches_filters
+from .flow_node_filters import KIND_LABELS, node_matches_filters, node_search_haystack
 from .flow_node_overlays import (
     MAX_VISIBLE_WELL_TOKENS,
     duration_badge_style,
@@ -15761,13 +16290,13 @@ def build_flow_canvas_payload(
         snapshot = build_flow_render_snapshot(graph, wells_doc, layout_mode)
         if snapshot_cache is not None:
             snapshot_cache[cache_key] = snapshot
-    # Responsible filter is applied in the canvas JS so legend toggles stay
-    # instant and do not rebuild the scene. Search/kind still dim server-side.
+    # Search / kind / responsible filters are applied in the canvas JS so
+    # sidebar typing and legend toggles do not rebuild the scene.
     nodes, active_node_ids = build_flow_canvas_nodes_from_snapshot(
         snapshot,
-        search=search,
+        search="",
         responsible_filter=[],
-        kind_filter=kind_filter,
+        kind_filter=[],
         selected_id=selected_id,
         domain_nodes_draggable=domain_nodes_draggable,
     )
@@ -15784,11 +16313,13 @@ def build_flow_canvas_payload(
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
         "edge_edit_enabled": bool(edge_edit_enabled),
+        "search": search,
+        "kind_filter": list(kind_filter or []),
         "layout_mode": snapshot.layout_mode,
         "revision": revision if revision is not None else snapshot.graph.version,
         "canvas": {
             "width": max(1200, int(bounds["right"] - bounds["left"] + 160)),
-            "height": max(canvas_height_for_snapshot(snapshot), 828),
+            "height": max(canvas_height_for_snapshot(snapshot), 575),
         },
         "bounds": bounds,
         "responsible_legend": build_responsible_legend(snapshot.graph),
@@ -15864,6 +16395,7 @@ def build_flow_canvas_node(
         "kind": node.kind,
         "kind_label": KIND_LABELS[node.kind],
         "text": node.text,
+        "search_text": node_search_haystack(graph, node, wells_here),
         "selected": node.id == selected_id,
         "active": active,
         "draggable": domain_nodes_draggable,
@@ -16866,7 +17398,7 @@ def build_edge_routes(
     return build_edge_routes_for_geometries(graph, geometries, layout_mode)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_node_filters.py	1983
+===BEGIN_FILE===	src/pydiag/rendering/flow_node_filters.py	2160
 from __future__ import annotations
 
 from collections import defaultdict
@@ -16885,6 +17417,7 @@ KIND_LABELS = {
 __all__ = [
     "KIND_LABELS",
     "node_matches_filters",
+    "node_search_haystack",
     "wells_grouped_by_node",
 ]
 
@@ -16918,8 +17451,15 @@ def node_matches_filters(
     if not query:
         return True
 
-    haystack = " ".join(_node_search_terms(graph, node, wells_here)).lower()
-    return query in haystack
+    return query in node_search_haystack(graph, node, wells_here)
+
+
+def node_search_haystack(
+    graph: FlowGraphDocument,
+    node: FlowNode,
+    wells_here: list[Well],
+) -> str:
+    return " ".join(_node_search_terms(graph, node, wells_here)).lower()
 
 
 def _node_search_terms(
@@ -17427,7 +17967,7 @@ def responsible_badge_style(
     }
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_node_render_specs.py	4768
+===BEGIN_FILE===	src/pydiag/rendering/flow_node_render_specs.py	4976
 from __future__ import annotations
 
 import re
@@ -17442,8 +17982,10 @@ from .flow_render_math import ceil_to_step
 # Tuned for ~14px bold UI font (Cyrillic) so fitted boxes hug readable labels.
 TEXT_LINE_HEIGHT = 19
 TEXT_CHAR_WIDTH = 8.2
+MANUAL_LAYOUT_SIZE_META = "manual_layout_size"
 
 __all__ = [
+    "MANUAL_LAYOUT_SIZE_META",
     "NodeRenderSpec",
     "build_node_render_specs",
 ]
@@ -17481,8 +18023,17 @@ def node_render_spec(
 
 
 def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
-    if node.metadata.get("figma_fixed_size") is True:
-        return max(20, int(node.size.w)), max(20, int(node.size.h))
+    if (
+        node.metadata.get("figma_fixed_size") is True
+        or node.metadata.get(MANUAL_LAYOUT_SIZE_META) is True
+    ):
+        # Explicit admin / Figma size: YAML layout is authoritative.
+        return (
+            max(minimum_node_width(node), min(int(node.size.w), 1200)),
+            max(minimum_node_height(node), min(int(node.size.h), 800)),
+        )
+
+    # Default: content-hug so imported Figma YAML boxes do not stay oversized.
     width = preferred_node_width(node, lines)
     char_width = text_char_width(node)
     wrapped_lines = sum(
@@ -17499,7 +18050,6 @@ def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
         + wrapped_lines * TEXT_LINE_HEIGHT
         + markdown_vertical_buffer(node)
     )
-    # Content-hug: YAML layout size is positional metadata, not a visual floor.
     return width, max(minimum_node_height(node), height)
 
 
@@ -17515,8 +18065,6 @@ def preferred_node_width(node: FlowNode, lines: list[str]) -> int:
 
 
 def text_char_width(node: FlowNode) -> float:
-    # Bold Cyrillic in diamonds needs a slightly wider estimate so labels
-    # do not press against the slanted edges.
     if node.kind == "decision_diamond":
         return 9.0
     return TEXT_CHAR_WIDTH

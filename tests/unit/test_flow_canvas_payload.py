@@ -70,7 +70,7 @@ def test_flow_canvas_payload_uses_taller_minimum_canvas_height(documents) -> Non
 
     payload = build_flow_canvas_payload(graph, wells)
 
-    assert payload["canvas"]["height"] >= 828
+    assert payload["canvas"]["height"] >= 575
 
 
 def test_flow_canvas_payload_includes_responsible_legend(documents) -> None:

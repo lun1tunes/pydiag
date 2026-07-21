@@ -127,15 +127,20 @@ def build_well_inspector_model(graph: FlowGraphDocument, well: Well) -> WellInsp
 
 
 def build_edge_inspector_model(graph: FlowGraphDocument, edge: FlowEdge) -> EdgeInspectorModel:
-    nodes = node_by_id(graph)
+    kind_labels = {
+        "default": "Обычная",
+        "usual": "Обычная",
+        "yes": "Да",
+        "no": "Нет",
+        "dashed": "Пунктир",
+    }
+    kind_label = kind_labels.get(edge.kind, edge.kind)
     section = InspectorSection(
-        title=edge.label or edge.kind,
+        title=edge.label or kind_label,
         subtitle_html=safe_text(edge.id),
         details_html=details_grid_html(
             [
-                ("Тип", safe_text(edge.kind)),
-                ("Откуда", safe_text(nodes[edge.source].text)),
-                ("Куда", safe_text(nodes[edge.target].text)),
+                ("Тип", safe_text(kind_label)),
             ]
         ),
     )

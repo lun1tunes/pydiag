@@ -58,12 +58,42 @@ def test_graph_source_node_draft_and_update_roundtrip() -> None:
     assert updated["nodes"]["proc_initial_review"]["participants"] == ["planning"]
     assert updated["nodes"]["proc_initial_review"]["approvers"] == ["hse"]
     assert updated["nodes"]["proc_initial_review"]["note"] == "important"
+    assert updated["nodes"]["proc_initial_review"]["metadata"]["manual_layout_size"] is True
     assert updated["layout"]["proc_initial_review"] == {
         "x": 410.25,
         "y": 520.5,
         "w": 360,
         "h": 140,
     }
+
+
+def test_graph_source_node_update_does_not_lock_size_when_layout_unchanged() -> None:
+    payload = load_fixture_payload()
+    draft = graph_source_node_draft_from_payload(payload, "proc_initial_review")
+
+    updated = update_flow_source_payload_node(
+        payload,
+        command=UpdateGraphSourceNodeCommand(
+            node_id="proc_initial_review",
+            title="Только заголовок",
+            kind=draft.kind,
+            layout_x=draft.layout_x,
+            layout_y=draft.layout_y,
+            layout_w=draft.layout_w,
+            layout_h=draft.layout_h,
+            responsible=draft.responsible,
+            participants=draft.participants,
+            approvers=draft.approvers,
+            duration=draft.duration,
+            note=draft.note,
+        ),
+        expected_version=1,
+    )
+
+    assert updated["nodes"]["proc_initial_review"]["title"] == "Только заголовок"
+    assert "manual_layout_size" not in updated["nodes"]["proc_initial_review"].get(
+        "metadata", {}
+    )
 
 
 def test_graph_source_edge_draft_and_update_can_move_transition() -> None:

@@ -124,7 +124,12 @@ def consume_pending_canvas_edge(
     graph: FlowGraphDocument,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> dict[str, str] | None:
-    """Take a pending canvas edge once, clearing component state to avoid repeats."""
+    """Take a pending canvas edge once, clearing component state to avoid repeats.
+
+    Must run before the canvas widget with ``component_key`` is instantiated in
+    the same script/fragment run. Streamlit rejects writes to
+    ``session_state[component_key]`` after that widget exists.
+    """
     component_state = component_state_from_session(session_state, component_key)
     pending = component_pending_edge_from_state(graph, component_state)
     if pending is None:

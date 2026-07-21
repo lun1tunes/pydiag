@@ -122,8 +122,8 @@ function createCanvasState(root, component, ownerDocument) {
     payload: normalizePayload(component.data) || {
       nodes: [],
       edges: [],
-      canvas: { width: 1200, height: 828 },
-      bounds: { left: 0, top: 0, right: 1200, bottom: 828, width: 1200, height: 828 },
+      canvas: { width: 1200, height: 900 },
+      bounds: { left: 0, top: 0, right: 1200, bottom: 900, width: 1200, height: 900 },
       selected_id: null,
       position_edit_enabled: false,
       edge_edit_enabled: false,
@@ -151,9 +151,12 @@ function createCanvasState(root, component, ownerDocument) {
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
+    lastEdgeGeometrySignature: null,
+    edgeGeometryVersion: 0,
     renderedSelectedId: null,
     renderedSelectedNodeIds: new Set(),
     renderedPositionsVersion: -1,
+    renderedEdgeGeometryVersion: -1,
     renderedDraggingNodeId: null,
     renderedDraggingNodeIds: [],
     resizeObserver: null,
@@ -231,6 +234,10 @@ function initializeRootStructure(state) {
   svg.appendChild(defs);
   const edgeLayer = createSvgElement("g");
   svg.appendChild(edgeLayer);
+  const connectPreview = createSvgElement("path");
+  connectPreview.classList.add("flow-connect-preview");
+  connectPreview.setAttribute("hidden", "");
+  svg.appendChild(connectPreview);
 
   const labelsLayer = createElement("div", "flow-canvas-labels", stage);
   const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
@@ -274,6 +281,7 @@ function initializeRootStructure(state) {
     svg,
     defs,
     edgeLayer,
+    connectPreview,
     labelsLayer,
     nodesLayer,
     minimap,
@@ -329,6 +337,9 @@ function syncStateFromPayload(state) {
       state.positions = {};
       state.positionsVersion = 0;
       state.renderedPositionsVersion = -1;
+      state.lastEdgeGeometrySignature = null;
+      state.edgeGeometryVersion = 0;
+      state.renderedEdgeGeometryVersion = -1;
     }
   }
 
@@ -341,6 +352,11 @@ function syncStateFromPayload(state) {
   state.nodePayloadsById = indexPayloadsById(payload.nodes);
   state.edgePayloadsById = indexPayloadsById(payload.edges);
   state.tokenPayloadsById = indexTokenPayloads(payload.nodes);
+  const nextEdgeGeometrySignature = edgeGeometrySignature(payload.edges);
+  if (state.lastEdgeGeometrySignature !== nextEdgeGeometrySignature) {
+    state.lastEdgeGeometrySignature = nextEdgeGeometrySignature;
+    state.edgeGeometryVersion += 1;
+  }
   if (state.selectedNodeIds.size) {
     const retained = new Set();
     for (const nodeId of state.selectedNodeIds) {
@@ -436,6 +452,7 @@ function renderState(state) {
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
     return;
@@ -455,21 +472,34 @@ function renderState(state) {
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
     state.renderedPositionsVersion = state.positionsVersion;
+    state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
   } else {
-    if (state.renderedPositionsVersion !== state.positionsVersion) {
+    const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;
+    const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;
+    if (positionsChanged) {
       if (state.draggingNodeIds.length) {
         for (const nodeId of state.draggingNodeIds) {
           updateDraggedNode(state, nodeId);
         }
+        // Keep wires glued to cards while dragging (before save / server rebuild).
+        updateEdgeGeometry(state);
       } else if (state.draggingNodeId) {
         updateDraggedNode(state, state.draggingNodeId);
+        updateEdgeGeometry(state);
       } else {
         updateNodePositions(state);
         updateMinimapNodePositions(state);
+        updateEdgeGeometry(state);
       }
       state.renderedPositionsVersion = state.positionsVersion;
+      state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
+    } else if (edgeGeometryChanged) {
+      // Same revision + same live positions, but host re-routed edges
+      // (typical after drag echo). Apply the new points without a full rebuild.
+      updateEdgeGeometry(state);
+      state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     }
     if (
       state.renderedDraggingNodeId !== state.draggingNodeId
@@ -653,14 +683,32 @@ function nodeMatchesResponsibleFilter(node, filterKeys) {
   return keys.some((key) => filterKeys.has(key));
 }
 
+function nodeMatchesClientFilters(node, state) {
+  const kindFilter = Array.isArray(state.payload?.kind_filter)
+    ? state.payload.kind_filter.filter((item) => typeof item === "string" && item)
+    : [];
+  if (kindFilter.length && !kindFilter.includes(node.kind)) {
+    return false;
+  }
+  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
+  if (!nodeMatchesResponsibleFilter(node, filterKeys)) {
+    return false;
+  }
+  const query = String(state.payload?.search || "").trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  const haystack = String(node.search_text || node.text || node.id || "").toLowerCase();
+  return haystack.includes(query);
+}
+
 function syncResponsibleFilterDim(state) {
   if (!state.payload || !Array.isArray(state.payload.nodes)) {
     return;
   }
-  const filterKeys = new Set(normalizeResponsibleFilter(state.responsibleFilter));
   const activeIds = new Set();
   for (const node of state.payload.nodes) {
-    const active = node.active !== false && nodeMatchesResponsibleFilter(node, filterKeys);
+    const active = node.active !== false && nodeMatchesClientFilters(node, state);
     if (active) {
       activeIds.add(node.id);
     }
@@ -823,12 +871,21 @@ function buildEdgeElement(state, edge) {
   const hitPath = createSvgElement("path");
   hitPath.classList.add("flow-edge-hit");
   hitPath.setAttribute("d", pathData);
-  hitPath.addEventListener("click", (event) => {
+  hitPath.setAttribute("stroke-width", "18");
+  hitPath.addEventListener("pointerdown", (event) => {
+    // Prefer pointerdown so selection wins over viewport pan start.
+    if (event.button !== 0) {
+      return;
+    }
     event.stopPropagation();
+    event.preventDefault();
     if (state.connectMode) {
       cancelConnectMode(state);
     }
     selectId(state, edge.id);
+  });
+  hitPath.addEventListener("click", (event) => {
+    event.stopPropagation();
   });
   group.appendChild(hitPath);
 
@@ -844,16 +901,22 @@ function buildEdgeElement(state, edge) {
     label.style.border = `1px solid ${edge.label.color}`;
     label.style.color = edge.label.color;
     label.style.opacity = String(edge.label.active ? 1 : 0.24);
-    label.addEventListener("click", (event) => {
+    label.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
       event.stopPropagation();
       if (state.connectMode) {
         cancelConnectMode(state);
       }
       selectId(state, edge.id);
     });
+    label.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
   }
 
-  const elements = { visiblePath, label };
+  const elements = { visiblePath, hitPath, label };
   setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
   state.edgeElements.set(edge.id, elements);
 }
@@ -938,6 +1001,7 @@ function buildNodeElement(state, node) {
 function buildMinimapEdgeElement(state, edge) {
   const path = createSvgElement("path");
   path.classList.add("flow-canvas-minimap__edge");
+  path.dataset.edgeId = edge.id;
   path.setAttribute("d", roundedPath(edge.points));
   state.dom.minimapEdgeLayer.appendChild(path);
 }
@@ -959,6 +1023,108 @@ function updateNodePositions(state) {
     }
     syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
   }
+}
+
+function updateEdgeGeometry(state) {
+  for (const edge of state.payload.edges || []) {
+    const elements = state.edgeElements.get(edge.id);
+    if (!elements || !Array.isArray(edge.points) || edge.points.length < 2) {
+      continue;
+    }
+    const points = liveEdgePoints(state, edge);
+    const pathData = roundedPath(points);
+    if (elements.visiblePath) {
+      elements.visiblePath.setAttribute("d", pathData);
+    }
+    if (elements.hitPath) {
+      elements.hitPath.setAttribute("d", pathData);
+    }
+    if (elements.label && edge.label) {
+      const labelPos = liveEdgeLabelPosition(edge, points);
+      elements.label.style.left = `${labelPos.x}px`;
+      elements.label.style.top = `${labelPos.y}px`;
+      elements.label.style.width = `${edge.label.width}px`;
+      elements.label.style.height = `${edge.label.height}px`;
+    }
+  }
+  for (const path of state.dom.minimapEdgeLayer.querySelectorAll("[data-edge-id]")) {
+    const edge = state.edgePayloadsById.get(path.dataset.edgeId);
+    if (!edge || !Array.isArray(edge.points) || edge.points.length < 2) {
+      continue;
+    }
+    path.setAttribute("d", roundedPath(liveEdgePoints(state, edge)));
+  }
+}
+
+function nodePositionDelta(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node || !node.position) {
+    return { x: 0, y: 0 };
+  }
+  const live = state.positions[nodeId] || node.position;
+  return {
+    x: live.x - node.position.x,
+    y: live.y - node.position.y,
+  };
+}
+
+function liveEdgePoints(state, edge) {
+  const points = edge.points;
+  if (!Array.isArray(points) || points.length < 2) {
+    return points || [];
+  }
+  const ds = nodePositionDelta(state, edge.source);
+  const dt = nodePositionDelta(state, edge.target);
+  if (ds.x === 0 && ds.y === 0 && dt.x === 0 && dt.y === 0) {
+    return points;
+  }
+  if (ds.x === dt.x && ds.y === dt.y) {
+    return points.map((point) => ({ x: point.x + ds.x, y: point.y + ds.y }));
+  }
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  return points.map((point, index) => {
+    if (index === 0) {
+      return { x: point.x + ds.x, y: point.y + ds.y };
+    }
+    if (index === points.length - 1) {
+      return { x: point.x + dt.x, y: point.y + dt.y };
+    }
+    // Sticky orthogonal: coords shared with an endpoint follow that card.
+    const shareXWithStart = Math.abs(point.x - first.x) < 0.51;
+    const shareYWithStart = Math.abs(point.y - first.y) < 0.51;
+    const shareXWithEnd = Math.abs(point.x - last.x) < 0.51;
+    const shareYWithEnd = Math.abs(point.y - last.y) < 0.51;
+    let x = point.x;
+    let y = point.y;
+    if (shareXWithStart && !shareXWithEnd) {
+      x += ds.x;
+    } else if (shareXWithEnd && !shareXWithStart) {
+      x += dt.x;
+    } else {
+      x += (ds.x + dt.x) / 2;
+    }
+    if (shareYWithStart && !shareYWithEnd) {
+      y += ds.y;
+    } else if (shareYWithEnd && !shareYWithStart) {
+      y += dt.y;
+    } else {
+      y += (ds.y + dt.y) / 2;
+    }
+    return { x: round(x), y: round(y) };
+  });
+}
+
+function liveEdgeLabelPosition(edge, livePoints) {
+  const label = edge.label;
+  const basePoints = edge.points;
+  const baseMid = basePoints[Math.floor((basePoints.length - 1) / 2)];
+  const liveMid = livePoints[Math.floor((livePoints.length - 1) / 2)];
+  return {
+    x: label.position.x + (liveMid.x - baseMid.x),
+    y: label.position.y + (liveMid.y - baseMid.y),
+  };
 }
 
 function updateMinimapNodePositions(state) {
@@ -1096,6 +1262,7 @@ function setEdgeSelectedState(elements, edge, selected) {
     String(selected ? 3.3 : edge.style.strokeWidth || 2.4),
   );
   if (elements.label) {
+    elements.label.classList.toggle("is-selected", selected);
     elements.label.style.transform = selected ? "translateY(-1px)" : "none";
   }
 }
@@ -1486,27 +1653,14 @@ function buildConnectionHandles(state, shell, node) {
     handle.dataset.side = side;
     handle.dataset.nodeId = node.id;
     handle.title = side === preferred
-      ? "Начать связь (основной выход)"
-      : "Начать связь";
+      ? "Потяните к другой карточке (основной выход)"
+      : "Потяните к другой карточке";
     handle.setAttribute("aria-label", `Точка связи: ${side}`);
     if (side === preferred) {
       handle.classList.add("is-primary");
     }
     handle.addEventListener("pointerdown", (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-    });
-    handle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (
-        state.connectMode
-        && state.connectMode.sourceId === node.id
-        && state.connectMode.side === side
-      ) {
-        cancelConnectMode(state);
-        return;
-      }
-      beginConnectMode(state, node.id, side);
+      startConnectDrag(event, state, node.id, side, handle);
     });
     handles.push(handle);
   }
@@ -1545,15 +1699,17 @@ function syncConnectModeChrome(state) {
   const connecting = Boolean(state.connectMode);
   state.root.classList.toggle("is-connecting", connecting);
   const sourceId = state.connectMode?.sourceId || null;
+  const hoverTargetId = state.connectMode?.targetId || null;
   for (const [nodeId, elements] of state.nodeElements) {
     elements.shell.classList.toggle("is-connect-source", connecting && nodeId === sourceId);
     elements.shell.classList.toggle(
       "is-connect-target",
-      connecting && nodeId !== sourceId && state.nodePayloadsById.has(nodeId),
+      connecting && nodeId !== sourceId && nodeId === hoverTargetId,
     );
   }
   syncHandleActiveStates(state);
   updateConnectHint(state);
+  syncConnectPreview(state);
 }
 
 function updateConnectHint(state) {
@@ -1569,7 +1725,9 @@ function updateConnectHint(state) {
   }
   if (state.connectMode) {
     hint.hidden = false;
-    hint.textContent = "Выберите целевую карточку · Esc — отмена";
+    hint.textContent = state.connectMode.targetId
+      ? "Отпустите кнопку мыши — связь будет создана · Esc — отмена"
+      : "Ведите линию до другой карточки · Esc — отмена";
     hint.classList.add("is-active");
     return;
   }
@@ -1580,7 +1738,7 @@ function updateConnectHint(state) {
   );
   if (hasSelectedNode) {
     hint.hidden = false;
-    hint.textContent = "Точки на карточке — начало связи. Клик по точке, затем по цели.";
+    hint.textContent = "Потяните точку на карточке к другой карточке, чтобы создать связь.";
     hint.classList.remove("is-active");
     return;
   }
@@ -1589,11 +1747,281 @@ function updateConnectHint(state) {
   hint.classList.remove("is-active");
 }
 
+function handleAnchorWorldPoint(state, nodeId, side) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const position = state.positions[nodeId] || node?.position;
+  if (!node || !position) {
+    return null;
+  }
+  const width = Number(node.size?.w) || 0;
+  const height = Number(node.size?.h) || 0;
+  if (side === "top") {
+    return { x: position.x + width / 2, y: position.y };
+  }
+  if (side === "right") {
+    return { x: position.x + width, y: position.y + height / 2 };
+  }
+  if (side === "bottom") {
+    return { x: position.x + width / 2, y: position.y + height };
+  }
+  return { x: position.x, y: position.y + height / 2 };
+}
+
+function clientPointToWorld(state, clientX, clientY) {
+  const rect = state.dom.viewport.getBoundingClientRect();
+  return {
+    x: round((clientX - rect.left - state.view.x) / state.view.scale),
+    y: round((clientY - rect.top - state.view.y) / state.view.scale),
+  };
+}
+
+function nodePaintRank(state, nodeId) {
+  const shell = state.nodeElements.get(nodeId)?.shell;
+  let z = 2;
+  let index = 0;
+  if (shell) {
+    if (shell.classList?.contains("is-selected")) {
+      z = 4;
+    }
+    const inlineZ = shell.style?.zIndex;
+    if (inlineZ && inlineZ !== "auto") {
+      const parsed = Number.parseInt(inlineZ, 10);
+      if (Number.isFinite(parsed)) {
+        z = parsed;
+      }
+    }
+    const parent = shell.parentElement;
+    if (parent) {
+      index = Array.prototype.indexOf.call(parent.children, shell);
+    }
+  } else if (state.selectedId === nodeId || state.selectedNodeIds.has(nodeId)) {
+    z = 4;
+  }
+  return z * 100000 + index;
+}
+
+function nodeIdFromWorldPoint(state, worldX, worldY) {
+  let bestId = null;
+  let bestRank = -Infinity;
+  for (const [nodeId, node] of state.nodePayloadsById) {
+    const position = state.positions[nodeId] || node?.position;
+    if (!position) {
+      continue;
+    }
+    const width = Number(node.size?.w) || 0;
+    const height = Number(node.size?.h) || 0;
+    if (width <= 0 || height <= 0) {
+      continue;
+    }
+    if (
+      worldX < position.x
+      || worldX > position.x + width
+      || worldY < position.y
+      || worldY > position.y + height
+    ) {
+      continue;
+    }
+    const rank = nodePaintRank(state, nodeId);
+    if (rank >= bestRank) {
+      bestRank = rank;
+      bestId = nodeId;
+    }
+  }
+  return bestId;
+}
+
+function hitElementsFromPoint(state, clientX, clientY) {
+  const roots = [];
+  const rootNode = typeof state.root?.getRootNode === "function"
+    ? state.root.getRootNode()
+    : null;
+  if (rootNode && typeof rootNode.elementsFromPoint === "function") {
+    roots.push(rootNode);
+  }
+  if (state.ownerDocument && !roots.includes(state.ownerDocument)) {
+    roots.push(state.ownerDocument);
+  }
+  const seen = new Set();
+  const stack = [];
+  for (const root of roots) {
+    let hits = [];
+    if (typeof root.elementsFromPoint === "function") {
+      hits = root.elementsFromPoint(clientX, clientY) || [];
+    } else if (typeof root.elementFromPoint === "function") {
+      const one = root.elementFromPoint(clientX, clientY);
+      hits = one ? [one] : [];
+    }
+    for (const hit of hits) {
+      if (!hit || seen.has(hit)) {
+        continue;
+      }
+      seen.add(hit);
+      stack.push(hit);
+    }
+  }
+  return stack;
+}
+
+function nodeIdFromDomPoint(state, clientX, clientY) {
+  for (const hit of hitElementsFromPoint(state, clientX, clientY)) {
+    if (typeof hit.closest !== "function") {
+      continue;
+    }
+    const card = hit.closest(".flow-node-card");
+    if (card?.dataset?.nodeId) {
+      return card.dataset.nodeId;
+    }
+    const handle = hit.closest(".flow-node-handle");
+    if (handle?.dataset?.nodeId) {
+      return handle.dataset.nodeId;
+    }
+    const shell = hit.closest(".flow-node-shell");
+    if (!shell) {
+      continue;
+    }
+    const shellCard = shell.querySelector(".flow-node-card");
+    if (shellCard?.dataset?.nodeId) {
+      return shellCard.dataset.nodeId;
+    }
+  }
+  return null;
+}
+
+function nodeIdFromClientPoint(state, clientX, clientY) {
+  // Prefer DOM (paint / z-index order) when a card is under the cursor.
+  // Fall back to world geometry when capture / edge hits make DOM miss.
+  const domId = nodeIdFromDomPoint(state, clientX, clientY);
+  if (domId) {
+    return domId;
+  }
+  const world = clientPointToWorld(state, clientX, clientY);
+  return nodeIdFromWorldPoint(state, world.x, world.y);
+}
+
+function syncConnectPreview(state) {
+  const preview = state.dom?.connectPreview;
+  if (!preview) {
+    return;
+  }
+  if (!state.connectMode?.start || !state.connectMode?.cursor) {
+    preview.setAttribute("hidden", "");
+    preview.removeAttribute("d");
+    return;
+  }
+  const start = state.connectMode.start;
+  const cursor = state.connectMode.cursor;
+  preview.removeAttribute("hidden");
+  preview.setAttribute(
+    "d",
+    `M ${start.x} ${start.y} L ${cursor.x} ${cursor.y}`,
+  );
+}
+
+function startConnectDrag(event, state, sourceId, side, handle) {
+  if (event.button !== 0 || state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  clearSelection(state.ownerDocument);
+
+  const start = handleAnchorWorldPoint(state, sourceId, side);
+  if (!start) {
+    return;
+  }
+  const cursor = clientPointToWorld(state, event.clientX, event.clientY);
+  state.connectMode = {
+    sourceId,
+    side,
+    pointerId: event.pointerId,
+    start,
+    cursor,
+    targetId: null,
+  };
+  syncConnectModeChrome(state);
+  queueRender(state);
+
+  const ownerDocument = state.ownerDocument;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+    ownerDocument.body.style.cursor = "crosshair";
+  }
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch (_error) {
+    // Some environments may reject capture; document listeners still work.
+  }
+
+  const move = (moveEvent) => {
+    if (!state.connectMode || state.connectMode.pointerId !== moveEvent.pointerId) {
+      return;
+    }
+    moveEvent.preventDefault();
+    const nextCursor = clientPointToWorld(state, moveEvent.clientX, moveEvent.clientY);
+    const hoverId = nodeIdFromClientPoint(state, moveEvent.clientX, moveEvent.clientY);
+    const targetId = hoverId && hoverId !== sourceId && state.nodePayloadsById.has(hoverId)
+      ? hoverId
+      : null;
+    state.connectMode.cursor = nextCursor;
+    if (state.connectMode.targetId !== targetId) {
+      state.connectMode.targetId = targetId;
+      syncConnectModeChrome(state);
+    } else {
+      syncConnectPreview(state);
+      updateConnectHint(state);
+    }
+  };
+
+  const stop = (stopEvent) => {
+    if (state.connectMode && state.connectMode.pointerId !== stopEvent.pointerId) {
+      return;
+    }
+    ownerDocument.removeEventListener("pointermove", move);
+    ownerDocument.removeEventListener("pointerup", stop);
+    ownerDocument.removeEventListener("pointercancel", stop);
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+      ownerDocument.body.style.cursor = previousCursor;
+    }
+    try {
+      if (handle.hasPointerCapture?.(stopEvent.pointerId)) {
+        handle.releasePointerCapture(stopEvent.pointerId);
+      }
+    } catch (_error) {
+      // ignore
+    }
+    if (!state.connectMode) {
+      return;
+    }
+    const dropId = nodeIdFromClientPoint(state, stopEvent.clientX, stopEvent.clientY);
+    state.suppressNextNodeClick = true;
+    if (dropId && dropId !== sourceId && state.nodePayloadsById.has(dropId)) {
+      completeConnectMode(state, dropId);
+      return;
+    }
+    cancelConnectMode(state);
+  };
+
+  ownerDocument.addEventListener("pointermove", move);
+  ownerDocument.addEventListener("pointerup", stop);
+  ownerDocument.addEventListener("pointercancel", stop);
+}
+
 function beginConnectMode(state, sourceId, side) {
   if (state.payload.edge_edit_enabled !== true) {
     return;
   }
-  state.connectMode = { sourceId, side };
+  const start = handleAnchorWorldPoint(state, sourceId, side) || { x: 0, y: 0 };
+  state.connectMode = {
+    sourceId,
+    side,
+    pointerId: null,
+    start,
+    cursor: { ...start },
+    targetId: null,
+  };
   syncConnectModeChrome(state);
   queueRender(state);
 }
@@ -1601,6 +2029,7 @@ function beginConnectMode(state, sourceId, side) {
 function cancelConnectMode(state) {
   if (!state.connectMode) {
     updateConnectHint(state);
+    syncConnectPreview(state);
     return;
   }
   state.connectMode = null;
@@ -1717,14 +2146,23 @@ function fitView(state) {
     120,
     rect.height - FIT_VIEW_PADDING_TOP - FIT_VIEW_PADDING_BOTTOM,
   );
+  // Match zoomAt max (1.75) so large monitors can fill the workspace.
   const scale = clamp(
-    Math.min(availableWidth / bounds.width, availableHeight / bounds.height, 1.2),
+    Math.min(availableWidth / bounds.width, availableHeight / bounds.height),
     0.42,
-    1.2,
+    1.75,
   );
   state.view.scale = scale;
-  state.view.x = round((rect.width - bounds.width * scale) / 2 - bounds.left * scale);
-  state.view.y = round(FIT_VIEW_PADDING_TOP - bounds.top * scale);
+  state.view.x = round(
+    FIT_VIEW_PADDING_X
+      + (availableWidth - bounds.width * scale) / 2
+      - bounds.left * scale,
+  );
+  state.view.y = round(
+    FIT_VIEW_PADDING_TOP
+      + (availableHeight - bounds.height * scale) / 2
+      - bounds.top * scale,
+  );
 }
 
 function toggleFullscreen(state) {
@@ -2038,6 +2476,27 @@ function samePositionMaps(first, second) {
     }
   }
   return true;
+}
+
+function edgeGeometrySignature(edges) {
+  if (!Array.isArray(edges) || edges.length === 0) {
+    return "";
+  }
+  const parts = [];
+  for (const edge of edges) {
+    parts.push(String(edge?.id || ""));
+    const points = edge?.points;
+    if (Array.isArray(points)) {
+      for (const point of points) {
+        parts.push(point?.x, point?.y);
+      }
+    }
+    const label = edge?.label;
+    if (label?.position) {
+      parts.push(label.position.x, label.position.y, label.width, label.height);
+    }
+  }
+  return parts.join("\0");
 }
 
 function createElement(tagName, className, parent) {

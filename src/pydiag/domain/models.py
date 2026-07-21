@@ -269,6 +269,12 @@ class Well(StrictModel):
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
     is_archived: bool = False
 
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def coerce_null_metadata(cls, value: object) -> object:
+        # Legacy YAML dumps wrote empty metadata as a bare "metadata:" (null).
+        return {} if value is None else value
+
 
 class WellsDocument(StrictModel):
     schema_version: Literal["1.0"] = "1.0"

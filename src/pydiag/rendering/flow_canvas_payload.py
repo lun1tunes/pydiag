@@ -15,7 +15,7 @@ from .flow_edge_rendering import (
     edge_style,
 )
 from .flow_layout_positions import node_ports
-from .flow_node_filters import KIND_LABELS, node_matches_filters
+from .flow_node_filters import KIND_LABELS, node_matches_filters, node_search_haystack
 from .flow_node_overlays import (
     MAX_VISIBLE_WELL_TOKENS,
     duration_badge_style,
@@ -65,13 +65,13 @@ def build_flow_canvas_payload(
         snapshot = build_flow_render_snapshot(graph, wells_doc, layout_mode)
         if snapshot_cache is not None:
             snapshot_cache[cache_key] = snapshot
-    # Responsible filter is applied in the canvas JS so legend toggles stay
-    # instant and do not rebuild the scene. Search/kind still dim server-side.
+    # Search / kind / responsible filters are applied in the canvas JS so
+    # sidebar typing and legend toggles do not rebuild the scene.
     nodes, active_node_ids = build_flow_canvas_nodes_from_snapshot(
         snapshot,
-        search=search,
+        search="",
         responsible_filter=[],
-        kind_filter=kind_filter,
+        kind_filter=[],
         selected_id=selected_id,
         domain_nodes_draggable=domain_nodes_draggable,
     )
@@ -88,11 +88,13 @@ def build_flow_canvas_payload(
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
         "edge_edit_enabled": bool(edge_edit_enabled),
+        "search": search,
+        "kind_filter": list(kind_filter or []),
         "layout_mode": snapshot.layout_mode,
         "revision": revision if revision is not None else snapshot.graph.version,
         "canvas": {
             "width": max(1200, int(bounds["right"] - bounds["left"] + 160)),
-            "height": max(canvas_height_for_snapshot(snapshot), 828),
+            "height": max(canvas_height_for_snapshot(snapshot), 575),
         },
         "bounds": bounds,
         "responsible_legend": build_responsible_legend(snapshot.graph),
@@ -168,6 +170,7 @@ def build_flow_canvas_node(
         "kind": node.kind,
         "kind_label": KIND_LABELS[node.kind],
         "text": node.text,
+        "search_text": node_search_haystack(graph, node, wells_here),
         "selected": node.id == selected_id,
         "active": active,
         "draggable": domain_nodes_draggable,

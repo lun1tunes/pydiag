@@ -16,6 +16,7 @@ KIND_LABELS = {
 __all__ = [
     "KIND_LABELS",
     "node_matches_filters",
+    "node_search_haystack",
     "wells_grouped_by_node",
 ]
 
@@ -49,8 +50,15 @@ def node_matches_filters(
     if not query:
         return True
 
-    haystack = " ".join(_node_search_terms(graph, node, wells_here)).lower()
-    return query in haystack
+    return query in node_search_haystack(graph, node, wells_here)
+
+
+def node_search_haystack(
+    graph: FlowGraphDocument,
+    node: FlowNode,
+    wells_here: list[Well],
+) -> str:
+    return " ".join(_node_search_terms(graph, node, wells_here)).lower()
 
 
 def _node_search_terms(

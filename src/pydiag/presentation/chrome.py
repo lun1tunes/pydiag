@@ -36,6 +36,8 @@ APP_CSS = """
 <style>
 :root {
     /* Compact density profile. Tweak these tokens to relax or tighten the whole UI. */
+    /* Workspace fills the viewport so 22" and 27" 2K share one composition. */
+    --pydiag-workspace-height: max(575px, calc(100dvh - 5rem));
     --app-page-pad-top: 0.32rem;
     --app-page-pad-x: 1.2rem;
     --app-page-pad-bottom: 0.5rem;
@@ -249,6 +251,20 @@ div[data-testid="stExpander"] {
 [data-testid="stForm"] [data-testid="stElementContainer"] {
     margin-top: 0 !important;
     margin-bottom: 0 !important;
+}
+/*
+ * Inspector scroll panel: Streamlit needs a fixed px height at render time,
+ * but we override it to the same viewport token as the canvas so both columns
+ * stay aligned across monitor sizes.
+ */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+    height: var(--pydiag-workspace-height) !important;
+    max-height: var(--pydiag-workspace-height) !important;
+}
+@media (max-width: 840px) {
+    :root {
+        --pydiag-workspace-height: max(420px, calc(100dvh - 4.4rem));
+    }
 }
 /*
  * Height-limited inspector panels use a flex column. Streamlit element

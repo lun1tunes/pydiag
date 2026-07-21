@@ -12,8 +12,10 @@ from .flow_render_math import ceil_to_step
 # Tuned for ~14px bold UI font (Cyrillic) so fitted boxes hug readable labels.
 TEXT_LINE_HEIGHT = 19
 TEXT_CHAR_WIDTH = 8.2
+MANUAL_LAYOUT_SIZE_META = "manual_layout_size"
 
 __all__ = [
+    "MANUAL_LAYOUT_SIZE_META",
     "NodeRenderSpec",
     "build_node_render_specs",
 ]
@@ -51,8 +53,17 @@ def node_render_spec(
 
 
 def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
-    if node.metadata.get("figma_fixed_size") is True:
-        return max(20, int(node.size.w)), max(20, int(node.size.h))
+    if (
+        node.metadata.get("figma_fixed_size") is True
+        or node.metadata.get(MANUAL_LAYOUT_SIZE_META) is True
+    ):
+        # Explicit admin / Figma size: YAML layout is authoritative.
+        return (
+            max(minimum_node_width(node), min(int(node.size.w), 1200)),
+            max(minimum_node_height(node), min(int(node.size.h), 800)),
+        )
+
+    # Default: content-hug so imported Figma YAML boxes do not stay oversized.
     width = preferred_node_width(node, lines)
     char_width = text_char_width(node)
     wrapped_lines = sum(
@@ -69,7 +80,6 @@ def fit_node_size(node: FlowNode, lines: list[str]) -> tuple[int, int]:
         + wrapped_lines * TEXT_LINE_HEIGHT
         + markdown_vertical_buffer(node)
     )
-    # Content-hug: YAML layout size is positional metadata, not a visual floor.
     return width, max(minimum_node_height(node), height)
 
 
@@ -85,8 +95,6 @@ def preferred_node_width(node: FlowNode, lines: list[str]) -> int:
 
 
 def text_char_width(node: FlowNode) -> float:
-    # Bold Cyrillic in diamonds needs a slightly wider estimate so labels
-    # do not press against the slanted edges.
     if node.kind == "decision_diamond":
         return 9.0
     return TEXT_CHAR_WIDTH

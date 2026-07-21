@@ -210,6 +210,28 @@ def test_streamlit_admin_can_create_well_in_temp_wells_file(
     assert created.metadata == {"field": "Тестовый куст", "rig": "БУ-ТЕСТ"}
 
 
+def test_streamlit_admin_can_create_well_with_empty_optional_metadata(
+    data_paths,
+    monkeypatch,
+) -> None:
+    _, wells_path = data_paths
+    app = run_app_with_temp_data(data_paths, monkeypatch)
+    login_as_admin(app)
+
+    set_text_input(app, "ID", "well_ui_bare")
+    set_text_input(app, "Название", "Скв. Bare")
+    click_button(app, "Создать")
+
+    assert not app.exception
+    assert not [item.value for item in app.error]
+    saved = load_wells_doc(wells_path)
+    created = well_by_id(saved)["well_ui_bare"]
+    assert created.name == "Скв. Bare"
+    assert created.metadata == {}
+    # Empty metadata must round-trip through YAML as {}, not null.
+    assert "metadata: {}" in wells_path.read_text(encoding="utf-8")
+
+
 def test_streamlit_admin_handles_no_active_wells(data_paths, monkeypatch) -> None:
     _, wells_path = data_paths
     payload = load_structured_payload(wells_path.read_bytes())
@@ -256,13 +278,15 @@ def test_streamlit_app_switches_graph_versions_from_source_selector(
     assert any("Архивная версия карточки" in item.value for item in app.markdown)
 
 
-def test_streamlit_admin_marks_archived_source_read_only(
+def test_streamlit_admin_can_edit_older_archived_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
-    version_path = source_path.parent / "flow_source.v0001.yaml"
-    version_path.write_bytes(source_path.read_bytes())
+    older = source_path.parent / "flow_source.v0001.yaml"
+    newer = source_path.parent / "flow_source.v0002.yaml"
+    older.write_bytes(source_path.read_bytes())
+    newer.write_bytes(source_path.read_bytes())
 
     app = run_app_with_temp_data(
         (graph_path, wells_path),
@@ -272,17 +296,70 @@ def test_streamlit_admin_marks_archived_source_read_only(
     login_as_admin(app)
 
     set_selectbox(app, "Версия схемы", "flow_source.v0001.yaml")
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    assert not app.exception
 
     texts = [
         getattr(item, "value", "")
         for item in [*app.caption, *app.markdown, *app.info, *app.warning]
         if getattr(item, "value", None)
     ]
-    assert any("Правки доступны только в текущей схеме" in text for text in texts)
-    assert any("только для просмотра" in text.lower() for text in texts)
-    tab_labels = {tab.label for tab in app.tabs}
-    assert "Управление" in tab_labels
-    assert "Новая" in tab_labels
+    assert not any("только для просмотра" in text.lower() for text in texts)
+    assert not any(
+        "Правки доступны в «Текущая» или в новейшей версии" in text
+        or "Правки доступны только в текущей схеме" in text
+        for text in texts
+    )
+
+    set_text_input(app, "Заголовок", "Older archive editable")
+    click_button(app, "Сохранить")
+
+    saved = load_structured_payload(older.read_bytes())
+    assert saved["nodes"]["proc_initial_review"]["title"] == "Older archive editable"
+    # Newer archive and live must stay untouched.
+    newer_saved = load_structured_payload(newer.read_bytes())
+    assert newer_saved["nodes"]["proc_initial_review"]["title"] != "Older archive editable"
+    live_saved = load_structured_payload(source_path.read_bytes())
+    assert live_saved["nodes"]["proc_initial_review"]["title"] != "Older archive editable"
+
+
+def test_streamlit_admin_can_edit_newest_archive_even_when_live_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    graph_path, wells_path, source_path = prepare_temp_workspace(tmp_path)
+    (source_path.parent / "flow_source.v0001.yaml").write_bytes(source_path.read_bytes())
+    newest = source_path.parent / "flow_source.v0002.yaml"
+    newest.write_bytes(source_path.read_bytes())
+
+    app = run_app_with_temp_data(
+        (graph_path, wells_path),
+        monkeypatch,
+        source_path=source_path,
+    )
+    login_as_admin(app)
+
+    set_selectbox(app, "Версия схемы", "flow_source.v0002.yaml")
+    app.session_state["selected_id"] = "proc_initial_review"
+    app.run(timeout=30)
+    assert not app.exception
+
+    texts = [
+        getattr(item, "value", "")
+        for item in [*app.caption, *app.markdown]
+        if getattr(item, "value", None)
+    ]
+    assert not any("только для просмотра" in text.lower() for text in texts)
+
+    set_text_input(app, "Заголовок", "Newest archive editable")
+    click_button(app, "Сохранить")
+
+    saved = load_structured_payload(newest.read_bytes())
+    assert saved["nodes"]["proc_initial_review"]["title"] == "Newest archive editable"
+    # Live file must stay untouched.
+    live = load_structured_payload(source_path.read_bytes())
+    assert live["nodes"]["proc_initial_review"]["title"] != "Newest archive editable"
 
 
 def test_streamlit_admin_can_save_source_layout_to_flow_source(
@@ -446,16 +523,13 @@ def test_streamlit_admin_can_edit_selected_flow_source_edge(
     app.run(timeout=30)
     login_as_admin(app)
 
-    set_selectbox(app, "Куда", "card_data_rework")
     set_selectbox(app, "Тип связи", "dashed")
-    set_text_input(app, "Метка связи", "UI reroute")
     click_button(app, "Сохранить связь")
 
     saved = load_structured_payload(source_path.read_bytes())
     transition = saved["nodes"]["proc_initial_review"]["transitions"][0]
-    assert transition["to"] == "card_data_rework"
+    assert transition["to"] == "dec_data_complete"
     assert transition["kind"] == "dashed"
-    assert transition["label"] == "UI reroute"
 
 
 def test_streamlit_admin_can_delete_selected_flow_source_edge(

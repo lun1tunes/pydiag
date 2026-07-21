@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pydiag.rendering.flow_node_filters import wells_grouped_by_node
-from pydiag.rendering.flow_node_render_specs import build_node_render_specs, node_render_spec
+from pydiag.rendering.flow_node_render_specs import (
+    MANUAL_LAYOUT_SIZE_META,
+    build_node_render_specs,
+    node_render_spec,
+)
 
 
 def test_build_node_render_specs_keeps_content_and_minimum_process_size(documents) -> None:
@@ -16,29 +20,7 @@ def test_build_node_render_specs_keeps_content_and_minimum_process_size(document
     assert spec.height >= 56
 
 
-def test_node_render_spec_grows_for_longer_text(documents) -> None:
-    graph, _ = documents
-    payload = graph.model_dump(mode="json")
-    node_index = next(
-        index for index, node in enumerate(payload["nodes"]) if node["id"] == "proc_initial_review"
-    )
-    payload["nodes"][node_index]["metadata"] = {}
-    payload["nodes"][node_index]["size"] = {"w": 80, "h": 40}
-
-    payload["nodes"][node_index]["text"] = "Короткий текст"
-    short_graph = type(graph).model_validate(payload, strict=True)
-    short_spec = node_render_spec(short_graph.nodes[node_index], short_graph, [])
-
-    payload["nodes"][node_index]["text"] = (
-        "Очень длинный текст для оценки переноса строк и увеличения высоты карточки " * 14
-    )
-    long_graph = type(graph).model_validate(payload, strict=True)
-    long_spec = node_render_spec(long_graph.nodes[node_index], long_graph, [])
-
-    assert long_spec.height > short_spec.height
-
-
-def test_node_render_spec_hugs_text_instead_of_yaml_floor(documents) -> None:
+def test_node_render_spec_hugs_text_by_default(documents) -> None:
     graph, _ = documents
     payload = graph.model_dump(mode="json")
     node_index = next(
@@ -53,6 +35,69 @@ def test_node_render_spec_hugs_text_instead_of_yaml_floor(documents) -> None:
 
     assert spec.width < 460
     assert spec.height < 300
+
+
+def test_node_render_spec_grows_for_longer_text_when_unlocked(documents) -> None:
+    graph, _ = documents
+    payload = graph.model_dump(mode="json")
+    node_index = next(
+        index for index, node in enumerate(payload["nodes"]) if node["id"] == "proc_initial_review"
+    )
+    payload["nodes"][node_index]["metadata"] = {}
+    payload["nodes"][node_index]["size"] = {"w": 280, "h": 100}
+
+    payload["nodes"][node_index]["text"] = "Короткий текст"
+    short_graph = type(graph).model_validate(payload, strict=True)
+    short_spec = node_render_spec(short_graph.nodes[node_index], short_graph, [])
+
+    payload["nodes"][node_index]["text"] = (
+        "Очень длинный текст для оценки переноса строк и увеличения высоты карточки " * 14
+    )
+    long_graph = type(graph).model_validate(payload, strict=True)
+    long_spec = node_render_spec(long_graph.nodes[node_index], long_graph, [])
+
+    assert long_spec.height > short_spec.height
+
+
+def test_manual_layout_size_uses_yaml_dimensions(documents) -> None:
+    graph, _ = documents
+    payload = graph.model_dump(mode="json")
+    node_index = next(
+        index for index, node in enumerate(payload["nodes"]) if node["id"] == "proc_initial_review"
+    )
+    payload["nodes"][node_index]["metadata"] = {MANUAL_LAYOUT_SIZE_META: True}
+    payload["nodes"][node_index]["text"] = "Короткий текст"
+    payload["nodes"][node_index]["size"] = {"w": 460, "h": 300}
+    sized = type(graph).model_validate(payload, strict=True)
+
+    spec = node_render_spec(sized.nodes[node_index], sized, [])
+
+    assert spec.width == 460
+    assert spec.height == 300
+
+
+def test_manual_layout_size_works_for_all_domain_kinds(documents) -> None:
+    graph, _ = documents
+    kinds = {
+        "process": "proc_initial_review",
+        "decision_diamond": "dec_operational_issue",
+        "database": "db_offset_wells",
+        "input_data": "input_geo_license",
+        "event": "event_handover_done",
+    }
+    for kind, node_id in kinds.items():
+        payload = graph.model_dump(mode="json")
+        node_index = next(
+            index for index, node in enumerate(payload["nodes"]) if node["id"] == node_id
+        )
+        assert payload["nodes"][node_index]["type"] == kind
+        payload["nodes"][node_index]["metadata"] = {MANUAL_LAYOUT_SIZE_META: True}
+        payload["nodes"][node_index]["text"] = "Короткий"
+        payload["nodes"][node_index]["size"] = {"w": 340, "h": 180}
+        sized = type(graph).model_validate(payload, strict=True)
+        spec = node_render_spec(sized.nodes[node_index], sized, [])
+        assert spec.width == 340, kind
+        assert spec.height == 180, kind
 
 
 def test_figma_fixed_size_preserves_imported_dimensions(documents) -> None:
