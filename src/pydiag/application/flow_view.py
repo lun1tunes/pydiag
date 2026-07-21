@@ -19,6 +19,7 @@ from .flow_view_selection import (
 from .flow_view_state import flow_state_timestamp
 
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
+FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY = "_flow_canvas_pending_edge_request_id"
 FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
 FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
@@ -30,6 +31,7 @@ RESPONSIBLE_FILTER_LAST_KEY = "_responsible_filter_last"
 
 __all__ = [
     "FLOW_CANVAS_COMPONENT_KEY",
+    "FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY",
     "FLOW_CANVAS_SESSION_EPOCH_KEY",
     "FLOW_RENDER_SNAPSHOT_CACHE_KEY",
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
@@ -129,17 +131,39 @@ def consume_pending_canvas_edge(
     Must run before the canvas widget with ``component_key`` is instantiated in
     the same script/fragment run. Streamlit rejects writes to
     ``session_state[component_key]`` after that widget exists.
+
+    Streamlit bidi may re-surface the same ``pending_edge`` after rerun because
+    the frontend state is not cleared. Deduplicate by ``request_id`` when present.
     """
     component_state = component_state_from_session(session_state, component_key)
     pending = component_pending_edge_from_state(graph, component_state)
     if pending is None:
         return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY) == request_id:
+            _clear_pending_edge_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY] = request_id
+
+    _clear_pending_edge_component_state(session_state, component_key)
+    return {
+        "source": pending["source"],
+        "target": pending["target"],
+        "kind": pending["kind"],
+    }
+
+
+def _clear_pending_edge_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
     current = session_state.get(component_key)
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_edge"] = None
         session_state[component_key] = updated
-    return pending
 
 
 def resolve_responsible_filter(

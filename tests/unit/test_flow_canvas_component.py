@@ -155,19 +155,32 @@ def test_flow_canvas_supports_drag_to_connect_handles() -> None:
     assert "edge_edit_enabled" in js
     assert "buildConnectionHandles(state, elements.shell, node)" in js
     assert 'setStateValue("pending_edge"' in js
+    assert "request_id: requestId" in js
+    assert "connectMode.submitted" in js
+    assert "Drag-to-connect is finalized only by pointerup" in js
     assert "startConnectDrag(event, state, node.id, side, handle)" in js
     assert "completeConnectMode(state, dropId)" in js
     assert "function syncConnectPreview(state)" in js
     assert "function nodeIdFromWorldPoint(state, worldX, worldY)" in js
-    assert "nodeIdFromDomPoint(state, clientX, clientY)" in js
-    assert "nodeIdFromWorldPoint(state, world.x, world.y)" in js
+    assert "nodeIdFromDomPoint(state, clientX, clientY" in js
+    assert "geometryFirst: true" in js
+    assert "ignoreNodeId: sourceId" in js
+    assert "Do NOT setPointerCapture on the handle" in js
     assert "function nodePaintRank(state, nodeId)" in js
+    assert "ownerDocument.addEventListener(\"pointermove\", move, true);" in js
+    assert "let stopped = false;" in js
     assert "flow-connect-preview" in js
     assert ".flow-node-handle" in css
     assert ".flow-connect-preview" in css
     assert ".flow-canvas-connect-hint" in css
     assert ".flow-canvas-root.is-connecting .flow-canvas-edges" in css
     assert "Потяните точку на карточке" in js
+    # Connect drag must not capture the handle (that stuck hit-tests to source).
+    connect_start = js.index("function startConnectDrag(event, state, sourceId, side, handle)")
+    connect_fn = js[connect_start : connect_start + 3500]
+    assert "handle.setPointerCapture" not in connect_fn
+    assert "geometryFirst: true" in connect_fn
+    assert "stopped = true" in connect_fn
 
 
 def test_flow_canvas_refreshes_edge_geometry_without_revision_bump() -> None:

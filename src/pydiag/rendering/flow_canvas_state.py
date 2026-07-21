@@ -47,7 +47,7 @@ def component_pending_edge_from_state(
     graph: FlowGraphDocument,
     component_state: Mapping[str, Any] | None,
 ) -> dict[str, str] | None:
-    """Return a validated {source, target, kind} pending edge from canvas state."""
+    """Return a validated {source, target, kind[, request_id]} pending edge."""
     if component_state is None:
         return None
     raw = component_state.get("pending_edge")
@@ -65,7 +65,11 @@ def component_pending_edge_from_state(
         return None
     if kind not in {"default", "yes", "no", "dashed"}:
         kind = "default"
-    return {"source": source, "target": target, "kind": kind}
+    result = {"source": source, "target": target, "kind": kind}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        result["request_id"] = request_id.strip()
+    return result
 
 
 def component_selected_id_from_state(

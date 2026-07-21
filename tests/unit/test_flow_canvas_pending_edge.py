@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydiag.application.flow_view import consume_pending_canvas_edge
+from pydiag.application.flow_view import (
+    FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY,
+    consume_pending_canvas_edge,
+)
 from pydiag.rendering.flow_canvas_payload import build_flow_canvas_payload
 from pydiag.rendering.flow_canvas_state import component_pending_edge_from_state
 
@@ -24,12 +27,14 @@ def test_component_pending_edge_from_state_validates_nodes(documents) -> None:
                 "source": "proc_initial_review",
                 "target": "card_mitigation",
                 "kind": "dashed",
+                "request_id": "pe-abc",
             }
         },
     ) == {
         "source": "proc_initial_review",
         "target": "card_mitigation",
         "kind": "dashed",
+        "request_id": "pe-abc",
     }
     assert (
         component_pending_edge_from_state(
@@ -61,6 +66,7 @@ def test_consume_pending_canvas_edge_clears_component_state(documents) -> None:
                 "source": "proc_initial_review",
                 "target": "card_mitigation",
                 "kind": "default",
+                "request_id": "pe-1",
             },
         }
     }
@@ -72,4 +78,36 @@ def test_consume_pending_canvas_edge_clears_component_state(documents) -> None:
         "target": "card_mitigation",
         "kind": "default",
     }
+    assert session_state["well_drilling_flow_canvas"]["pending_edge"] is None
+    assert session_state[FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY] == "pe-1"
+
+
+def test_consume_pending_canvas_edge_dedupes_same_request_id(documents) -> None:
+    graph, _ = documents
+    session_state = {
+        "well_drilling_flow_canvas": {
+            "pending_edge": {
+                "source": "proc_initial_review",
+                "target": "card_mitigation",
+                "kind": "default",
+                "request_id": "pe-dup",
+            }
+        }
+    }
+
+    first = consume_pending_canvas_edge(session_state, graph=graph)
+    assert first is not None
+
+    # Streamlit may re-surface the same frontend pending_edge after rerun.
+    session_state["well_drilling_flow_canvas"] = {
+        "pending_edge": {
+            "source": "proc_initial_review",
+            "target": "card_mitigation",
+            "kind": "default",
+            "request_id": "pe-dup",
+        }
+    }
+    second = consume_pending_canvas_edge(session_state, graph=graph)
+
+    assert second is None
     assert session_state["well_drilling_flow_canvas"]["pending_edge"] is None

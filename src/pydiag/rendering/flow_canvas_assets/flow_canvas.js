@@ -962,6 +962,11 @@ function buildNodeElement(state, node) {
       return;
     }
     if (state.connectMode) {
+      // Drag-to-connect is finalized only by pointerup. Ignoring click here
+      // prevents a second pending_edge from the same gesture.
+      if (state.connectMode.pointerId != null) {
+        return;
+      }
       completeConnectMode(state, node.id);
       return;
     }
@@ -1801,6 +1806,8 @@ function nodePaintRank(state, nodeId) {
 }
 
 function nodeIdFromWorldPoint(state, worldX, worldY) {
+  // Slight pad so dropping near a card edge still counts while zoomed out.
+  const pad = 6;
   let bestId = null;
   let bestRank = -Infinity;
   for (const [nodeId, node] of state.nodePayloadsById) {
@@ -1814,10 +1821,10 @@ function nodeIdFromWorldPoint(state, worldX, worldY) {
       continue;
     }
     if (
-      worldX < position.x
-      || worldX > position.x + width
-      || worldY < position.y
-      || worldY > position.y + height
+      worldX < position.x - pad
+      || worldX > position.x + width + pad
+      || worldY < position.y - pad
+      || worldY > position.y + height + pad
     ) {
       continue;
     }
@@ -1862,17 +1869,17 @@ function hitElementsFromPoint(state, clientX, clientY) {
   return stack;
 }
 
-function nodeIdFromDomPoint(state, clientX, clientY) {
+function nodeIdFromDomPoint(state, clientX, clientY, ignoreNodeId = null) {
   for (const hit of hitElementsFromPoint(state, clientX, clientY)) {
     if (typeof hit.closest !== "function") {
       continue;
     }
     const card = hit.closest(".flow-node-card");
-    if (card?.dataset?.nodeId) {
+    if (card?.dataset?.nodeId && card.dataset.nodeId !== ignoreNodeId) {
       return card.dataset.nodeId;
     }
     const handle = hit.closest(".flow-node-handle");
-    if (handle?.dataset?.nodeId) {
+    if (handle?.dataset?.nodeId && handle.dataset.nodeId !== ignoreNodeId) {
       return handle.dataset.nodeId;
     }
     const shell = hit.closest(".flow-node-shell");
@@ -1880,22 +1887,37 @@ function nodeIdFromDomPoint(state, clientX, clientY) {
       continue;
     }
     const shellCard = shell.querySelector(".flow-node-card");
-    if (shellCard?.dataset?.nodeId) {
+    if (shellCard?.dataset?.nodeId && shellCard.dataset.nodeId !== ignoreNodeId) {
       return shellCard.dataset.nodeId;
     }
   }
   return null;
 }
 
-function nodeIdFromClientPoint(state, clientX, clientY) {
-  // Prefer DOM (paint / z-index order) when a card is under the cursor.
-  // Fall back to world geometry when capture / edge hits make DOM miss.
-  const domId = nodeIdFromDomPoint(state, clientX, clientY);
-  if (domId) {
+function nodeIdFromClientPoint(state, clientX, clientY, options = {}) {
+  const ignoreNodeId = options.ignoreNodeId || null;
+  // Geometry is authoritative during connect-drag: pointer-capture on the
+  // source handle makes elementsFromPoint stick to the source card.
+  const world = clientPointToWorld(state, clientX, clientY);
+  const geomId = nodeIdFromWorldPoint(state, world.x, world.y);
+  if (options.geometryFirst) {
+    if (geomId && geomId !== ignoreNodeId) {
+      return geomId;
+    }
+    const domId = nodeIdFromDomPoint(state, clientX, clientY, ignoreNodeId);
+    if (domId && domId !== ignoreNodeId) {
+      return domId;
+    }
+    return null;
+  }
+  const domId = nodeIdFromDomPoint(state, clientX, clientY, ignoreNodeId);
+  if (domId && domId !== ignoreNodeId) {
     return domId;
   }
-  const world = clientPointToWorld(state, clientX, clientY);
-  return nodeIdFromWorldPoint(state, world.x, world.y);
+  if (geomId && geomId !== ignoreNodeId) {
+    return geomId;
+  }
+  return null;
 }
 
 function syncConnectPreview(state) {
@@ -1948,22 +1970,26 @@ function startConnectDrag(event, state, sourceId, side, handle) {
     ownerDocument.body.style.userSelect = "none";
     ownerDocument.body.style.cursor = "crosshair";
   }
-  try {
-    handle.setPointerCapture(event.pointerId);
-  } catch (_error) {
-    // Some environments may reject capture; document listeners still work.
-  }
+  // Do NOT setPointerCapture on the handle: with capture, hit-testing sticks
+  // to the source card and hover/drop never resolve other cards. Document
+  // listeners below track the drag instead.
+
+  const hitOptions = { geometryFirst: true, ignoreNodeId: sourceId };
+  let stopped = false;
 
   const move = (moveEvent) => {
-    if (!state.connectMode || state.connectMode.pointerId !== moveEvent.pointerId) {
+    if (stopped || !state.connectMode || state.connectMode.pointerId !== moveEvent.pointerId) {
       return;
     }
     moveEvent.preventDefault();
     const nextCursor = clientPointToWorld(state, moveEvent.clientX, moveEvent.clientY);
-    const hoverId = nodeIdFromClientPoint(state, moveEvent.clientX, moveEvent.clientY);
-    const targetId = hoverId && hoverId !== sourceId && state.nodePayloadsById.has(hoverId)
-      ? hoverId
-      : null;
+    const hoverId = nodeIdFromClientPoint(
+      state,
+      moveEvent.clientX,
+      moveEvent.clientY,
+      hitOptions,
+    );
+    const targetId = hoverId && state.nodePayloadsById.has(hoverId) ? hoverId : null;
     state.connectMode.cursor = nextCursor;
     if (state.connectMode.targetId !== targetId) {
       state.connectMode.targetId = targetId;
@@ -1975,38 +2001,42 @@ function startConnectDrag(event, state, sourceId, side, handle) {
   };
 
   const stop = (stopEvent) => {
+    if (stopped) {
+      return;
+    }
     if (state.connectMode && state.connectMode.pointerId !== stopEvent.pointerId) {
       return;
     }
-    ownerDocument.removeEventListener("pointermove", move);
-    ownerDocument.removeEventListener("pointerup", stop);
-    ownerDocument.removeEventListener("pointercancel", stop);
+    stopped = true;
+    ownerDocument.removeEventListener("pointermove", move, true);
+    ownerDocument.removeEventListener("pointerup", stop, true);
+    ownerDocument.removeEventListener("pointercancel", stop, true);
     if (ownerDocument.body) {
       ownerDocument.body.style.userSelect = previousUserSelect;
       ownerDocument.body.style.cursor = previousCursor;
     }
-    try {
-      if (handle.hasPointerCapture?.(stopEvent.pointerId)) {
-        handle.releasePointerCapture(stopEvent.pointerId);
-      }
-    } catch (_error) {
-      // ignore
-    }
     if (!state.connectMode) {
       return;
     }
-    const dropId = nodeIdFromClientPoint(state, stopEvent.clientX, stopEvent.clientY);
+    const dropId = nodeIdFromClientPoint(
+      state,
+      stopEvent.clientX,
+      stopEvent.clientY,
+      hitOptions,
+    );
     state.suppressNextNodeClick = true;
-    if (dropId && dropId !== sourceId && state.nodePayloadsById.has(dropId)) {
+    if (dropId && state.nodePayloadsById.has(dropId)) {
       completeConnectMode(state, dropId);
       return;
     }
     cancelConnectMode(state);
   };
 
-  ownerDocument.addEventListener("pointermove", move);
-  ownerDocument.addEventListener("pointerup", stop);
-  ownerDocument.addEventListener("pointercancel", stop);
+  // Capture phase on document so we keep receiving moves even if Streamlit
+  // or shadow retargeting swallows bubble listeners.
+  ownerDocument.addEventListener("pointermove", move, true);
+  ownerDocument.addEventListener("pointerup", stop, true);
+  ownerDocument.addEventListener("pointercancel", stop, true);
 }
 
 function beginConnectMode(state, sourceId, side) {
@@ -2038,24 +2068,35 @@ function cancelConnectMode(state) {
 }
 
 function completeConnectMode(state, targetId) {
-  const sourceId = state.connectMode?.sourceId;
+  const connectMode = state.connectMode;
+  const sourceId = connectMode?.sourceId;
   if (!sourceId || sourceId === targetId || !state.nodePayloadsById.has(targetId)) {
     cancelConnectMode(state);
     return;
   }
+  // One gesture → one pending_edge (pointerup + click / duplicate listeners).
+  if (connectMode.submitted) {
+    return;
+  }
+  connectMode.submitted = true;
+  const requestId = `pe-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   state.component.setStateValue("pending_edge", {
     source: sourceId,
     target: targetId,
     kind: "default",
+    request_id: requestId,
   });
   state.connectMode = null;
   syncConnectModeChrome(state);
-  // Keep the source card selected so the new edge appears under «Связи».
+  // Keep the source card selected locally. Avoid a second setStateValue
+  // (selected_id) in the same gesture — that can re-trigger the fragment with
+  // a still-hot pending_edge and create the link twice.
   if (state.selectedId !== sourceId) {
-    selectId(state, sourceId);
-  } else {
-    queueRender(state);
+    state.selectedId = sourceId;
+    state.selectedNodeIds = new Set([sourceId]);
+    state.pendingSelectedId = sourceId;
   }
+  queueRender(state);
 }
 
 function selectId(state, value, options = {}) {
