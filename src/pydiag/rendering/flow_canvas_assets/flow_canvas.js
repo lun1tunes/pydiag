@@ -83,7 +83,9 @@ function detachCanvasState(state) {
 function attachCanvasObservers(state) {
   if (!state.resizeObserver) {
     state.resizeObserver = new ResizeObserver(() => {
-      if (!state.userMovedView) {
+      // Only auto-fit before the first successful paint. Remount size flicker
+      // after title edits must not yank the camera.
+      if (!state.userMovedView && !state.hasRenderedScene) {
         fitView(state);
       }
       queueRender(state);
@@ -147,6 +149,7 @@ function createCanvasState(root, component, ownerDocument) {
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
+    sceneTopologySignature: null,
     lastEdgeGeometrySignature: null,
     edgeGeometryVersion: 0,
     renderedSelectedId: null,
@@ -383,6 +386,7 @@ function syncStateFromPayload(state) {
       state.userMovedView = false;
       state.hasRenderedScene = false;
       state.sceneRevision = null;
+      state.sceneTopologySignature = null;
       state.lastRevision = null;
       state.selectedId = null;
       state.pendingSelectedId = undefined;
@@ -479,7 +483,9 @@ function syncStateFromPayload(state) {
   }
   if (graphChanged) {
     state.lastRevision = payload.revision;
-    if (!state.userMovedView) {
+    // Fit only on the first paint (or after epoch wipe). Title/metadata edits
+    // bump revision but must not recenter the camera.
+    if (!state.hasRenderedScene && !state.userMovedView) {
       fitView(state);
     }
   }
@@ -532,8 +538,17 @@ function renderState(state) {
 
   const graphChanged = state.sceneRevision !== payload.revision || !state.hasRenderedScene;
   if (graphChanged) {
-    rebuildGraphScene(state);
+    const topologyChanged = !state.hasRenderedScene
+      || sceneTopologySignature(state.payload) !== state.sceneTopologySignature;
+    if (topologyChanged) {
+      rebuildGraphScene(state);
+    } else {
+      // Same node/edge ids (title/roles/note/duration): patch in place — no
+      // clearScene flash and no camera jump.
+      patchGraphScene(state);
+    }
     state.sceneRevision = payload.revision;
+    state.sceneTopologySignature = sceneTopologySignature(payload);
     state.hasRenderedScene = true;
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
@@ -1006,6 +1021,165 @@ function rebuildGraphScene(state) {
   }
 }
 
+function sceneTopologySignature(payload) {
+  const nodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
+  const edges = Array.isArray(payload?.edges) ? payload.edges : [];
+  const nodeIds = nodes.map((node) => String(node.id || "")).sort().join("\0");
+  const edgeIds = edges.map((edge) => String(edge.id || "")).sort().join("\0");
+  return `${nodeIds}|${edgeIds}`;
+}
+
+function patchGraphScene(state) {
+  for (const node of state.payload.nodes || []) {
+    patchNodeElement(state, node);
+  }
+  updateNodePositions(state);
+  updateEdgeGeometry(state);
+  for (const edge of state.payload.edges || []) {
+    patchEdgeElement(state, edge);
+  }
+}
+
+function patchNodeElement(state, node) {
+  const elements = state.nodeElements.get(node.id);
+  if (!elements?.shell || !elements?.card || !elements?.textEl) {
+    return;
+  }
+  const nextText = String(node.text || node.title || "");
+  if (elements.textEl.textContent !== nextText && state.editingTitleNodeId !== node.id) {
+    elements.textEl.textContent = nextText;
+  }
+  if (node.size) {
+    elements.shell.style.width = `${node.size.w}px`;
+    elements.shell.style.height = `${node.size.h}px`;
+  }
+  if (typeof node.kind === "string" && node.kind && elements.card) {
+    for (const className of [...elements.card.classList]) {
+      if (className.startsWith("is-") && className !== "is-draggable" && className !== "is-dragging" && className !== "is-selected") {
+        elements.card.classList.remove(className);
+      }
+    }
+    elements.card.classList.add(`is-${node.kind.replaceAll("_", "-")}`);
+  }
+  if (node.style) {
+    applyStyles(elements.card, node.style);
+  }
+  let rail = elements.shell.querySelector(".flow-node-top-rail");
+  const hasBadges = Boolean(node.time_badge)
+    || (Array.isArray(node.responsible_badges) && node.responsible_badges.length > 0);
+  if (hasBadges && !rail) {
+    rail = createElement("div", "flow-node-top-rail");
+    elements.shell.insertBefore(rail, elements.shell.firstChild);
+  }
+  if (rail) {
+    rail.replaceChildren();
+    if (node.time_badge) {
+      const badge = createElement("div", "flow-node-badge", rail);
+      applyStyles(badge, node.time_badge.style);
+      badge.textContent = node.time_badge.text;
+      badge.title = node.time_badge.title;
+    }
+    for (const badgePayload of node.responsible_badges || []) {
+      const badge = createElement("div", "flow-node-badge", rail);
+      applyStyles(badge, badgePayload.style);
+      badge.textContent = badgePayload.abbr;
+      badge.title = badgePayload.title;
+    }
+    if (!hasBadges) {
+      rail.remove();
+    }
+  }
+  syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
+  setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
+  const minimap = state.minimapNodeElements.get(node.id);
+  if (minimap) {
+    syncMinimapNodeShape(minimap, node, state.positions[node.id] || node.position);
+  }
+}
+
+function patchEdgeElement(state, edge) {
+  const elements = state.edgeElements.get(edge.id);
+  if (!elements?.visiblePath) {
+    return;
+  }
+  const stroke = edge.style?.stroke || edge.color;
+  elements.visiblePath.setAttribute("stroke", stroke);
+  elements.visiblePath.setAttribute("opacity", String(edge.style?.opacity ?? 1));
+  if (edge.style?.strokeDasharray && edge.style.strokeDasharray !== "0") {
+    elements.visiblePath.setAttribute("stroke-dasharray", edge.style.strokeDasharray);
+  } else {
+    elements.visiblePath.removeAttribute("stroke-dasharray");
+  }
+  syncEdgeMarker(state, edge, stroke);
+  syncEdgeLabelElement(state, elements, edge);
+  setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
+}
+
+function syncEdgeMarker(state, edge, color) {
+  const markerId = `marker-${edge.id}`;
+  let marker = null;
+  for (const child of state.dom.defs.children) {
+    if (child.getAttribute("id") === markerId) {
+      marker = child;
+      break;
+    }
+  }
+  if (!marker) {
+    state.dom.defs.appendChild(buildMarker(color, edge.id));
+    return;
+  }
+  const path = marker.querySelector("path");
+  if (path) {
+    path.setAttribute("fill", color);
+  }
+}
+
+function syncEdgeLabelElement(state, elements, edge) {
+  if (!edge.label) {
+    if (elements.label) {
+      elements.label.remove();
+      elements.label = null;
+    }
+    return;
+  }
+  if (!elements.label) {
+    elements.label = createEdgeLabelElement(state, edge);
+  } else {
+    applyEdgeLabelContent(elements.label, edge);
+  }
+}
+
+function createEdgeLabelElement(state, edge) {
+  const label = createElement("button", "flow-edge-label", state.dom.labelsLayer);
+  label.type = "button";
+  applyEdgeLabelContent(label, edge);
+  label.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.stopPropagation();
+    if (state.connectMode) {
+      cancelConnectMode(state);
+    }
+    selectId(state, edge.id);
+  });
+  label.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  return label;
+}
+
+function applyEdgeLabelContent(label, edge) {
+  label.textContent = edge.label.text;
+  label.style.left = `${edge.label.position.x}px`;
+  label.style.top = `${edge.label.position.y}px`;
+  label.style.width = `${edge.label.width}px`;
+  label.style.height = `${edge.label.height}px`;
+  label.style.border = `1px solid ${edge.label.color}`;
+  label.style.color = edge.label.color;
+  label.style.opacity = String(edge.label.active ? 1 : 0.24);
+}
+
 function buildEdgeElement(state, edge) {
   const group = createSvgElement("g");
   state.dom.edgeLayer.appendChild(group);
@@ -1045,32 +1219,7 @@ function buildEdgeElement(state, edge) {
   });
   group.appendChild(hitPath);
 
-  let label = null;
-  if (edge.label) {
-    label = createElement("button", "flow-edge-label", state.dom.labelsLayer);
-    label.type = "button";
-    label.textContent = edge.label.text;
-    label.style.left = `${edge.label.position.x}px`;
-    label.style.top = `${edge.label.position.y}px`;
-    label.style.width = `${edge.label.width}px`;
-    label.style.height = `${edge.label.height}px`;
-    label.style.border = `1px solid ${edge.label.color}`;
-    label.style.color = edge.label.color;
-    label.style.opacity = String(edge.label.active ? 1 : 0.24);
-    label.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) {
-        return;
-      }
-      event.stopPropagation();
-      if (state.connectMode) {
-        cancelConnectMode(state);
-      }
-      selectId(state, edge.id);
-    });
-    label.addEventListener("click", (event) => {
-      event.stopPropagation();
-    });
-  }
+  const label = edge.label ? createEdgeLabelElement(state, edge) : null;
 
   const elements = { visiblePath, hitPath, label };
   setEdgeSelectedState(elements, edge, state.selectedId === edge.id);

@@ -52,7 +52,17 @@ def test_flow_canvas_reuses_persistent_dom_and_patches_only_changed_scene_parts(
     assert "return () => detachCanvasState(state);" in js
     assert "initializeRootStructure(state);" in js
     assert "const graphChanged = state.sceneRevision !== payload.revision || !state.hasRenderedScene;" in js
+    assert "function sceneTopologySignature(payload) {" in js
+    assert "function patchGraphScene(state) {" in js
+    assert "function patchEdgeElement(state, edge) {" in js
+    assert "function syncEdgeMarker(state, edge, color) {" in js
+    assert "function syncEdgeLabelElement(state, elements, edge) {" in js
+    assert "elements.label.remove();" in js
+    assert "path.setAttribute(\"fill\", color);" in js
     assert "rebuildGraphScene(state);" in js
+    assert "patchGraphScene(state);" in js
+    assert "if (!state.hasRenderedScene && !state.userMovedView) {" in js
+    assert "Only auto-fit before the first successful paint" in js
     assert "const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;" in js
     assert "const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;" in js
     assert "updateNodePositions(state);" in js

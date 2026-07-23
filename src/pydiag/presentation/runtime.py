@@ -323,6 +323,7 @@ class StreamlitAppRuntime:
             ),
             quiet=True,
             record_history=True,
+            rerun=False,
         )
 
     def _consume_pending_canvas_node_edit(
@@ -347,7 +348,14 @@ class StreamlitAppRuntime:
         if not self.auth_context().current_user_is_admin():
             self.st_module.error("Редактирование карточек доступно только администратору.")
             return
-        session.apply_canvas_node_edit(graph, wells, pending, quiet=True, record_history=True)
+        session.apply_canvas_node_edit(
+            graph,
+            wells,
+            pending,
+            quiet=True,
+            record_history=True,
+            rerun=False,
+        )
 
     def _consume_pending_canvas_node_create(self, graph: FlowGraphDocument) -> None:
         session = self.session
@@ -385,6 +393,7 @@ class StreamlitAppRuntime:
             ),
             quiet=True,
             record_history=True,
+            rerun=False,
         )
 
     def _consume_pending_canvas_edge_edit(self, graph: FlowGraphDocument) -> None:
@@ -431,6 +440,7 @@ class StreamlitAppRuntime:
             quiet=True,
             record_history=True,
             before_snapshot=before,
+            rerun=False,
         )
 
     def _consume_history_action(self, graph: FlowGraphDocument) -> None:
@@ -439,9 +449,9 @@ class StreamlitAppRuntime:
             component_key=FLOW_CANVAS_COMPONENT_KEY,
         )
         if action == "undo":
-            self.session.undo_edit(graph)
+            self.session.undo_edit(graph, rerun=False)
         elif action == "redo":
-            self.session.redo_edit(graph)
+            self.session.redo_edit(graph, rerun=False)
 
     def _autosave_canvas_positions(
         self,
@@ -474,6 +484,7 @@ class StreamlitAppRuntime:
             positions,
             quiet=True,
             record_history=True,
+            rerun=False,
         )
 
     def run(self) -> None:
@@ -516,11 +527,15 @@ class StreamlitAppRuntime:
                     )
                     node_edit_enabled = edge_edit_enabled
                     # Mutate widget session_state BEFORE the canvas is mounted.
+                    # Persist without fragment remount (rerun=False): continue this
+                    # tick so title edits don't jump / white-flash the page.
                     self._consume_history_action(graph)
                     self._consume_pending_canvas_edge(graph)
                     self._consume_pending_canvas_node_create(graph)
                     self._consume_pending_canvas_node_edit(graph, wells)
                     self._consume_pending_canvas_edge_edit(graph)
+                    # Consumes may have bumped graph.version — refresh before autosave.
+                    graph, wells = session.load_app_data()
                     self._autosave_canvas_positions(
                         graph,
                         position_edit_enabled=position_edit_enabled,

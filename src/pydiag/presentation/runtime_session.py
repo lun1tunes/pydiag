@@ -270,6 +270,7 @@ class StreamlitSessionCoordinator:
         *,
         quiet: bool = False,
         record_history: bool = True,
+        rerun: bool = True,
     ) -> bool:
         if not self.position_edit_available():
             self.st_module.error(
@@ -311,6 +312,7 @@ class StreamlitSessionCoordinator:
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
+            rerun=rerun,
         )
         return result.saved
 
@@ -334,6 +336,7 @@ class StreamlitSessionCoordinator:
         quiet: bool = False,
         record_history: bool = False,
         before_snapshot: dict[str, Any] | None = None,
+        rerun: bool = True,
     ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
@@ -380,6 +383,7 @@ class StreamlitSessionCoordinator:
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
+            rerun=rerun,
         )
         return result.saved
 
@@ -391,6 +395,7 @@ class StreamlitSessionCoordinator:
         *,
         quiet: bool = True,
         record_history: bool = True,
+        rerun: bool = True,
     ) -> bool:
         from pydiag.presentation.admin import validate_graph_source_node_form
         from pydiag.presentation.admin_models import (
@@ -433,6 +438,7 @@ class StreamlitSessionCoordinator:
                 quiet=quiet,
                 record_history=record_history,
                 before_snapshot=before,
+                rerun=rerun,
             )
 
         title = patch["title"] if "title" in patch else draft.title
@@ -516,6 +522,7 @@ class StreamlitSessionCoordinator:
             quiet=quiet,
             record_history=record_history,
             before_snapshot=before,
+            rerun=rerun,
         )
 
     def save_graph_source_edge(
@@ -526,6 +533,7 @@ class StreamlitSessionCoordinator:
         quiet: bool = False,
         record_history: bool = False,
         before_snapshot: dict[str, Any] | None = None,
+        rerun: bool = True,
     ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
@@ -572,6 +580,7 @@ class StreamlitSessionCoordinator:
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
+            rerun=rerun,
         )
         return result.saved
 
@@ -582,6 +591,7 @@ class StreamlitSessionCoordinator:
         *,
         quiet: bool = False,
         record_history: bool = True,
+        rerun: bool = True,
     ) -> str | None:
         if not self.graph_source_edit_available():
             self.st_module.error(
@@ -636,6 +646,7 @@ class StreamlitSessionCoordinator:
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
+            rerun=rerun,
         )
         return created_edge_id if result.saved else None
 
@@ -646,6 +657,7 @@ class StreamlitSessionCoordinator:
         *,
         quiet: bool = False,
         record_history: bool = True,
+        rerun: bool = True,
     ) -> str | None:
         if not self.graph_source_edit_available():
             self.st_module.error(
@@ -696,6 +708,7 @@ class StreamlitSessionCoordinator:
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
+            rerun=rerun,
         )
         return created_node_id if result.saved else None
 
@@ -705,13 +718,13 @@ class StreamlitSessionCoordinator:
     def can_redo_edit(self) -> bool:
         return can_redo(self.session_state)
 
-    def undo_edit(self, graph: FlowGraphDocument) -> None:
+    def undo_edit(self, graph: FlowGraphDocument, *, rerun: bool = True) -> None:
         command = pop_undo(self.session_state)
         if command is None:
             return
         # Park on redo before persist+rerun so the stack survives RerunException.
         push_onto_undo_keep_redo(self.session_state, command)
-        ok = self._apply_history_command(graph, command, reverse=True)
+        ok = self._apply_history_command(graph, command, reverse=True, rerun=rerun)
         if not ok:
             restored = pop_redo(self.session_state)
             if restored is not None:
@@ -719,12 +732,12 @@ class StreamlitSessionCoordinator:
                 undo_stack.append(restored)
                 self.session_state["_flow_edit_undo"] = undo_stack
 
-    def redo_edit(self, graph: FlowGraphDocument) -> None:
+    def redo_edit(self, graph: FlowGraphDocument, *, rerun: bool = True) -> None:
         command = pop_redo(self.session_state)
         if command is None:
             return
         push_onto_undo_from_redo(self.session_state, command)
-        ok = self._apply_history_command(graph, command, reverse=False)
+        ok = self._apply_history_command(graph, command, reverse=False, rerun=rerun)
         if not ok:
             restored = pop_undo(self.session_state)
             if restored is not None:
@@ -738,6 +751,7 @@ class StreamlitSessionCoordinator:
         command: dict[str, Any],
         *,
         reverse: bool,
+        rerun: bool = True,
     ) -> bool:
         kind = command.get("kind")
         if kind == "move_nodes":
@@ -765,6 +779,7 @@ class StreamlitSessionCoordinator:
                 current,
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
         if kind == "create_edge":
             edge_id = command.get("edge_id")
@@ -788,6 +803,7 @@ class StreamlitSessionCoordinator:
                     ),
                     quiet=True,
                     record_history=False,
+                    rerun=rerun,
                 )
             created = self.create_graph_source_edge(
                 graph,
@@ -802,6 +818,7 @@ class StreamlitSessionCoordinator:
                 ),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
             return created is not None
         if kind == "create_node":
@@ -815,12 +832,14 @@ class StreamlitSessionCoordinator:
                     update_command_from_node_snapshot(node_id, after, deleted=True),
                     quiet=True,
                     record_history=False,
+                    rerun=rerun,
                 )
             created = self.create_graph_source_node(
                 graph,
                 create_command_from_node_snapshot(node_id, after),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
             return created is not None
         if kind == "update_node":
@@ -833,6 +852,7 @@ class StreamlitSessionCoordinator:
                 update_command_from_node_snapshot(node_id, payload, deleted=None),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
         if kind == "delete_node":
             node_id = command.get("node_id")
@@ -845,12 +865,14 @@ class StreamlitSessionCoordinator:
                     update_command_from_node_snapshot(node_id, before, deleted=False),
                     quiet=True,
                     record_history=False,
+                    rerun=rerun,
                 )
             return self.save_graph_source_node(
                 graph,
                 update_command_from_node_snapshot(node_id, before, deleted=True),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
         if kind == "update_edge":
             payload = command.get("before" if reverse else "after")
@@ -862,6 +884,7 @@ class StreamlitSessionCoordinator:
                 update_command_from_edge_snapshot(edge_id, payload, deleted=None),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
         if kind == "delete_edge":
             edge_id = command.get("edge_id")
@@ -885,6 +908,7 @@ class StreamlitSessionCoordinator:
                     ),
                     quiet=True,
                     record_history=False,
+                    rerun=rerun,
                 )
                 return created is not None
             return self.save_graph_source_edge(
@@ -892,6 +916,7 @@ class StreamlitSessionCoordinator:
                 update_command_from_edge_snapshot(edge_id, before, deleted=True),
                 quiet=True,
                 record_history=False,
+                rerun=rerun,
             )
         return False
 
@@ -930,13 +955,16 @@ class StreamlitSessionCoordinator:
         error_message: str | None,
         *,
         scope: str = "app",
+        rerun: bool = True,
     ) -> None:
         if error_message is not None:
             self.st_module.error(error_message)
             return
-        if should_rerun:
+        if should_rerun and rerun:
             # Canvas quiet edits run inside a fragment: app-scoped rerun remounts
             # the whole page and feels like the view/selection "falls apart".
+            # Pre-mount consume paths pass rerun=False and continue rendering in
+            # the same fragment tick (avoids jump / white flash on title edits).
             rerun_scope = "fragment" if scope == "fragment" else "app"
             try:
                 self.st_module.rerun(scope=rerun_scope)

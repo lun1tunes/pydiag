@@ -188,7 +188,9 @@ def test_create_node_from_canvas_with_undo(tmp_path: Path) -> None:
     }
     runtime._consume_pending_canvas_node_create(graph)
     assert st_module.errors == []
-    assert st_module.rerun_scopes == ["fragment"]
+    # Pre-mount consume persists without remounting the fragment (no jump).
+    assert st_module.rerun_scopes == []
+    assert st_module.reruns == 0
 
     graph_after, _ = coordinator.load_app_data(force=True)
     created_ids = {node.id for node in graph_after.nodes} - before_ids
