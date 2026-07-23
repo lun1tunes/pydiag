@@ -366,15 +366,12 @@ class StreamlitAppRuntime:
         if not self.auth_context().current_user_is_admin():
             self.st_module.error("Добавление карточек доступно только администратору.")
             return
-        # process/decision require ≥1 responsible in the runtime graph model.
-        default_responsible = None
-        if pending["kind"] in {"process", "decision_diamond"} and graph.responsibles:
-            preferred = [
-                key
-                for key in graph.responsibles
-                if key not in {"unassigned", "none", ""}
-            ]
-            default_responsible = preferred[0] if preferred else next(iter(graph.responsibles))
+        # New process/decision cards start as «Не назначено».
+        default_responsible = (
+            "unassigned"
+            if pending["kind"] in {"process", "decision_diamond"}
+            else None
+        )
         session.create_graph_source_node(
             graph,
             CreateGraphSourceNodeCommand(

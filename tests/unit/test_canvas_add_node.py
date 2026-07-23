@@ -158,6 +158,9 @@ def test_create_flow_source_payload_node_defaults(tmp_path: Path) -> None:
     node = updated["nodes"]["proc_izmeni_menya"]
     assert node["title"] == "Измени меня"
     assert node["kind"] == "process"
+    assert node["responsible"] == "unassigned"
+    assert "unassigned" in updated["responsibles"]
+    assert updated["responsibles"]["unassigned"]["label"] == "Не назначено"
     assert updated["layout"]["proc_izmeni_menya"]["x"] == 10.0
 
 
@@ -194,6 +197,8 @@ def test_create_node_from_canvas_with_undo(tmp_path: Path) -> None:
     created_node = next(node for node in graph_after.nodes if node.id == created)
     assert created_node.text == "Измени меня"
     assert created_node.type == "process"
+    assert created_node.responsible == ["unassigned"]
+    assert created_node.primary_responsible == "unassigned"
     assert can_undo(st_module.session_state)
     assert peek_undo(st_module.session_state)["kind"] == "create_node"
     assert st_module.session_state.get("selected_id") == created

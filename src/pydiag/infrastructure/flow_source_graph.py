@@ -826,6 +826,12 @@ def create_flow_source_payload_node(
         h=max(40, min(800, layout_h)),
     )
 
+    responsible = resolve_create_node_responsible(
+        updated,
+        kind=kind,
+        responsible=command.responsible,
+    )
+
     if node_id in updated.nodes:
         current = updated.nodes[node_id]
         if not flow_source_node_deleted(current):
@@ -834,7 +840,7 @@ def create_flow_source_payload_node(
             update={
                 "title": title,
                 "kind": kind,
-                "responsible": command.responsible,
+                "responsible": responsible,
                 "participants": list(command.participants),
                 "approvers": list(command.approvers),
                 "duration": command.duration,
@@ -848,7 +854,7 @@ def create_flow_source_payload_node(
         updated.nodes[node_id] = FlowSourceNode(
             title=title,
             kind=kind,
-            responsible=command.responsible,
+            responsible=responsible,
             participants=list(command.participants),
             approvers=list(command.approvers),
             duration=command.duration,
@@ -859,6 +865,39 @@ def create_flow_source_payload_node(
         )
     updated.layout[node_id] = layout_entry
     return updated.model_dump(mode="json")
+
+
+def resolve_create_node_responsible(
+    document: FlowSourceDocument,
+    *,
+    kind: EditableNodeKind,
+    responsible: str | None,
+) -> str | None:
+    """Normalize create-node responsible; ensure «Не назначено» exists in catalog."""
+    raw = (responsible or "").strip()
+    if raw in {"", "none"}:
+        raw = ""
+    needs_unassigned = kind in {"process", "decision_diamond"} and (
+        not raw or raw == "unassigned"
+    )
+    if needs_unassigned:
+        ensure_unassigned_responsible(document)
+        return "unassigned"
+    if raw == "unassigned":
+        ensure_unassigned_responsible(document)
+        return "unassigned"
+    return responsible
+
+
+def ensure_unassigned_responsible(document: FlowSourceDocument) -> None:
+    if "unassigned" in document.responsibles:
+        return
+    document.responsibles["unassigned"] = FlowSourceResponsible(
+        label="Не назначено",
+        fill="#eef2f6",
+        border="#94a3b8",
+        text="#172033",
+    )
 
 
 def unique_node_id(*, kind: EditableNodeKind, title: str, used_ids: set[str]) -> str:

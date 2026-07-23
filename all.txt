@@ -1489,7 +1489,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/__init__.py	2502
+===BEGIN_FILE===	src/pydiag/application/__init__.py	2944
 """Application layer public API."""
 
 from __future__ import annotations
@@ -1511,13 +1511,19 @@ from .flow_view import (
     FLOW_CANVAS_COMPONENT_KEY,
     FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
+    consume_history_action,
     consume_pending_canvas_edge,
+    consume_pending_canvas_edge_edit,
+    consume_pending_canvas_node_create,
+    consume_pending_canvas_node_edit,
     consume_responsible_filter_rerun_request,
+    detect_canvas_position_autosave,
     render_flow,
 )
 from .flow_view_state import flow_state_timestamp
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceEdgeKind,
     GraphSourceNodeDraft,
@@ -1544,11 +1550,17 @@ __all__ = [
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
     "AppDocuments",
+    "consume_history_action",
     "consume_pending_canvas_edge",
+    "consume_pending_canvas_edge_edit",
+    "consume_pending_canvas_node_create",
+    "consume_pending_canvas_node_edit",
     "consume_responsible_filter_rerun_request",
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "CreateWellCommand",
     "custom_layout_positions_for_graph",
+    "detect_canvas_position_autosave",
     "DocumentsGateway",
     "FlashLevel",
     "FlashMessage",
@@ -1580,7 +1592,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/documents_gateway.py	2092
+===BEGIN_FILE===	src/pydiag/application/documents_gateway.py	2285
 from __future__ import annotations
 
 from typing import Protocol
@@ -1653,6 +1665,14 @@ class DocumentsGateway(Protocol):
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument: ...
 
+    def create_graph_source_node(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
     def list_graph_versions(self) -> list[GraphVersionInfo]: ...
 
     def live_graph_source_exists(self) -> bool: ...
@@ -1666,7 +1686,277 @@ class DocumentsGateway(Protocol):
     def import_live_graph_source_from_raw(self) -> RawImportResult: ...
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/flow_position_edit.py	5521
+===BEGIN_FILE===	src/pydiag/application/edit_history.py	6667
+from __future__ import annotations
+
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Literal
+
+HistoryAction = Literal["undo", "redo"]
+CommandKind = Literal[
+    "move_nodes",
+    "create_edge",
+    "create_node",
+    "update_node",
+    "delete_node",
+    "update_edge",
+    "delete_edge",
+]
+
+EDIT_UNDO_KEY = "_flow_edit_undo"
+EDIT_REDO_KEY = "_flow_edit_redo"
+HISTORY_ACTION_REQUEST_KEY = "_flow_history_action_request_id"
+HISTORY_STACK_LIMIT = 50
+
+__all__ = [
+    "EDIT_REDO_KEY",
+    "EDIT_UNDO_KEY",
+    "HISTORY_ACTION_REQUEST_KEY",
+    "HISTORY_STACK_LIMIT",
+    "can_redo",
+    "can_undo",
+    "clear_edit_history",
+    "peek_redo",
+    "peek_undo",
+    "pop_redo",
+    "pop_undo",
+    "push_create_edge_command",
+    "push_create_node_command",
+    "push_delete_edge_command",
+    "push_delete_node_command",
+    "push_move_nodes_command",
+    "push_update_edge_command",
+    "push_update_node_command",
+]
+
+
+def clear_edit_history(session_state: MutableMapping[str, Any]) -> None:
+    session_state[EDIT_UNDO_KEY] = []
+    session_state[EDIT_REDO_KEY] = []
+
+
+def can_undo(session_state: MutableMapping[str, Any]) -> bool:
+    return bool(_stack(session_state, EDIT_UNDO_KEY))
+
+
+def can_redo(session_state: MutableMapping[str, Any]) -> bool:
+    return bool(_stack(session_state, EDIT_REDO_KEY))
+
+
+def peek_undo(session_state: MutableMapping[str, Any]) -> dict[str, Any] | None:
+    stack = _stack(session_state, EDIT_UNDO_KEY)
+    return dict(stack[-1]) if stack else None
+
+
+def peek_redo(session_state: MutableMapping[str, Any]) -> dict[str, Any] | None:
+    stack = _stack(session_state, EDIT_REDO_KEY)
+    return dict(stack[-1]) if stack else None
+
+
+def pop_undo(session_state: MutableMapping[str, Any]) -> dict[str, Any] | None:
+    stack = _stack(session_state, EDIT_UNDO_KEY)
+    if not stack:
+        return None
+    command = dict(stack.pop())
+    session_state[EDIT_UNDO_KEY] = stack
+    return command
+
+
+def pop_redo(session_state: MutableMapping[str, Any]) -> dict[str, Any] | None:
+    stack = _stack(session_state, EDIT_REDO_KEY)
+    if not stack:
+        return None
+    command = dict(stack.pop())
+    session_state[EDIT_REDO_KEY] = stack
+    return command
+
+
+def push_move_nodes_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    before: dict[str, tuple[float, float]],
+    after: dict[str, tuple[float, float]],
+) -> None:
+    moved_before = {
+        node_id: [float(xy[0]), float(xy[1])]
+        for node_id, xy in before.items()
+        if node_id in after and after[node_id] != xy
+    }
+    moved_after = {
+        node_id: [float(after[node_id][0]), float(after[node_id][1])]
+        for node_id in moved_before
+    }
+    if not moved_before:
+        return
+    _push(
+        session_state,
+        {
+            "kind": "move_nodes",
+            "before": moved_before,
+            "after": moved_after,
+        },
+    )
+
+
+def push_create_edge_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    edge_id: str,
+    source: str,
+    target: str,
+    kind: str,
+    label: str | None = None,
+    condition: str | None = None,
+    note: str | None = None,
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "create_edge",
+            "edge_id": edge_id,
+            "source": source,
+            "target": target,
+            "kind_value": kind,
+            "label": label,
+            "condition": condition,
+            "note": note,
+        },
+    )
+
+
+def push_create_node_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    node_id: str,
+    after: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "create_node",
+            "node_id": node_id,
+            "after": dict(after),
+        },
+    )
+
+
+def push_update_node_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    node_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    if before == after:
+        return
+    _push(
+        session_state,
+        {
+            "kind": "update_node",
+            "node_id": node_id,
+            "before": dict(before),
+            "after": dict(after),
+        },
+    )
+
+
+def push_delete_node_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    node_id: str,
+    before: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "delete_node",
+            "node_id": node_id,
+            "before": dict(before),
+        },
+    )
+
+
+def push_update_edge_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    edge_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    if before == after:
+        return
+    _push(
+        session_state,
+        {
+            "kind": "update_edge",
+            "edge_id": edge_id,
+            "before": dict(before),
+            "after": dict(after),
+        },
+    )
+
+
+def push_delete_edge_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    edge_id: str,
+    before: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "delete_edge",
+            "edge_id": edge_id,
+            "before": dict(before),
+        },
+    )
+
+
+def _push(session_state: MutableMapping[str, Any], command: dict[str, Any]) -> None:
+    undo = _stack(session_state, EDIT_UNDO_KEY)
+    undo.append(command)
+    if len(undo) > HISTORY_STACK_LIMIT:
+        undo = undo[-HISTORY_STACK_LIMIT:]
+    session_state[EDIT_UNDO_KEY] = undo
+    session_state[EDIT_REDO_KEY] = []
+
+
+def _stack(session_state: MutableMapping[str, Any], key: str) -> list[dict[str, Any]]:
+    raw = session_state.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def push_onto_redo(session_state: MutableMapping[str, Any], command: dict[str, Any]) -> None:
+    redo = _stack(session_state, EDIT_REDO_KEY)
+    redo.append(command)
+    if len(redo) > HISTORY_STACK_LIMIT:
+        redo = redo[-HISTORY_STACK_LIMIT:]
+    session_state[EDIT_REDO_KEY] = redo
+
+
+def push_onto_undo_keep_redo(
+    session_state: MutableMapping[str, Any],
+    command: dict[str, Any],
+) -> None:
+    """After a successful undo, park the command on the redo stack."""
+    push_onto_redo(session_state, command)
+
+
+def push_onto_undo_from_redo(
+    session_state: MutableMapping[str, Any],
+    command: dict[str, Any],
+) -> None:
+    """After a successful redo, put the command back on the undo stack."""
+    undo = _stack(session_state, EDIT_UNDO_KEY)
+    undo.append(command)
+    if len(undo) > HISTORY_STACK_LIMIT:
+        undo = undo[-HISTORY_STACK_LIMIT:]
+    session_state[EDIT_UNDO_KEY] = undo
+
+===END_FILE===
+===BEGIN_FILE===	src/pydiag/application/flow_position_edit.py	5549
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -1688,6 +1978,7 @@ POSITION_EDIT_DIRTY_KEY = "position_edit_dirty"
 __all__ = [
     "custom_layout_positions_for_graph",
     "ensure_position_edit_positions",
+    "graph_node_positions",
     "graph_with_positions",
     "initial_position_edit_positions",
     "is_position_pair",
@@ -1830,7 +2121,7 @@ def custom_layout_positions_for_graph(
     return positions
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/flow_view.py	9075
+===BEGIN_FILE===	src/pydiag/application/flow_view.py	18166
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -1842,7 +2133,16 @@ from pydiag.rendering import (
     component_pending_edge_from_state,
     component_responsible_filter_from_state,
 )
+from pydiag.rendering.flow_canvas_state import (
+    component_history_action_from_state,
+    component_pending_edge_edit_from_state,
+    component_pending_node_create_from_state,
+    component_pending_node_edit_from_state,
+    component_positions_from_state,
+)
 
+from .edit_history import HISTORY_ACTION_REQUEST_KEY
+from .flow_position_edit import graph_node_positions
 from .flow_view_context import prepare_render_context
 from .flow_view_selection import (
     component_state_from_session,
@@ -1853,10 +2153,16 @@ from .flow_view_state import flow_state_timestamp
 
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
 FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY = "_flow_canvas_pending_edge_request_id"
+FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY = "_flow_canvas_pending_node_edit_request_id"
+FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY = "_flow_canvas_pending_node_create_request_id"
+FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY = "_flow_canvas_pending_edge_edit_request_id"
 FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
 FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
 FLOW_CANVAS_SESSION_EPOCH_KEY = "_flow_canvas_session_epoch"
+# One-shot: after undo/redo of positions, ignore stale FE positions once.
+SKIP_POSITION_AUTOSAVE_ONCE_KEY = "_flow_skip_position_autosave_once"
+INSPECTOR_COLLAPSED_KEY = "_flow_inspector_collapsed"
 # Sidebar multiselect widget key — must not collide with canvas component state
 # field "responsible_filter" nested under FLOW_CANVAS_COMPONENT_KEY.
 RESPONSIBLE_FILTER_SESSION_KEY = "sidebar_responsible_filter"
@@ -1865,15 +2171,29 @@ RESPONSIBLE_FILTER_LAST_KEY = "_responsible_filter_last"
 __all__ = [
     "FLOW_CANVAS_COMPONENT_KEY",
     "FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY",
     "FLOW_CANVAS_SESSION_EPOCH_KEY",
     "FLOW_RENDER_SNAPSHOT_CACHE_KEY",
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
+    "SKIP_POSITION_AUTOSAVE_ONCE_KEY",
+    "INSPECTOR_COLLAPSED_KEY",
+    "sync_component_positions",
+    "take_skip_position_autosave_once",
+    "resolve_inspector_collapsed",
+    "HISTORY_ACTION_REQUEST_KEY",
     "RESPONSIBLE_FILTER_LAST_KEY",
     "RESPONSIBLE_FILTER_SESSION_KEY",
     "bump_flow_canvas_session_epoch",
+    "consume_history_action",
     "consume_pending_canvas_edge",
+    "consume_pending_canvas_edge_edit",
+    "consume_pending_canvas_node_create",
+    "consume_pending_canvas_node_edit",
     "consume_responsible_filter_rerun_request",
+    "detect_canvas_position_autosave",
     "flow_state_timestamp",
     "render_flow",
     "resolve_responsible_filter",
@@ -1891,6 +2211,9 @@ def render_flow(
     layout_mode: str,
     position_edit_enabled: bool,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
+    can_undo: bool = False,
+    can_redo: bool = False,
     render_canvas,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> str | None:
@@ -1922,6 +2245,7 @@ def render_flow(
         layout_mode=render_context.layout_mode,
         position_edit_enabled=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
     )
     snapshot_cache = session_state.setdefault(FLOW_RENDER_SNAPSHOT_CACHE_KEY, {})
     if not isinstance(snapshot_cache, dict):
@@ -1937,6 +2261,12 @@ def render_flow(
         layout_mode=render_context.layout_mode,
         domain_nodes_draggable=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
+        can_undo=can_undo,
+        can_redo=can_redo,
+        inspector_collapsed=resolve_inspector_collapsed(
+            session_state, component_key=component_key
+        ),
         revision=revision,
         snapshot_cache=snapshot_cache,
         session_epoch=int(session_state.get(FLOW_CANVAS_SESSION_EPOCH_KEY, 0) or 0),
@@ -1951,6 +2281,95 @@ def render_flow(
     # Selection stays local in canvas JS; session_state is only mirrored for the
     # inspector in the same fragment. Never request a full-app selection rerun.
     return sync_returned_selected_id(session_state, graph, wells, selected_id, returned)
+
+
+def detect_canvas_position_autosave(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, tuple[float, float]] | None:
+    """Return full node positions to persist when canvas drag changed layout."""
+    component_state = component_state_from_session(session_state, component_key)
+    incoming = component_positions_from_state(graph, component_state)
+    if incoming is None:
+        return None
+    persisted = graph_node_positions(graph)
+    changed = False
+    merged = dict(persisted)
+    for node_id, xy in incoming.items():
+        if persisted.get(node_id) != xy:
+            changed = True
+        merged[node_id] = xy
+    return merged if changed else None
+
+
+def sync_component_positions(
+    session_state: MutableMapping[str, Any],
+    positions: dict[str, tuple[float, float]],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> None:
+    """Overwrite canvas component positions so stale FE state cannot re-autosave."""
+    current = session_state.get(component_key)
+    updated = dict(current) if isinstance(current, dict) else {}
+    updated["positions"] = {
+        node_id: {"x": float(xy[0]), "y": float(xy[1])}
+        for node_id, xy in positions.items()
+    }
+    session_state[component_key] = updated
+
+
+def take_skip_position_autosave_once(session_state: MutableMapping[str, Any]) -> bool:
+    """Consume one-shot skip set after undo/redo of node positions."""
+    if not session_state.pop(SKIP_POSITION_AUTOSAVE_ONCE_KEY, False):
+        return False
+    return True
+
+
+def resolve_inspector_collapsed(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> bool:
+    """Mirror canvas toggle into session so column layout survives remounts."""
+    component_state = component_state_from_session(session_state, component_key)
+    if isinstance(component_state, dict) and "inspector_collapsed" in component_state:
+        raw = component_state.get("inspector_collapsed")
+        if isinstance(raw, bool):
+            session_state[INSPECTOR_COLLAPSED_KEY] = raw
+            return raw
+    return bool(session_state.get(INSPECTOR_COLLAPSED_KEY, False))
+
+
+def consume_history_action(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> str | None:
+    """Take a pending undo/redo action once. Returns ``\"undo\"`` / ``\"redo\"``."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_history_action_from_state(component_state)
+    if pending is None:
+        return None
+    request_id = pending["request_id"]
+    if session_state.get(HISTORY_ACTION_REQUEST_KEY) == request_id:
+        _clear_history_action_component_state(session_state, component_key)
+        return None
+    session_state[HISTORY_ACTION_REQUEST_KEY] = request_id
+    _clear_history_action_component_state(session_state, component_key)
+    return pending["action"]
+
+
+def _clear_history_action_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["history_action"] = None
+        session_state[component_key] = updated
 
 
 def consume_pending_canvas_edge(
@@ -1996,6 +2415,113 @@ def _clear_pending_edge_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_edge"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_node_edit(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas node edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_edit_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY) == request_id:
+            _clear_pending_node_edit_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY] = request_id
+
+    _clear_pending_node_edit_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_node_edit_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_edit"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_node_create(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas node create once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_create_from_state(component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY) == request_id:
+            _clear_pending_node_create_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY] = request_id
+
+    _clear_pending_node_create_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_node_create_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_create"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_edge_edit(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas edge edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_edge_edit_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY) == request_id:
+            _clear_pending_edge_edit_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY] = request_id
+
+    _clear_pending_edge_edit_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_edge_edit_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_edge_edit"] = None
         session_state[component_key] = updated
 
 
@@ -2200,7 +2726,7 @@ def sync_returned_selected_id(
     return selected_id
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/flow_view_state.py	2036
+===BEGIN_FILE===	src/pydiag/application/flow_view_state.py	2182
 from __future__ import annotations
 
 import time
@@ -2226,6 +2752,7 @@ def flow_state_timestamp(
     layout_mode: str,
     position_edit_enabled: bool = False,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
 ) -> int:
     # Search / kind / responsible filters and live draft positions are applied
     # without bumping scene revision (client dim + incremental geometry).
@@ -2236,6 +2763,7 @@ def flow_state_timestamp(
         layout_mode=layout_mode,
         position_edit_enabled=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
     )
     if session_state.get(FLOW_VIEW_SIGNATURE_KEY) != signature:
         previous = int(session_state.get(FLOW_STATE_TIMESTAMP_KEY, 0))
@@ -2251,6 +2779,7 @@ def flow_view_signature(
     layout_mode: str,
     position_edit_enabled: bool,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
 ) -> tuple[Any, ...]:
     # Topology / versions / chrome flags only. Node positions are synced
     # incrementally via positionsVersion so drag does not clear the scene.
@@ -2262,10 +2791,11 @@ def flow_view_signature(
         layout_mode,
         position_edit_enabled,
         edge_edit_enabled,
+        node_edit_enabled,
     )
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/application/session_state.py	4625
+===BEGIN_FILE===	src/pydiag/application/session_state.py	4875
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping
@@ -2294,6 +2824,8 @@ class FlashMessage:
 class PersistenceResult:
     should_rerun: bool = False
     error_message: str | None = None
+    # True only when the write actually landed (not conflict/lock soft-fail).
+    saved: bool = False
 
 
 def load_app_data(
@@ -2345,7 +2877,7 @@ def persist_wells_update(
     try:
         session_state["wells_doc"] = save(updated)
         flash(session_state, success_message)
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=True)
     except VersionConflictError as exc:
         _try_reload(reload_data)
         flash(
@@ -2353,16 +2885,16 @@ def persist_wells_update(
             f"Данные уже изменились другим пользователем. Состояние перечитано: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except FileLockTimeoutError as exc:
         flash(
             session_state,
             f"Файл состояния сейчас занят другой операцией. Повторите действие: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except Exception as exc:
-        return PersistenceResult(error_message=str(exc))
+        return PersistenceResult(error_message=str(exc), saved=False)
 
 
 def persist_graph_positions_update(
@@ -2371,7 +2903,7 @@ def persist_graph_positions_update(
     save: Callable[[], FlowGraphDocument],
     reload_data: Callable[..., object],
     reset_position_edit_state: Callable[[], None],
-    success_message: str,
+    success_message: str | None,
 ) -> PersistenceResult:
     return persist_graph_document_update(
         session_state,
@@ -2388,14 +2920,15 @@ def persist_graph_document_update(
     save: Callable[[], FlowGraphDocument],
     reload_data: Callable[..., object],
     reset_state: Callable[[], None] | None = None,
-    success_message: str,
+    success_message: str | None,
 ) -> PersistenceResult:
     try:
         session_state["graph_doc"] = save()
         if reset_state is not None:
             reset_state()
-        flash(session_state, success_message)
-        return PersistenceResult(should_rerun=True)
+        if success_message:
+            flash(session_state, success_message)
+        return PersistenceResult(should_rerun=True, saved=True)
     except VersionConflictError as exc:
         _try_reload(reload_data)
         flash(
@@ -2403,16 +2936,16 @@ def persist_graph_document_update(
             f"Схема уже изменилась другим пользователем. Состояние перечитано: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except FileLockTimeoutError as exc:
         flash(
             session_state,
             f"Файл схемы сейчас занят другой операцией. Повторите действие: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except Exception as exc:
-        return PersistenceResult(error_message=str(exc))
+        return PersistenceResult(error_message=str(exc), saved=False)
 
 
 def _try_reload(reload_data: Callable[..., object]) -> None:
@@ -2509,13 +3042,14 @@ class WellAdminService:
         return edge
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/common/__init__.py	851
+===BEGIN_FILE===	src/pydiag/common/__init__.py	921
 """Cross-layer shared primitives."""
 
 from .auth_sessions import AuthSessionRecord, AuthSessionStore
 from .errors import FileLockTimeoutError, VersionConflictError
 from .graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceEdgeKind,
     GraphSourceNodeDraft,
@@ -2529,6 +3063,7 @@ __all__ = [
     "AuthSessionRecord",
     "AuthSessionStore",
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "FileLockTimeoutError",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
@@ -2603,7 +3138,7 @@ class FileLockTimeoutError(TimeoutError):
     """Raised when an exclusive state-file lock cannot be acquired in time."""
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/common/graph_source_admin.py	1853
+===BEGIN_FILE===	src/pydiag/common/graph_source_admin.py	2304
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -2620,6 +3155,7 @@ GraphSourceEdgeKind = Literal["default", "yes", "no", "dashed"]
 
 __all__ = [
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
     "GraphSourceNodeDraft",
@@ -2693,6 +3229,23 @@ class CreateGraphSourceEdgeCommand:
     label: str | None
     condition: str | None
     note: str | None
+    edge_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CreateGraphSourceNodeCommand:
+    title: str
+    kind: GraphSourceNodeKind
+    layout_x: float
+    layout_y: float
+    layout_w: int
+    layout_h: int
+    responsible: str | None = None
+    participants: tuple[str, ...] = ()
+    approvers: tuple[str, ...] = ()
+    duration: str | None = None
+    note: str | None = None
+    node_id: str | None = None
 
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/common/graph_versions.py	1101
@@ -3596,7 +4149,7 @@ def _serialize_record(record: AuthSessionRecord) -> dict[str, object]:
     }
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/editable_flow_graph.py	8248
+===BEGIN_FILE===	src/pydiag/infrastructure/editable_flow_graph.py	8721
 from __future__ import annotations
 
 from typing import Literal
@@ -3787,7 +4340,7 @@ def editable_flow_graph_to_runtime(
                     available_responsibles=available_responsibles,
                 ),
                 "time": node.duration,
-                "metadata": node.metadata,
+                "metadata": runtime_node_metadata(node),
             }
             for node in document.nodes
         ],
@@ -3804,6 +4357,16 @@ def editable_flow_graph_to_runtime(
         ],
     }
     return FlowGraphDocument.model_validate(runtime_payload, strict=True)
+
+
+def runtime_node_metadata(node: EditableFlowGraphNode) -> dict[str, MetaValue]:
+    """Copy metadata and attach canvas edit role/note fields (stripped on YAML write)."""
+    metadata = dict(node.metadata)
+    metadata["canvas_responsible"] = node.responsible or ""
+    metadata["canvas_participants"] = ",".join(node.participants)
+    metadata["canvas_approvers"] = ",".join(node.approvers)
+    metadata["canvas_note"] = node.note or ""
+    return metadata
 
 
 def runtime_node_responsibles(
@@ -5662,7 +6225,7 @@ def text_like_payload(item: dict[str, object]) -> dict[str, object]:
     return normalized
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/flow_source_graph.py	46438
+===BEGIN_FILE===	src/pydiag/infrastructure/flow_source_graph.py	52443
 from __future__ import annotations
 
 import json
@@ -5675,6 +6238,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
@@ -5699,7 +6263,16 @@ AUTO_LAYOUT_COLUMNS = 4
 AUTO_LAYOUT_HORIZONTAL_STEP = 420
 AUTO_LAYOUT_VERTICAL_STEP = 240
 FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
-    {"figma_source_id", "figma_parent_id", "figma_source_type"}
+    {
+        "figma_source_id",
+        "figma_parent_id",
+        "figma_source_type",
+        # Runtime-only canvas edit fields (not persisted to YAML).
+        "canvas_responsible",
+        "canvas_participants",
+        "canvas_approvers",
+        "canvas_note",
+    }
 )
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
     "process": (280, 72),
@@ -5759,6 +6332,8 @@ __all__ = [
     "is_flow_source_payload",
     "load_structured_payload",
     "create_flow_source_payload_edge",
+    "create_flow_source_payload_node",
+    "flow_source_has_directed_edge",
     "update_flow_source_payload_custom_layout",
     "update_flow_source_payload_edge",
     "update_flow_source_payload_layout",
@@ -6361,6 +6936,14 @@ def update_flow_source_payload_edge(
     if command.target not in document.nodes:
         raise ValueError(f"Unknown edge target node: {command.target}")
 
+    if flow_source_has_directed_edge(
+        document,
+        source=command.source,
+        target=command.target,
+        ignore_edge_id=command.edge_id,
+    ):
+        raise ValueError("Между этими карточками уже есть связь.")
+
     current_transition = updated.nodes[source_node_id].transitions[transition_index]
     replacement = current_transition.model_copy(
         update={
@@ -6400,20 +6983,26 @@ def create_flow_source_payload_edge(
         raise ValueError(f"Edge source node is deleted: {command.source}")
     if flow_source_node_deleted(document.nodes[command.target]):
         raise ValueError(f"Edge target node is deleted: {command.target}")
+    if flow_source_has_directed_edge(document, source=command.source, target=command.target):
+        raise ValueError("Между этими карточками уже есть связь.")
 
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
     used_edge_ids = collect_used_edge_ids(updated)
     transition_index = len(updated.nodes[command.source].transitions)
-    edge_id = unique_edge_id(
-        None,
-        source=command.source,
-        target=command.target,
-        kind=command.kind,
-        label=command.label,
-        index=transition_index,
-        used_ids=used_edge_ids,
-    )
+    preferred_id = command.edge_id if isinstance(command.edge_id, str) and command.edge_id else None
+    if preferred_id and preferred_id not in used_edge_ids:
+        edge_id = preferred_id
+    else:
+        edge_id = unique_edge_id(
+            None,
+            source=command.source,
+            target=command.target,
+            kind=command.kind,
+            label=command.label,
+            index=transition_index,
+            used_ids=used_edge_ids,
+        )
     updated.nodes[command.source].transitions.append(
         FlowSourceTransition(
             to=command.target,
@@ -6425,6 +7014,156 @@ def create_flow_source_payload_edge(
         )
     )
     return updated.model_dump(mode="json")
+
+
+def create_flow_source_payload_node(
+    payload: object,
+    *,
+    command: CreateGraphSourceNodeCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    title = " ".join(str(command.title or "").split()).strip()
+    if not title:
+        raise ValueError("Заголовок карточки обязателен.")
+    kind = command.kind
+    if kind not in DEFAULT_NODE_SIZES:
+        raise ValueError(f"Unsupported node kind: {kind}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    used_ids = set(updated.nodes)
+    preferred_id = command.node_id if isinstance(command.node_id, str) and command.node_id.strip() else None
+    if preferred_id and preferred_id not in used_ids:
+        node_id = preferred_id.strip()
+    elif preferred_id and preferred_id in used_ids and flow_source_node_deleted(updated.nodes[preferred_id]):
+        node_id = preferred_id.strip()
+    else:
+        node_id = unique_node_id(kind=kind, title=title, used_ids=used_ids)
+
+    layout_w = int(command.layout_w) if command.layout_w else DEFAULT_NODE_SIZES[kind][0]
+    layout_h = int(command.layout_h) if command.layout_h else DEFAULT_NODE_SIZES[kind][1]
+    layout_entry = FlowSourceLayoutEntry(
+        x=round(float(command.layout_x), 2),
+        y=round(float(command.layout_y), 2),
+        w=max(80, min(1200, layout_w)),
+        h=max(40, min(800, layout_h)),
+    )
+
+    responsible = resolve_create_node_responsible(
+        updated,
+        kind=kind,
+        responsible=command.responsible,
+    )
+
+    if node_id in updated.nodes:
+        current = updated.nodes[node_id]
+        if not flow_source_node_deleted(current):
+            raise ValueError(f"Node already exists: {node_id}")
+        updated.nodes[node_id] = current.model_copy(
+            update={
+                "title": title,
+                "kind": kind,
+                "responsible": responsible,
+                "participants": list(command.participants),
+                "approvers": list(command.approvers),
+                "duration": command.duration,
+                "note": command.note,
+                "deleted": False,
+                "transitions": [],
+                "metadata": {"manual_layout_size": True},
+            }
+        )
+    else:
+        updated.nodes[node_id] = FlowSourceNode(
+            title=title,
+            kind=kind,
+            responsible=responsible,
+            participants=list(command.participants),
+            approvers=list(command.approvers),
+            duration=command.duration,
+            note=command.note,
+            deleted=False,
+            transitions=[],
+            metadata={"manual_layout_size": True},
+        )
+    updated.layout[node_id] = layout_entry
+    return updated.model_dump(mode="json")
+
+
+def resolve_create_node_responsible(
+    document: FlowSourceDocument,
+    *,
+    kind: EditableNodeKind,
+    responsible: str | None,
+) -> str | None:
+    """Normalize create-node responsible; ensure «Не назначено» exists in catalog."""
+    raw = (responsible or "").strip()
+    if raw in {"", "none"}:
+        raw = ""
+    needs_unassigned = kind in {"process", "decision_diamond"} and (
+        not raw or raw == "unassigned"
+    )
+    if needs_unassigned:
+        ensure_unassigned_responsible(document)
+        return "unassigned"
+    if raw == "unassigned":
+        ensure_unassigned_responsible(document)
+        return "unassigned"
+    return responsible
+
+
+def ensure_unassigned_responsible(document: FlowSourceDocument) -> None:
+    if "unassigned" in document.responsibles:
+        return
+    document.responsibles["unassigned"] = FlowSourceResponsible(
+        label="Не назначено",
+        fill="#eef2f6",
+        border="#94a3b8",
+        text="#172033",
+    )
+
+
+def unique_node_id(*, kind: EditableNodeKind, title: str, used_ids: set[str]) -> str:
+    prefix = {
+        "process": "proc",
+        "decision_diamond": "dec",
+        "database": "db",
+        "input_data": "input",
+        "event": "event",
+    }.get(kind, "node")
+    slug = slugify(title) or "new"
+    base = f"{prefix}_{slug}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def flow_source_has_directed_edge(
+    document: FlowSourceDocument,
+    *,
+    source: str,
+    target: str,
+    ignore_edge_id: str | None = None,
+) -> bool:
+    """True if a non-deleted source node already has a transition to target."""
+    node = document.nodes.get(source)
+    if node is None or flow_source_node_deleted(node):
+        return False
+    for transition in node.transitions:
+        if transition.to != target:
+            continue
+        if ignore_edge_id is not None and transition.id == ignore_edge_id:
+            continue
+        return True
+    return False
 
 
 def dump_flow_source_payload(payload: object) -> str:
@@ -7273,7 +8012,7 @@ def _payloads_equal_ignoring_version(
     return current == imported
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/json_documents_gateway.py	7310
+===BEGIN_FILE===	src/pydiag/infrastructure/json_documents_gateway.py	7863
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -7301,6 +8040,7 @@ from .storage import (
     load_documents,
     preferred_graph_source_path,
     create_graph_source_edge_with_version_check,
+    create_graph_source_node_with_version_check,
     save_graph_source_edge_with_version_check,
     save_graph_source_node_with_version_check,
     save_graph_positions_with_version_check,
@@ -7345,6 +8085,9 @@ class JsonDocumentsGateway:
     )
     create_graph_source_edge_fn: Callable[..., FlowGraphDocument] = (
         create_graph_source_edge_with_version_check
+    )
+    create_graph_source_node_fn: Callable[..., FlowGraphDocument] = (
+        create_graph_source_node_with_version_check
     )
     save_wells_fn: Callable[..., WellsDocument] = save_wells_with_version_check
 
@@ -7460,6 +8203,19 @@ class JsonDocumentsGateway:
             path=self._graph_source_path(graph_version_id),
         )
 
+    def create_graph_source_node(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.create_graph_source_node_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
+        )
+
     def list_graph_versions(self) -> list[GraphVersionInfo]:
         return self.list_graph_versions_fn()
 
@@ -7484,7 +8240,7 @@ class JsonDocumentsGateway:
         return self.resolve_graph_version_path_fn(graph_version_id)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage.py	3107
+===BEGIN_FILE===	src/pydiag/infrastructure/storage.py	3207
 from __future__ import annotations
 
 from pydiag.common.errors import FileLockTimeoutError, VersionConflictError
@@ -7541,6 +8297,7 @@ from .storage_paths import (
 )
 from .storage_writes import (
     create_graph_source_edge_with_version_check,
+    create_graph_source_node_with_version_check,
     load_graph_source_edge_draft,
     load_graph_source_node_draft,
     save_graph_positions_with_version_check,
@@ -7589,6 +8346,7 @@ __all__ = [
     "release_file_lock",
     "resolve_graph_version_path",
     "create_graph_source_edge_with_version_check",
+    "create_graph_source_node_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",
@@ -8161,13 +8919,14 @@ def wells_path() -> Path:
     return WELLS_PATH
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/infrastructure/storage_writes.py	9639
+===BEGIN_FILE===	src/pydiag/infrastructure/storage_writes.py	10546
 from __future__ import annotations
 
 from pathlib import Path
 
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
 )
@@ -8185,6 +8944,7 @@ from .figma_import import (
 )
 from .flow_source_graph import (
     create_flow_source_payload_edge,
+    create_flow_source_payload_node,
     dump_flow_source_payload,
     editable_flow_graph_payload_from_source_payload,
     graph_source_edge_draft_from_payload,
@@ -8203,6 +8963,7 @@ from .storage_paths import graph_path, source_graph_path, wells_path
 
 __all__ = [
     "create_graph_source_edge_with_version_check",
+    "create_graph_source_node_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",
@@ -8404,6 +9165,28 @@ def create_graph_source_edge_with_version_check(
         return save_flow_source_payload(target, updated_payload)
 
 
+def create_graph_source_node_with_version_check(
+    command: CreateGraphSourceNodeCommand,
+    *,
+    expected_version: int,
+    path: str | Path,
+) -> FlowGraphDocument:
+    target = Path(path)
+    with json_file_lock(target):
+        payload = load_structured_payload(target.read_bytes())
+        if not is_flow_source_payload(payload):
+            raise ValueError(f"Graph source editing requires source YAML: {target}")
+        try:
+            updated_payload = create_flow_source_payload_node(
+                payload,
+                command=command,
+                expected_version=expected_version,
+            )
+        except RuntimeError as exc:
+            raise VersionConflictError(str(exc)) from exc
+        return save_flow_source_payload(target, updated_payload)
+
+
 def save_flow_source_payload(target: Path, payload: object) -> FlowGraphDocument:
     editable_payload = editable_flow_graph_payload_from_source_payload(payload)
     editable_document = EditableFlowGraphDocument.model_validate(
@@ -8452,7 +9235,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/admin.py	27093
+===BEGIN_FILE===	src/pydiag/presentation/admin.py	27444
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -9138,9 +9921,21 @@ def render_create_graph_source_edge_form(
 ) -> None:
     editable = actions.graph_source_edit_available()
     node_ids = [item.id for item in graph.nodes]
-    target_options = [node_id for node_id in node_ids if node_id != source_node.id]
+    existing_targets = {
+        edge.target for edge in graph.edges if edge.source == source_node.id
+    }
+    target_options = [
+        node_id
+        for node_id in node_ids
+        if node_id != source_node.id and node_id not in existing_targets
+    ]
     if not target_options:
-        st_module.caption("Нет других карточек для новой связи.")
+        st_module.caption(
+            "Нет других карточек для новой связи "
+            "(ко всем доступным уже есть связь из этой карточки)."
+            if existing_targets
+            else "Нет других карточек для новой связи."
+        )
         return
 
     node_map = node_by_id(graph)
@@ -10059,7 +10854,7 @@ def authenticate_user(st_module, username: str, password: str) -> AuthUser | Non
     return None
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/auth_session.py	7554
+===BEGIN_FILE===	src/pydiag/presentation/auth_session.py	7981
 from __future__ import annotations
 
 import json
@@ -10144,6 +10939,16 @@ def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
         "_flow_selection_rerun_requested",
         "_flow_responsible_filter_rerun_requested",
         "_flow_render_snapshot_cache",
+        "_flow_edit_undo",
+        "_flow_edit_redo",
+        "_flow_history_action_request_id",
+        "_flow_position_autosave_sig",
+        "_flow_skip_position_autosave_once",
+        "_flow_inspector_collapsed",
+        "_flow_canvas_pending_edge_request_id",
+        "_flow_canvas_pending_node_edit_request_id",
+        "_flow_canvas_pending_node_create_request_id",
+        "_flow_canvas_pending_edge_edit_request_id",
     ):
         session_state.pop(key, None)
     for key in list(session_state):
@@ -11385,7 +12190,7 @@ def details_grid_html(items: list[tuple[str, str]]) -> str:
     return f'<div class="mini-kv">{cells}</div>'
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime.py	14305
+===BEGIN_FILE===	src/pydiag/presentation/runtime.py	21847
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -11394,12 +12199,26 @@ from typing import Any
 
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     FLOW_CANVAS_COMPONENT_KEY,
     DocumentsGateway,
+    UpdateGraphSourceEdgeCommand,
+    consume_history_action,
     consume_pending_canvas_edge,
+    consume_pending_canvas_edge_edit,
+    consume_pending_canvas_node_create,
+    consume_pending_canvas_node_edit,
+    detect_canvas_position_autosave,
 )
 from pydiag.application import (
     render_flow as render_flow_view,
+)
+from pydiag.application.edit_history import can_redo, can_undo
+from pydiag.application.flow_position_edit import graph_node_positions
+from pydiag.application.flow_view import (
+    sync_component_positions,
+    take_skip_position_autosave_once,
+    resolve_inspector_collapsed,
 )
 from pydiag.common.auth_sessions import AuthSessionStore
 from pydiag.domain.models import FlowGraphDocument, FlowNode, WellsDocument
@@ -11647,6 +12466,7 @@ class StreamlitAppRuntime:
         *,
         position_edit_enabled: bool = False,
         edge_edit_enabled: bool = False,
+        node_edit_enabled: bool = False,
         render_canvas: Callable[..., object] | None = None,
     ) -> str | None:
         return render_flow_view(
@@ -11659,6 +12479,9 @@ class StreamlitAppRuntime:
             layout_mode=layout_mode,
             position_edit_enabled=position_edit_enabled,
             edge_edit_enabled=edge_edit_enabled,
+            node_edit_enabled=node_edit_enabled,
+            can_undo=can_undo(self.session.session_state),
+            can_redo=can_redo(self.session.session_state),
             render_canvas=render_canvas or self.render_canvas,
             component_key=FLOW_CANVAS_COMPONENT_KEY,
         )
@@ -11691,6 +12514,159 @@ class StreamlitAppRuntime:
                 condition=None,
                 note=None,
             ),
+            quiet=True,
+            record_history=True,
+        )
+
+    def _consume_pending_canvas_node_edit(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+    ) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_edit(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование карточек доступно только администратору.")
+            return
+        session.apply_canvas_node_edit(graph, wells, pending, quiet=True, record_history=True)
+
+    def _consume_pending_canvas_node_create(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_create(
+            session.session_state,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Добавление карточек доступно только администратору.")
+            return
+        # New process/decision cards start as «Не назначено».
+        default_responsible = (
+            "unassigned"
+            if pending["kind"] in {"process", "decision_diamond"}
+            else None
+        )
+        session.create_graph_source_node(
+            graph,
+            CreateGraphSourceNodeCommand(
+                title=pending["title"],
+                kind=pending["kind"],  # type: ignore[arg-type]
+                layout_x=pending["layout_x"],
+                layout_y=pending["layout_y"],
+                layout_w=pending["layout_w"],
+                layout_h=pending["layout_h"],
+                responsible=default_responsible,
+            ),
+            quiet=True,
+            record_history=True,
+        )
+
+    def _consume_pending_canvas_edge_edit(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_edge_edit(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование связей доступно только администратору.")
+            return
+        try:
+            draft = session.load_graph_source_edge(pending["edge_id"])
+        except Exception as exc:
+            self.st_module.error(f"Не удалось загрузить связь: {exc}")
+            return
+        kind = pending.get("kind", draft.kind)
+        if kind not in {"default", "yes", "no", "dashed"}:
+            kind = draft.kind
+        from pydiag.presentation.runtime_session import edge_snapshot_from_draft
+
+        before = edge_snapshot_from_draft(draft)
+        session.save_graph_source_edge(
+            graph,
+            UpdateGraphSourceEdgeCommand(
+                edge_id=draft.edge_id,
+                source=draft.source,
+                target=draft.target,
+                kind=kind,  # type: ignore[arg-type]
+                label=draft.label,
+                condition=draft.condition,
+                note=draft.note,
+                deleted=True if pending.get("deleted") is True else None,
+            ),
+            quiet=True,
+            record_history=True,
+            before_snapshot=before,
+        )
+
+    def _consume_history_action(self, graph: FlowGraphDocument) -> None:
+        action = consume_history_action(
+            self.session.session_state,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if action == "undo":
+            self.session.undo_edit(graph)
+        elif action == "redo":
+            self.session.redo_edit(graph)
+
+    def _autosave_canvas_positions(
+        self,
+        graph: FlowGraphDocument,
+        *,
+        position_edit_enabled: bool,
+    ) -> None:
+        if not position_edit_enabled or not self.session.position_edit_available():
+            return
+        if not self.auth_context().current_user_is_admin():
+            return
+        # After undo/redo of moves, FE may still hold pre-undo positions in
+        # component state. Skip one autosave and resync so redo stack survives.
+        if take_skip_position_autosave_once(self.session.session_state):
+            sync_component_positions(
+                self.session.session_state,
+                graph_node_positions(graph),
+                component_key=FLOW_CANVAS_COMPONENT_KEY,
+            )
+            return
+        positions = detect_canvas_position_autosave(
+            self.session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if positions is None:
+            return
+        self.session.save_graph_positions(
+            graph,
+            positions,
+            quiet=True,
+            record_history=True,
         )
 
     def run(self) -> None:
@@ -11716,17 +12692,34 @@ class StreamlitAppRuntime:
         # fragment widgets into containers owned by the outer script run.
         @self.st_module.fragment
         def render_workspace_fragment() -> None:
-            diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
+            # Re-load inside the fragment so quiet fragment-scoped reruns after
+            # canvas edits see the persisted graph without a full-app remount.
+            graph, wells = session.load_app_data()
+            inspector_collapsed = resolve_inspector_collapsed(session.session_state)
+            if inspector_collapsed:
+                diagram_col = self.st_module.container()
+                side_col = None
+            else:
+                diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
             try:
                 with diagram_col:
                     edge_edit_enabled = (
                         self.auth_context().current_user_is_admin()
                         and session.graph_source_edit_available()
                     )
-                    # Clear pending_edge in session_state BEFORE the canvas
-                    # widget is instantiated — Streamlit forbids mutating
-                    # st.session_state[widget_key] after that point.
+                    node_edit_enabled = edge_edit_enabled
+                    # Mutate widget session_state BEFORE the canvas is mounted.
+                    self._consume_history_action(graph)
                     self._consume_pending_canvas_edge(graph)
+                    self._consume_pending_canvas_node_create(graph)
+                    self._consume_pending_canvas_node_edit(graph, wells)
+                    self._consume_pending_canvas_edge_edit(graph)
+                    self._autosave_canvas_positions(
+                        graph,
+                        position_edit_enabled=position_edit_enabled,
+                    )
+                    # Persist may have refreshed session docs; use the latest.
+                    graph, wells = session.load_app_data()
                     selected_id = self._render_flow(
                         graph,
                         wells,
@@ -11736,6 +12729,7 @@ class StreamlitAppRuntime:
                         layout_mode=layout_mode,
                         position_edit_enabled=position_edit_enabled,
                         edge_edit_enabled=edge_edit_enabled,
+                        node_edit_enabled=node_edit_enabled,
                     )
             except Exception as exc:
                 self.st_module.error(f"Ошибка отрисовки схемы: {exc}")
@@ -11746,18 +12740,19 @@ class StreamlitAppRuntime:
             if not isinstance(selected_id, str) or not selected_id:
                 selected_id = None
 
-            try:
-                with side_col:
-                    with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
-                        self._render_inspector(
-                            graph,
-                            wells,
-                            selected_id,
-                            layout_mode=layout_mode,
-                            position_edit_enabled=position_edit_enabled,
-                        )
-            except Exception as exc:
-                self.st_module.error(f"Ошибка панели инспектора: {exc}")
+            if side_col is not None:
+                try:
+                    with side_col:
+                        with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
+                            self._render_inspector(
+                                graph,
+                                wells,
+                                selected_id,
+                                layout_mode=layout_mode,
+                                position_edit_enabled=position_edit_enabled,
+                            )
+                except Exception as exc:
+                    self.st_module.error(f"Ошибка панели инспектора: {exc}")
 
             # Sidebar save/enable flags live outside this fragment.
             if session.consume_position_edit_rerun_request():
@@ -11766,7 +12761,7 @@ class StreamlitAppRuntime:
         render_workspace_fragment()
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	15236
+===BEGIN_FILE===	src/pydiag/presentation/runtime_session.py	40924
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -11775,6 +12770,7 @@ from typing import Any
 
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     DocumentsGateway,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
     GraphSourceEdgeDraft,
@@ -11788,6 +12784,22 @@ from pydiag.application import (
     position_edit_positions_from_state,
     reset_position_edit_state,
 )
+from pydiag.application.edit_history import (
+    can_redo,
+    can_undo,
+    pop_redo,
+    pop_undo,
+    push_create_edge_command,
+    push_create_node_command,
+    push_delete_edge_command,
+    push_delete_node_command,
+    push_move_nodes_command,
+    push_onto_undo_from_redo,
+    push_onto_undo_keep_redo,
+    push_update_edge_command,
+    push_update_node_command,
+)
+from pydiag.application.flow_position_edit import graph_node_positions
 from pydiag.application import (
     flash as store_flash,
 )
@@ -11810,6 +12822,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
 LOADED_GRAPH_VERSION_KEY = "loaded_graph_version_id"
 POSITION_EDIT_RERUN_REQUEST_KEY = "_position_edit_rerun_requested"
+POSITION_AUTOSAVE_SIG_KEY = "_flow_position_autosave_sig"
 
 
 @dataclass(frozen=True)
@@ -12018,13 +13031,21 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         positions: dict[str, tuple[float, float]],
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> bool:
         if not self.position_edit_available():
             self.st_module.error(
                 self.position_edit_block_reason()
                 or "Редактирование расположения сейчас недоступно."
             )
-            return
+            return False
+
+        before = graph_node_positions(graph)
+        sig = _positions_signature(positions)
+        if self.session_state.get(POSITION_AUTOSAVE_SIG_KEY) == sig:
+            return False
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.save_graph_positions(
@@ -12040,9 +13061,22 @@ class StreamlitSessionCoordinator:
             reset_position_edit_state=lambda: reset_position_edit_state(
                 self.session_state
             ),
-            success_message="Расположение карточек сохранено",
+            success_message=None if quiet else "Расположение карточек сохранено",
         )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        if result.saved:
+            self.session_state[POSITION_AUTOSAVE_SIG_KEY] = sig
+            if record_history:
+                push_move_nodes_command(
+                    self.session_state,
+                    before=before,
+                    after=positions,
+                )
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return result.saved
 
     def load_graph_source_node(self, node_id: str) -> GraphSourceNodeDraft:
         return self.documents_gateway.load_graph_source_node(
@@ -12060,13 +13094,17 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         command: UpdateGraphSourceNodeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = False,
+        before_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return False
 
         result = persist_graph_document_update(
             self.session_state,
@@ -12077,24 +13115,188 @@ class StreamlitSessionCoordinator:
             ),
             reload_data=self.load_app_data,
             success_message=(
-                "Карточка схемы удалена"
-                if command.deleted is True
-                else "Карточка схемы обновлена"
+                None
+                if quiet
+                else (
+                    "Карточка схемы удалена"
+                    if command.deleted is True
+                    else "Карточка схемы обновлена"
+                )
             ),
         )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        if record_history and result.saved and before_snapshot is not None:
+            if command.deleted is True:
+                push_delete_node_command(
+                    self.session_state,
+                    node_id=command.node_id,
+                    before=before_snapshot,
+                )
+            else:
+                push_update_node_command(
+                    self.session_state,
+                    node_id=command.node_id,
+                    before=before_snapshot,
+                    after=node_snapshot_from_command(command),
+                )
+        if command.deleted is True and self.session_state.get("selected_id") == command.node_id:
+            self.session_state.pop("selected_id", None)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return result.saved
+
+    def apply_canvas_node_edit(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        patch: dict[str, Any],
+        *,
+        quiet: bool = True,
+        record_history: bool = True,
+    ) -> bool:
+        from pydiag.presentation.admin import validate_graph_source_node_form
+        from pydiag.presentation.admin_models import (
+            graph_source_node_delete_block_reason,
+            normalized_optional_text,
+        )
+
+        node_id = patch.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            return False
+        try:
+            draft = self.load_graph_source_node(node_id)
+        except Exception as exc:
+            self.st_module.error(str(exc))
+            return False
+
+        before = node_snapshot_from_draft(draft)
+        if patch.get("deleted") is True:
+            block = graph_source_node_delete_block_reason(node_id, wells)
+            if block is not None:
+                self.st_module.error(block)
+                return False
+            return self.save_graph_source_node(
+                graph,
+                UpdateGraphSourceNodeCommand(
+                    node_id=draft.node_id,
+                    title=draft.title,
+                    kind=draft.kind,
+                    layout_x=draft.layout_x,
+                    layout_y=draft.layout_y,
+                    layout_w=draft.layout_w,
+                    layout_h=draft.layout_h,
+                    responsible=draft.responsible,
+                    participants=draft.participants,
+                    approvers=draft.approvers,
+                    duration=draft.duration,
+                    note=draft.note,
+                    deleted=True,
+                ),
+                quiet=quiet,
+                record_history=record_history,
+                before_snapshot=before,
+            )
+
+        title = patch["title"] if "title" in patch else draft.title
+        kind = patch["kind"] if "kind" in patch else draft.kind
+        responsible = patch["responsible"] if "responsible" in patch else draft.responsible
+        participants = (
+            tuple(patch["participants"])
+            if "participants" in patch
+            else draft.participants
+        )
+        approvers = (
+            tuple(patch["approvers"]) if "approvers" in patch else draft.approvers
+        )
+        if "duration" in patch:
+            duration = normalized_optional_text(str(patch["duration"] or ""))
+        else:
+            duration = draft.duration
+        if "note" in patch:
+            note = normalized_optional_text(str(patch["note"] or ""))
+        else:
+            note = draft.note
+
+        if not isinstance(title, str):
+            return False
+        if kind not in {
+            "process",
+            "decision_diamond",
+            "database",
+            "input_data",
+            "event",
+        }:
+            return False
+
+        # Responsible wins; participants win over approvers (same as canvas UI).
+        participants = tuple(
+            item for item in participants if item and item != responsible
+        )
+        approvers = tuple(
+            item
+            for item in approvers
+            if item and item != responsible and item not in participants
+        )
+
+        error_message = validate_graph_source_node_form(
+            title=title,
+            kind=kind,
+            responsible=responsible,
+            participants=list(participants),
+            approvers=list(approvers),
+        )
+        if error_message is not None:
+            self.st_module.error(error_message)
+            return False
+
+        if duration is not None:
+            try:
+                from pydiag.domain.models import parse_node_time
+
+                parse_node_time(duration)
+            except ValueError as exc:
+                self.st_module.error(str(exc))
+                return False
+
+        return self.save_graph_source_node(
+            graph,
+            UpdateGraphSourceNodeCommand(
+                node_id=draft.node_id,
+                title=title.strip(),
+                kind=kind,  # type: ignore[arg-type]
+                layout_x=draft.layout_x,
+                layout_y=draft.layout_y,
+                layout_w=draft.layout_w,
+                layout_h=draft.layout_h,
+                responsible=responsible,
+                participants=tuple(participants),
+                approvers=tuple(approvers),
+                duration=duration,
+                note=note,
+                deleted=None,
+            ),
+            quiet=quiet,
+            record_history=record_history,
+            before_snapshot=before,
+        )
 
     def save_graph_source_edge(
         self,
         graph: FlowGraphDocument,
         command: UpdateGraphSourceEdgeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = False,
+        before_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return False
 
         result = persist_graph_document_update(
             self.session_state,
@@ -12105,38 +13307,357 @@ class StreamlitSessionCoordinator:
             ),
             reload_data=self.load_app_data,
             success_message=(
-                "Связь схемы удалена"
-                if command.deleted is True
-                else "Связь схемы обновлена"
+                None
+                if quiet
+                else (
+                    "Связь схемы удалена"
+                    if command.deleted is True
+                    else "Связь схемы обновлена"
+                )
             ),
         )
+        if record_history and result.saved and before_snapshot is not None:
+            if command.deleted is True:
+                push_delete_edge_command(
+                    self.session_state,
+                    edge_id=command.edge_id,
+                    before=before_snapshot,
+                )
+            else:
+                push_update_edge_command(
+                    self.session_state,
+                    edge_id=command.edge_id,
+                    before=before_snapshot,
+                    after=edge_snapshot_from_command(command),
+                )
         if command.deleted is True and self.session_state.get("selected_id") == command.edge_id:
             self.session_state.pop("selected_id", None)
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return result.saved
 
     def create_graph_source_edge(
         self,
         graph: FlowGraphDocument,
         command: CreateGraphSourceEdgeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> str | None:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return None
 
-        result = persist_graph_document_update(
-            self.session_state,
-            save=lambda: self.documents_gateway.create_graph_source_edge(
+        before_ids = {edge.id for edge in graph.edges}
+        created_edge_id: str | None = None
+
+        def save() -> FlowGraphDocument:
+            nonlocal created_edge_id
+            updated = self.documents_gateway.create_graph_source_edge(
                 command,
                 expected_version=graph.version,
                 graph_version_id=self.editable_graph_version_id(),
-            ),
+            )
+            new_ids = {edge.id for edge in updated.edges} - before_ids
+            if command.edge_id and command.edge_id in {edge.id for edge in updated.edges}:
+                created_edge_id = command.edge_id
+            elif len(new_ids) == 1:
+                created_edge_id = next(iter(new_ids))
+            elif new_ids:
+                # Prefer an edge matching source/target.
+                for edge in updated.edges:
+                    if edge.id in new_ids and edge.source == command.source and edge.target == command.target:
+                        created_edge_id = edge.id
+                        break
+                if created_edge_id is None:
+                    created_edge_id = sorted(new_ids)[0]
+            return updated
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
             reload_data=self.load_app_data,
-            success_message="Связь схемы создана",
+            success_message=None if quiet else "Связь схемы создана",
         )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        if result.saved and record_history and created_edge_id:
+            push_create_edge_command(
+                self.session_state,
+                edge_id=created_edge_id,
+                source=command.source,
+                target=command.target,
+                kind=command.kind,
+                label=command.label,
+                condition=command.condition,
+                note=command.note,
+            )
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return created_edge_id if result.saved else None
+
+    def create_graph_source_node(
+        self,
+        graph: FlowGraphDocument,
+        command: CreateGraphSourceNodeCommand,
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> str | None:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return None
+
+        before_ids = {node.id for node in graph.nodes}
+        created_node_id: str | None = None
+
+        def save() -> FlowGraphDocument:
+            nonlocal created_node_id
+            updated = self.documents_gateway.create_graph_source_node(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            )
+            new_ids = {node.id for node in updated.nodes} - before_ids
+            if command.node_id and command.node_id in {node.id for node in updated.nodes}:
+                created_node_id = command.node_id
+            elif len(new_ids) == 1:
+                created_node_id = next(iter(new_ids))
+            elif new_ids:
+                title = command.title.strip()
+                for node in updated.nodes:
+                    if node.id in new_ids and node.title == title:
+                        created_node_id = node.id
+                        break
+                if created_node_id is None:
+                    created_node_id = sorted(new_ids)[0]
+            return updated
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
+            reload_data=self.load_app_data,
+            success_message=None if quiet else "Карточка схемы создана",
+        )
+        if result.saved and record_history and created_node_id:
+            push_create_node_command(
+                self.session_state,
+                node_id=created_node_id,
+                after=node_snapshot_from_create_command(command),
+            )
+            self.session_state["selected_id"] = created_node_id
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return created_node_id if result.saved else None
+
+    def can_undo_edit(self) -> bool:
+        return can_undo(self.session_state)
+
+    def can_redo_edit(self) -> bool:
+        return can_redo(self.session_state)
+
+    def undo_edit(self, graph: FlowGraphDocument) -> None:
+        command = pop_undo(self.session_state)
+        if command is None:
+            return
+        # Park on redo before persist+rerun so the stack survives RerunException.
+        push_onto_undo_keep_redo(self.session_state, command)
+        ok = self._apply_history_command(graph, command, reverse=True)
+        if not ok:
+            restored = pop_redo(self.session_state)
+            if restored is not None:
+                undo_stack = list(self.session_state.get("_flow_edit_undo") or [])
+                undo_stack.append(restored)
+                self.session_state["_flow_edit_undo"] = undo_stack
+
+    def redo_edit(self, graph: FlowGraphDocument) -> None:
+        command = pop_redo(self.session_state)
+        if command is None:
+            return
+        push_onto_undo_from_redo(self.session_state, command)
+        ok = self._apply_history_command(graph, command, reverse=False)
+        if not ok:
+            restored = pop_undo(self.session_state)
+            if restored is not None:
+                redo_stack = list(self.session_state.get("_flow_edit_redo") or [])
+                redo_stack.append(restored)
+                self.session_state["_flow_edit_redo"] = redo_stack
+
+    def _apply_history_command(
+        self,
+        graph: FlowGraphDocument,
+        command: dict[str, Any],
+        *,
+        reverse: bool,
+    ) -> bool:
+        kind = command.get("kind")
+        if kind == "move_nodes":
+            payload = command.get("before" if reverse else "after")
+            if not isinstance(payload, dict):
+                return False
+            current = graph_node_positions(graph)
+            for node_id, xy in payload.items():
+                if not isinstance(xy, list | tuple) or len(xy) != 2:
+                    continue
+                current[str(node_id)] = (float(xy[0]), float(xy[1]))
+            # Clear autosave sig so undo/redo positions always write.
+            self.session_state.pop(POSITION_AUTOSAVE_SIG_KEY, None)
+            # Neutralize stale FE positions before persist+rerun; otherwise the
+            # next fragment run re-autosaves the pre-undo layout and wipes redo.
+            from pydiag.application.flow_view import (
+                SKIP_POSITION_AUTOSAVE_ONCE_KEY,
+                sync_component_positions,
+            )
+
+            self.session_state[SKIP_POSITION_AUTOSAVE_ONCE_KEY] = True
+            sync_component_positions(self.session_state, current)
+            return self.save_graph_positions(
+                graph,
+                current,
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "create_edge":
+            edge_id = command.get("edge_id")
+            source = command.get("source")
+            target = command.get("target")
+            edge_kind = command.get("kind_value", "default")
+            if not isinstance(edge_id, str) or not isinstance(source, str) or not isinstance(target, str):
+                return False
+            if reverse:
+                return self.save_graph_source_edge(
+                    graph,
+                    UpdateGraphSourceEdgeCommand(
+                        edge_id=edge_id,
+                        source=source,
+                        target=target,
+                        kind=edge_kind,  # type: ignore[arg-type]
+                        label=command.get("label"),
+                        condition=command.get("condition"),
+                        note=command.get("note"),
+                        deleted=True,
+                    ),
+                    quiet=True,
+                    record_history=False,
+                )
+            created = self.create_graph_source_edge(
+                graph,
+                CreateGraphSourceEdgeCommand(
+                    source=source,
+                    target=target,
+                    kind=edge_kind,  # type: ignore[arg-type]
+                    label=command.get("label"),
+                    condition=command.get("condition"),
+                    note=command.get("note"),
+                    edge_id=edge_id,
+                ),
+                quiet=True,
+                record_history=False,
+            )
+            return created is not None
+        if kind == "create_node":
+            node_id = command.get("node_id")
+            after = command.get("after")
+            if not isinstance(node_id, str) or not isinstance(after, dict):
+                return False
+            if reverse:
+                return self.save_graph_source_node(
+                    graph,
+                    update_command_from_node_snapshot(node_id, after, deleted=True),
+                    quiet=True,
+                    record_history=False,
+                )
+            created = self.create_graph_source_node(
+                graph,
+                create_command_from_node_snapshot(node_id, after),
+                quiet=True,
+                record_history=False,
+            )
+            return created is not None
+        if kind == "update_node":
+            payload = command.get("before" if reverse else "after")
+            node_id = command.get("node_id")
+            if not isinstance(node_id, str) or not isinstance(payload, dict):
+                return False
+            return self.save_graph_source_node(
+                graph,
+                update_command_from_node_snapshot(node_id, payload, deleted=None),
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "delete_node":
+            node_id = command.get("node_id")
+            before = command.get("before")
+            if not isinstance(node_id, str) or not isinstance(before, dict):
+                return False
+            if reverse:
+                return self.save_graph_source_node(
+                    graph,
+                    update_command_from_node_snapshot(node_id, before, deleted=False),
+                    quiet=True,
+                    record_history=False,
+                )
+            return self.save_graph_source_node(
+                graph,
+                update_command_from_node_snapshot(node_id, before, deleted=True),
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "update_edge":
+            payload = command.get("before" if reverse else "after")
+            edge_id = command.get("edge_id")
+            if not isinstance(edge_id, str) or not isinstance(payload, dict):
+                return False
+            return self.save_graph_source_edge(
+                graph,
+                update_command_from_edge_snapshot(edge_id, payload, deleted=None),
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "delete_edge":
+            edge_id = command.get("edge_id")
+            before = command.get("before")
+            if not isinstance(edge_id, str) or not isinstance(before, dict):
+                return False
+            if reverse:
+                kind_value = before.get("kind") or "default"
+                if kind_value not in {"default", "yes", "no", "dashed"}:
+                    kind_value = "default"
+                created = self.create_graph_source_edge(
+                    graph,
+                    CreateGraphSourceEdgeCommand(
+                        source=str(before.get("source") or ""),
+                        target=str(before.get("target") or ""),
+                        kind=kind_value,  # type: ignore[arg-type]
+                        label=before.get("label"),
+                        condition=before.get("condition"),
+                        note=before.get("note"),
+                        edge_id=edge_id,
+                    ),
+                    quiet=True,
+                    record_history=False,
+                )
+                return created is not None
+            return self.save_graph_source_edge(
+                graph,
+                update_command_from_edge_snapshot(edge_id, before, deleted=True),
+                quiet=True,
+                record_history=False,
+            )
+        return False
 
     def working_schema_selected(self) -> bool:
         """True for any selectable schema: live «Текущая» or any archived ``v000x``.
@@ -12168,13 +13689,23 @@ class StreamlitSessionCoordinator:
         return None
 
     def finalize_persistence(
-        self, should_rerun: bool, error_message: str | None
+        self,
+        should_rerun: bool,
+        error_message: str | None,
+        *,
+        scope: str = "app",
     ) -> None:
         if error_message is not None:
             self.st_module.error(error_message)
             return
         if should_rerun:
-            self.st_module.rerun()
+            # Canvas quiet edits run inside a fragment: app-scoped rerun remounts
+            # the whole page and feels like the view/selection "falls apart".
+            rerun_scope = "fragment" if scope == "fragment" else "app"
+            try:
+                self.st_module.rerun(scope=rerun_scope)
+            except TypeError:
+                self.st_module.rerun()
 
     def _set_selected_graph_version(self, version_id: str | None) -> None:
         if version_id is None:
@@ -12192,6 +13723,161 @@ class StreamlitSessionCoordinator:
             f"Предыдущая версия сохранена как {result.backup_version.label}"
         )
 
+
+def _positions_signature(positions: dict[str, tuple[float, float]]) -> tuple[tuple[str, float, float], ...]:
+    return tuple(
+        sorted(
+            (node_id, round(float(xy[0]), 2), round(float(xy[1]), 2))
+            for node_id, xy in positions.items()
+        )
+    )
+
+
+def node_snapshot_from_draft(draft: GraphSourceNodeDraft) -> dict[str, Any]:
+    return {
+        "title": draft.title,
+        "kind": draft.kind,
+        "layout_x": draft.layout_x,
+        "layout_y": draft.layout_y,
+        "layout_w": draft.layout_w,
+        "layout_h": draft.layout_h,
+        "responsible": draft.responsible,
+        "participants": list(draft.participants),
+        "approvers": list(draft.approvers),
+        "duration": draft.duration,
+        "note": draft.note,
+    }
+
+
+def node_snapshot_from_command(command: UpdateGraphSourceNodeCommand) -> dict[str, Any]:
+    return {
+        "title": command.title,
+        "kind": command.kind,
+        "layout_x": command.layout_x,
+        "layout_y": command.layout_y,
+        "layout_w": command.layout_w,
+        "layout_h": command.layout_h,
+        "responsible": command.responsible,
+        "participants": list(command.participants),
+        "approvers": list(command.approvers),
+        "duration": command.duration,
+        "note": command.note,
+    }
+
+
+def node_snapshot_from_create_command(command: CreateGraphSourceNodeCommand) -> dict[str, Any]:
+    return {
+        "title": command.title,
+        "kind": command.kind,
+        "layout_x": command.layout_x,
+        "layout_y": command.layout_y,
+        "layout_w": command.layout_w,
+        "layout_h": command.layout_h,
+        "responsible": command.responsible,
+        "participants": list(command.participants),
+        "approvers": list(command.approvers),
+        "duration": command.duration,
+        "note": command.note,
+    }
+
+
+def edge_snapshot_from_draft(draft: GraphSourceEdgeDraft) -> dict[str, Any]:
+    return {
+        "source": draft.source,
+        "target": draft.target,
+        "kind": draft.kind,
+        "label": draft.label,
+        "condition": draft.condition,
+        "note": draft.note,
+    }
+
+
+def edge_snapshot_from_command(command: UpdateGraphSourceEdgeCommand) -> dict[str, Any]:
+    return {
+        "source": command.source,
+        "target": command.target,
+        "kind": command.kind,
+        "label": command.label,
+        "condition": command.condition,
+        "note": command.note,
+    }
+
+
+def update_command_from_node_snapshot(
+    node_id: str,
+    snapshot: dict[str, Any],
+    *,
+    deleted: bool | None,
+) -> UpdateGraphSourceNodeCommand:
+    participants = snapshot.get("participants") or []
+    approvers = snapshot.get("approvers") or []
+    return UpdateGraphSourceNodeCommand(
+        node_id=node_id,
+        title=str(snapshot.get("title") or ""),
+        kind=snapshot.get("kind") or "process",  # type: ignore[arg-type]
+        layout_x=float(snapshot.get("layout_x") or 0),
+        layout_y=float(snapshot.get("layout_y") or 0),
+        layout_w=int(snapshot.get("layout_w") or 280),
+        layout_h=int(snapshot.get("layout_h") or 72),
+        responsible=snapshot.get("responsible"),
+        participants=tuple(participants) if isinstance(participants, list) else (),
+        approvers=tuple(approvers) if isinstance(approvers, list) else (),
+        duration=snapshot.get("duration"),
+        note=snapshot.get("note"),
+        deleted=deleted,
+    )
+
+
+def create_command_from_node_snapshot(
+    node_id: str,
+    snapshot: dict[str, Any],
+) -> CreateGraphSourceNodeCommand:
+    participants = snapshot.get("participants") or []
+    approvers = snapshot.get("approvers") or []
+    kind = snapshot.get("kind") or "process"
+    if kind not in {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }:
+        kind = "process"
+    return CreateGraphSourceNodeCommand(
+        node_id=node_id,
+        title=str(snapshot.get("title") or "Измени меня"),
+        kind=kind,  # type: ignore[arg-type]
+        layout_x=float(snapshot.get("layout_x") or 0),
+        layout_y=float(snapshot.get("layout_y") or 0),
+        layout_w=int(snapshot.get("layout_w") or 280),
+        layout_h=int(snapshot.get("layout_h") or 72),
+        responsible=snapshot.get("responsible"),
+        participants=tuple(participants) if isinstance(participants, list) else (),
+        approvers=tuple(approvers) if isinstance(approvers, list) else (),
+        duration=snapshot.get("duration"),
+        note=snapshot.get("note"),
+    )
+
+
+def update_command_from_edge_snapshot(
+    edge_id: str,
+    snapshot: dict[str, Any],
+    *,
+    deleted: bool | None,
+) -> UpdateGraphSourceEdgeCommand:
+    kind = snapshot.get("kind") or "default"
+    if kind not in {"default", "yes", "no", "dashed"}:
+        kind = "default"
+    return UpdateGraphSourceEdgeCommand(
+        edge_id=edge_id,
+        source=str(snapshot.get("source") or ""),
+        target=str(snapshot.get("target") or ""),
+        kind=kind,  # type: ignore[arg-type]
+        label=snapshot.get("label"),
+        condition=snapshot.get("condition"),
+        note=snapshot.get("note"),
+        deleted=deleted,
+    )
 ===END_FILE===
 ===BEGIN_FILE===	src/pydiag/presentation/selection.py	1200
 from __future__ import annotations
@@ -12236,7 +13922,7 @@ def resolve_selection(
     return "none", None
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/presentation/sidebar.py	12326
+===BEGIN_FILE===	src/pydiag/presentation/sidebar.py	12032
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -12601,17 +14287,7 @@ def render_layout_section(
         save_positions_enabled=save_positions_enabled,
     )
     if position_edit_state.enabled:
-        col_a, col_b = st_module.columns(2)
-        with col_a:
-            if st_module.button(
-                "Сохранить",
-                width="stretch",
-                disabled=position_edit_state.save_disabled,
-            ):
-                save_positions()
-        with col_b:
-            if st_module.button("Сбросить", width="stretch"):
-                reset_positions()
+        st_module.caption("Перетащите карточки на схеме — положение сохраняется сразу.")
     return position_edit_state.enabled
 
 ===END_FILE===
@@ -12658,7 +14334,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/__init__.py	2290
+===BEGIN_FILE===	src/pydiag/rendering/__init__.py	2900
 """Rendering layer public API."""
 
 from __future__ import annotations
@@ -12684,9 +14360,25 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_streamlit_nodes",
         "build_streamlit_nodes",
     ),
+    "component_history_action_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_history_action_from_state",
+    ),
     "component_pending_edge_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_edge_from_state",
+    ),
+    "component_pending_node_edit_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_node_edit_from_state",
+    ),
+    "component_pending_node_create_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_node_create_from_state",
+    ),
+    "component_pending_edge_edit_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_edge_edit_from_state",
     ),
     "component_positions_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
@@ -12783,12 +14475,16 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_adapter.py	578
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_adapter.py	936
 from __future__ import annotations
 
 from .flow_canvas_payload import build_flow_canvas_payload
 from .flow_canvas_state import (
+    component_history_action_from_state,
+    component_pending_edge_edit_from_state,
     component_pending_edge_from_state,
+    component_pending_node_create_from_state,
+    component_pending_node_edit_from_state,
     component_positions_from_state,
     component_responsible_filter_from_state,
     component_selected_id_from_state,
@@ -12797,7 +14493,11 @@ from .flow_canvas_state import (
 
 __all__ = [
     "build_flow_canvas_payload",
+    "component_history_action_from_state",
+    "component_pending_edge_edit_from_state",
     "component_pending_edge_from_state",
+    "component_pending_node_create_from_state",
+    "component_pending_node_edit_from_state",
     "component_positions_from_state",
     "component_responsible_filter_from_state",
     "component_selected_id_from_state",
@@ -12805,7 +14505,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	14928
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.css	20916
 .flow-canvas-root {
   --flow-accent-rgb: 59, 130, 246;
   --flow-accent-strong: #2563eb;
@@ -12829,11 +14529,14 @@ __all__ = [
     linear-gradient(180deg, #fafaf8 0%, #f3f4f6 100%);
 }
 
-.flow-canvas-root.is-fullscreen,
-.flow-canvas-root:fullscreen,
-.flow-canvas-root:-webkit-full-screen {
+.flow-canvas-root.is-fullscreen {
+  /* CSS immersive mode (not browser Fullscreen API): survives Streamlit
+     fragment remounts that would otherwise exit native fullscreen. */
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
   border-radius: 0;
 }
 
@@ -12991,6 +14694,13 @@ __all__ = [
   cursor: pointer;
 }
 
+.flow-canvas-toolbar__button:disabled {
+  opacity: 0.42;
+  cursor: default;
+  box-shadow: none;
+  transform: none;
+}
+
 .flow-canvas-toolbar__button--icon {
   display: inline-flex;
   align-items: center;
@@ -13054,6 +14764,86 @@ __all__ = [
   box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
   backdrop-filter: blur(10px);
   cursor: pointer;
+}
+
+.flow-canvas-add-node {
+  appearance: none;
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 9;
+  margin: 0;
+  padding: 8px 14px;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(10px);
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.flow-canvas-add-node:hover {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: rgba(219, 234, 254, 0.96);
+  color: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+.flow-canvas-add-node:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+.flow-canvas-add-node:focus-visible {
+  outline: 2px solid rgba(var(--flow-accent-rgb), 0.4);
+  outline-offset: 2px;
+}
+
+.flow-canvas-inspector-toggle {
+  appearance: none;
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  z-index: 10;
+  width: 28px;
+  height: 56px;
+  margin: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(10px);
+  color: #334155;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.flow-canvas-inspector-toggle:hover {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: rgba(219, 234, 254, 0.96);
+  color: #1d4ed8;
+}
+
+.flow-canvas-inspector-toggle.is-collapsed {
+  right: 14px;
+}
+
+.flow-canvas-inspector-toggle:focus-visible {
+  outline: 2px solid rgba(var(--flow-accent-rgb), 0.4);
+  outline-offset: 2px;
 }
 
 .flow-canvas-minimap__svg {
@@ -13514,11 +15304,232 @@ __all__ = [
     padding: 6px;
   }
 
+  .flow-canvas-add-node {
+    left: 10px;
+    bottom: 10px;
+    padding: 7px 12px;
+  }
+
+}
+
+.flow-node-text.is-editing {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  outline: 1px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  padding: 0 2px;
+}
+
+.flow-edit-hud {
+  position: absolute;
+  z-index: 18;
+  pointer-events: auto;
+}
+
+.flow-edit-hud__trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  color: #334155;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.flow-edit-hud__trigger:hover {
+  border-color: rgba(37, 99, 235, 0.45);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu,
+.flow-edit-field-popover {
+  position: absolute;
+  z-index: 22;
+  min-width: 168px;
+  max-width: 280px;
+  max-height: min(360px, 55vh);
+  overflow: auto;
+  padding: 8px 8px 10px;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+  pointer-events: auto;
+}
+
+.flow-edit-field-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+
+.flow-edit-field-popover__label {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.flow-edit-field-popover__input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+}
+
+.flow-edit-duration__row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.flow-edit-duration__amount {
+  flex: 1 1 72px;
+  width: auto;
+}
+
+.flow-edit-duration__unit {
+  flex: 0 0 auto;
+  min-width: 88px;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.flow-edit-confirm__message {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.flow-edit-confirm__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.flow-edit-confirm__actions .flow-edit-menu__item {
+  flex: 1 1 0;
+  text-align: center;
+  margin-top: 0;
+}
+
+.flow-edit-menu__item {
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.flow-edit-menu__item:hover,
+.flow-edit-menu__item.is-active {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu__item.is-apply {
+  margin-top: 8px;
+  margin-bottom: 2px;
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu__item.is-danger {
+  color: #b91c1c;
+}
+
+.flow-edit-menu__item.is-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #991b1b;
+}
+
+.flow-node-roles-menu__section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.flow-node-roles-menu__label {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.flow-node-roles-menu__select {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+}
+
+.flow-node-roles-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.flow-node-roles-menu__check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
 }
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	83772
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas.js	116224
 const TOOLBAR_BUTTONS = [
+  { id: "undo", label: "↶", title: "Отменить (Ctrl+Z)" },
+  { id: "redo", label: "↷", title: "Повторить (Ctrl+Shift+Z)" },
   { id: "zoom-in", label: "+" },
   { id: "zoom-out", label: "-" },
   { id: "reset-view", label: "Reset view" },
@@ -13530,6 +15541,7 @@ const PAN_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const CANVAS_STATE_STORE_KEY = "__pydiagFlowCanvasStates";
 const CANVAS_STATE_KEY = "well_drilling_flow_canvas_v2";
+const IMMERSIVE_STORAGE_KEY = "pydiag-flow-canvas-immersive";
 
 export default function(component) {
   const state = adoptCanvasState(component);
@@ -13562,7 +15574,7 @@ function adoptCanvasState(component) {
   let state = store.get(CANVAS_STATE_KEY);
 
   if (state) {
-    if (state.root.parentElement !== parentElement) {
+    if (state.root.parentElement !== parentElement && !isImmersiveMode(state)) {
       for (const child of parentElement.querySelectorAll(".flow-canvas-root")) {
         if (child !== state.root) {
           child.remove();
@@ -13572,17 +15584,21 @@ function adoptCanvasState(component) {
     }
     state.component = component;
     state.ownerDocument = ownerDocument;
+    state._hostParent = parentElement;
     state.root.__flowCanvasState = state;
     attachCanvasObservers(state);
+    syncImmersiveHost(state);
     return state;
   }
 
   const root = ensureRoot(parentElement);
   state = createCanvasState(root, component, ownerDocument);
+  state._hostParent = parentElement;
   initializeRootStructure(state);
   attachCanvasObservers(state);
   root.__flowCanvasState = state;
   store.set(CANVAS_STATE_KEY, state);
+  syncImmersiveHost(state);
   return state;
 }
 
@@ -13590,14 +15606,6 @@ function detachCanvasState(state) {
   if (state.resizeObserver) {
     state.resizeObserver.disconnect();
     state.resizeObserver = null;
-  }
-  if (state.fullscreenChangeHandler) {
-    state.ownerDocument.removeEventListener("fullscreenchange", state.fullscreenChangeHandler);
-    state.ownerDocument.removeEventListener(
-      "webkitfullscreenchange",
-      state.fullscreenChangeHandler,
-    );
-    state.fullscreenChangeHandler = null;
   }
 }
 
@@ -13611,17 +15619,7 @@ function attachCanvasObservers(state) {
     });
     state.resizeObserver.observe(state.root);
   }
-  if (!state.fullscreenChangeHandler) {
-    state.fullscreenChangeHandler = () => {
-      syncFullscreenClass(state);
-      queueRender(state);
-    };
-    state.ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);
-    state.ownerDocument.addEventListener(
-      "webkitfullscreenchange",
-      state.fullscreenChangeHandler,
-    );
-  }
+  // Restore immersive chrome after Streamlit remounts the host.
   syncFullscreenClass(state);
 }
 
@@ -13647,6 +15645,7 @@ function createCanvasState(root, component, ownerDocument) {
       selected_id: null,
       position_edit_enabled: false,
       edge_edit_enabled: false,
+      node_edit_enabled: false,
       revision: null,
     },
     nodePayloadsById: new Map(),
@@ -13660,6 +15659,9 @@ function createCanvasState(root, component, ownerDocument) {
     pendingSelectedId: undefined,
     selectedNodeIds: new Set(),
     suppressNextNodeClick: false,
+    editingTitleNodeId: null,
+    activeEditPopover: null,
+    editHud: null,
     responsibleFilter: [],
     pendingResponsibleFilter: undefined,
     lastHostResponsibleFilter: [],
@@ -13668,6 +15670,9 @@ function createCanvasState(root, component, ownerDocument) {
     draggingNodeId: null,
     draggingNodeIds: [],
     connectMode: null,
+    immersiveMode: readStoredImmersiveMode(ownerDocument),
+    _hostParent: null,
+    _lightParent: null,
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
@@ -13680,7 +15685,6 @@ function createCanvasState(root, component, ownerDocument) {
     renderedDraggingNodeId: null,
     renderedDraggingNodeIds: [],
     resizeObserver: null,
-    fullscreenChangeHandler: null,
     keydownHandler: null,
     ownerDocument,
     dom: null,
@@ -13712,7 +15716,19 @@ function initializeRootStructure(state) {
     const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
     button.type = "button";
     button.textContent = buttonDef.label;
+    if (buttonDef.title) {
+      button.title = buttonDef.title;
+      button.setAttribute("aria-label", buttonDef.title);
+    }
     button.addEventListener("click", () => {
+      if (buttonDef.id === "undo") {
+        requestHistoryAction(state, "undo");
+        return;
+      }
+      if (buttonDef.id === "redo") {
+        requestHistoryAction(state, "redo");
+        return;
+      }
       if (buttonDef.id === "zoom-in") {
         zoomAtCenter(state, 1.12);
       } else if (buttonDef.id === "zoom-out") {
@@ -13787,6 +15803,26 @@ function initializeRootStructure(state) {
   minimapViewport.setAttribute("rx", "12");
   minimapSvg.appendChild(minimapViewport);
 
+  const addNodeButton = createElement("button", "flow-canvas-add-node", root);
+  addNodeButton.type = "button";
+  addNodeButton.textContent = "+ Карточка";
+  addNodeButton.title = "Добавить карточку";
+  addNodeButton.setAttribute("aria-label", "Добавить карточку");
+  addNodeButton.hidden = true;
+  addNodeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    requestCreateNode(state);
+  });
+
+  const inspectorToggle = createElement("button", "flow-canvas-inspector-toggle", root);
+  inspectorToggle.type = "button";
+  inspectorToggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleInspectorCollapsed(state);
+  });
+
   state.dom = {
     emptyState,
     topbar,
@@ -13810,12 +15846,46 @@ function initializeRootStructure(state) {
     minimapEdgeLayer,
     minimapNodeLayer,
     minimapViewport,
+    addNodeButton,
+    inspectorToggle,
   };
 
   if (!state.keydownHandler) {
     state.keydownHandler = (event) => {
+      if (event.key === "Escape" && state.activeEditPopover) {
+        closeActiveEditPopover(state);
+        return;
+      }
       if (event.key === "Escape" && state.connectMode) {
         cancelConnectMode(state);
+        return;
+      }
+      if (event.key === "Escape" && state.immersiveMode) {
+        event.preventDefault();
+        setImmersiveMode(state, false);
+        return;
+      }
+      if (isEditableKeyboardTarget(event.target)) {
+        return;
+      }
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) {
+        return;
+      }
+      const key = String(event.key || "").toLowerCase();
+      if (key === "z" && event.shiftKey) {
+        event.preventDefault();
+        requestHistoryAction(state, "redo");
+        return;
+      }
+      if (key === "z") {
+        event.preventDefault();
+        requestHistoryAction(state, "undo");
+        return;
+      }
+      if (key === "y") {
+        event.preventDefault();
+        requestHistoryAction(state, "redo");
       }
     };
     state.ownerDocument.addEventListener("keydown", state.keydownHandler);
@@ -13890,6 +15960,11 @@ function syncStateFromPayload(state) {
   if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
     state.positions = nextPositions;
     state.positionsVersion += 1;
+    // Echo host-authoritative positions after graph revision changes (undo/redo
+    // of layout). Otherwise stale FE positions re-autosave and wipe the redo stack.
+    if (graphChanged && state.component && typeof state.component.setStateValue === "function") {
+      state.component.setStateValue("positions", copyPositionMap(state.positions));
+    }
   }
 
   if (Object.prototype.hasOwnProperty.call(payload, "selected_id")) {
@@ -13995,6 +16070,7 @@ function renderState(state) {
     state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
+    syncSelectionEditHud(state);
   } else {
     const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;
     const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;
@@ -14048,20 +16124,26 @@ function renderState(state) {
   syncResponsibleFilterDim(state);
   updateMinimapViewport(state);
   syncConnectModeChrome(state);
+  if (state.editHud) {
+    positionEditHud(state);
+  }
 }
 
 function syncToolbarState(state) {
   const fullscreenButton = state.dom.fullscreenButton;
-  const fullscreenSupported = isFullscreenSupported(state.root);
-  const fullscreenActive = isRootFullscreen(state);
-
-  fullscreenButton.hidden = !fullscreenSupported;
-  if (!fullscreenSupported) {
-    return;
+  const fullscreenActive = isImmersiveMode(state);
+  const canUndo = state.payload.can_undo === true;
+  const canRedo = state.payload.can_redo === true;
+  for (const [id, button] of Object.entries(state.dom.toolbarButtons || {})) {
+    if (id === "undo") {
+      button.disabled = !canUndo;
+    } else if (id === "redo") {
+      button.disabled = !canRedo;
+    }
   }
-
+  fullscreenButton.hidden = false;
   const title = fullscreenActive
-    ? "Выйти из полноэкранного режима"
+    ? "Свернуть схему"
     : "Развернуть схему на весь экран";
   if (
     fullscreenButton.dataset.fullscreenActive !== String(fullscreenActive) ||
@@ -14075,6 +16157,87 @@ function syncToolbarState(state) {
   fullscreenButton.title = title;
   fullscreenButton.setAttribute("aria-label", title);
   fullscreenButton.classList.toggle("is-active", fullscreenActive);
+  syncAddNodeButton(state);
+  syncInspectorToggle(state);
+}
+
+function syncAddNodeButton(state) {
+  const button = state.dom.addNodeButton;
+  if (!button) {
+    return;
+  }
+  const enabled = state.payload.node_edit_enabled === true;
+  button.hidden = !enabled;
+  button.disabled = !enabled;
+}
+
+function syncInspectorToggle(state) {
+  const button = state.dom.inspectorToggle;
+  if (!button) {
+    return;
+  }
+  const collapsed = state.payload.inspector_collapsed === true;
+  const title = collapsed ? "Показать инспектор" : "Скрыть инспектор";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.setAttribute("aria-pressed", collapsed ? "true" : "false");
+  button.classList.toggle("is-collapsed", collapsed);
+  button.textContent = collapsed ? "‹" : "›";
+}
+
+function toggleInspectorCollapsed(state) {
+  const next = state.payload.inspector_collapsed !== true;
+  state.payload.inspector_collapsed = next;
+  syncInspectorToggle(state);
+  if (state.component && typeof state.component.setStateValue === "function") {
+    state.component.setStateValue("inspector_collapsed", next);
+  }
+}
+
+function requestCreateNode(state) {
+  if (state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  const viewport = currentViewportWorldRect(state);
+  const layoutW = 280;
+  const layoutH = 72;
+  const layoutX = round(viewport.x + Math.max(0, viewport.width / 2 - layoutW / 2));
+  const layoutY = round(viewport.y + Math.max(0, viewport.height / 2 - layoutH / 2));
+  const requestId = `nc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  state.component.setStateValue("pending_node_create", {
+    request_id: requestId,
+    title: "Измени меня",
+    kind: "process",
+    layout_x: layoutX,
+    layout_y: layoutY,
+    layout_w: layoutW,
+    layout_h: layoutH,
+  });
+}
+
+function isEditableKeyboardTarget(target) {
+  if (!target || typeof target.closest !== "function") {
+    return false;
+  }
+  const tag = String(target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    return true;
+  }
+  return Boolean(target.isContentEditable || target.closest("[contenteditable='true']"));
+}
+
+function requestHistoryAction(state, action) {
+  if (action === "undo" && state.payload.can_undo !== true) {
+    return;
+  }
+  if (action === "redo" && state.payload.can_redo !== true) {
+    return;
+  }
+  const requestId = `ha-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  state.component.setStateValue("history_action", {
+    action,
+    request_id: requestId,
+  });
 }
 
 function fullscreenEnterIcon() {
@@ -14343,6 +16506,8 @@ function syncMinimapGeometry(state) {
 }
 
 function clearScene(state) {
+  closeActiveEditPopover(state);
+  destroyEditHud(state);
   state.dom.defs.replaceChildren();
   state.dom.edgeLayer.replaceChildren();
   state.dom.labelsLayer.replaceChildren();
@@ -14446,7 +16611,7 @@ function buildNodeElement(state, node) {
   shell.style.width = `${node.size.w}px`;
   shell.style.height = `${node.size.h}px`;
 
-  if (node.time_badge || node.responsible_badges.length) {
+  if (node.time_badge || (node.responsible_badges && node.responsible_badges.length)) {
     const rail = createElement("div", "flow-node-top-rail", shell);
     if (node.time_badge) {
       const badge = createElement("div", "flow-node-badge", rail);
@@ -14454,7 +16619,7 @@ function buildNodeElement(state, node) {
       badge.textContent = node.time_badge.text;
       badge.title = node.time_badge.title;
     }
-    for (const badgePayload of node.responsible_badges) {
+    for (const badgePayload of node.responsible_badges || []) {
       const badge = createElement("div", "flow-node-badge", rail);
       applyStyles(badge, badgePayload.style);
       badge.textContent = badgePayload.abbr;
@@ -14481,6 +16646,9 @@ function buildNodeElement(state, node) {
       state.suppressNextNodeClick = false;
       return;
     }
+    if (state.editingTitleNodeId === node.id) {
+      return;
+    }
     if (state.connectMode) {
       // Drag-to-connect is finalized only by pointerup. Ignoring click here
       // prevents a second pending_edge from the same gesture.
@@ -14493,12 +16661,28 @@ function buildNodeElement(state, node) {
     selectId(state, node.id, { additive: isMultiSelectModifier(event) });
   });
   if (node.draggable && state.payload.position_edit_enabled) {
-    card.addEventListener("pointerdown", (event) => startNodeDrag(event, state, node.id));
+    card.addEventListener("pointerdown", (event) => {
+      if (state.editingTitleNodeId === node.id) {
+        return;
+      }
+      if (event.target?.closest?.(".flow-node-text.is-editing")) {
+        return;
+      }
+      startNodeDrag(event, state, node.id);
+    });
   }
 
   const content = createElement("span", "flow-node-content", card);
   const text = createElement("span", "flow-node-text", content);
   text.textContent = node.text;
+  if (node.editable) {
+    text.title = "Двойной клик — изменить заголовок";
+    text.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      beginTitleEdit(state, node.id);
+    });
+  }
 
   if (node.well_tokens.length) {
     const wells = createElement("div", "flow-node-wells", shell);
@@ -14516,11 +16700,769 @@ function buildNodeElement(state, node) {
     }
   }
 
-  const elements = { shell, card, overlay: null, handles: [] };
+  const elements = {
+    shell,
+    card,
+    overlay: null,
+    handles: [],
+    textEl: text,
+  };
   syncNodeShellPosition(shell, state.positions[node.id] || node.position);
   setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
   state.nodeElements.set(node.id, elements);
   syncConnectionHandlesForNode(state, node.id);
+}
+
+function requestNodeEditId() {
+  return `ne-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function requestEdgeEditId() {
+  return `ee-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function commitNodeEdit(state, nodeId, patch) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node || node.editable !== true) {
+    return;
+  }
+  const payload = { node_id: nodeId, request_id: requestNodeEditId(), ...patch };
+  if ("title" in patch) {
+    const next = String(patch.title || "").trim();
+    if (!next || next === String(node.title || node.text || "").trim()) {
+      return;
+    }
+    payload.title = next;
+  }
+  if ("duration" in patch) {
+    const next = String(patch.duration || "").trim();
+    const prev = String(node.duration || "").trim();
+    if (next === prev) {
+      return;
+    }
+    payload.duration = next;
+  }
+  if ("note" in patch) {
+    const next = String(patch.note || "").trim();
+    const prev = String(node.note || "").trim();
+    if (next === prev) {
+      return;
+    }
+    payload.note = next;
+  }
+  if ("kind" in patch && patch.kind === node.kind) {
+    return;
+  }
+  if ("responsible" in patch || "participants" in patch || "approvers" in patch) {
+    const sameResponsible = !("responsible" in patch)
+      || patch.responsible === (node.responsible_id ?? null);
+    const sameParticipants = !("participants" in patch)
+      || sameStringLists(patch.participants, node.participants || []);
+    const sameApprovers = !("approvers" in patch)
+      || sameStringLists(patch.approvers, node.approvers || []);
+    if (sameResponsible && sameParticipants && sameApprovers && !("deleted" in patch)) {
+      return;
+    }
+  }
+  closeActiveEditPopover(state);
+  state.suppressNextNodeClick = true;
+  applyOptimisticNodeEdit(state, nodeId, payload);
+  state.component.setStateValue("pending_node_edit", payload);
+}
+
+function applyOptimisticNodeEdit(state, nodeId, payload) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  if (!node) {
+    return;
+  }
+  if (typeof payload.title === "string") {
+    node.title = payload.title;
+    node.text = payload.title;
+    if (elements?.textEl) {
+      elements.textEl.textContent = payload.title;
+    }
+  }
+  if ("duration" in payload) {
+    node.duration = payload.duration || "";
+  }
+  if ("note" in payload) {
+    node.note = payload.note || "";
+  }
+  if (typeof payload.kind === "string" && payload.kind && elements?.card) {
+    const previous = node.kind;
+    if (typeof previous === "string" && previous) {
+      elements.card.classList.remove(`is-${previous.replaceAll("_", "-")}`);
+    }
+    node.kind = payload.kind;
+    elements.card.classList.add(`is-${payload.kind.replaceAll("_", "-")}`);
+  }
+}
+
+function commitEdgeEdit(state, edgeId, patch) {
+  const edge = state.edgePayloadsById.get(edgeId);
+  if (!edge || state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  const nextPatch = { ...patch };
+  if ("kind" in nextPatch) {
+    const next = sourceEdgeKind(nextPatch.kind);
+    const prev = sourceEdgeKind(edge.kind);
+    if (next === prev && !("deleted" in nextPatch)) {
+      return;
+    }
+    nextPatch.kind = next;
+  }
+  closeActiveEditPopover(state);
+  state.component.setStateValue("pending_edge_edit", {
+    edge_id: edgeId,
+    request_id: requestEdgeEditId(),
+    ...nextPatch,
+  });
+}
+
+function sourceEdgeKind(kind) {
+  if (kind === "usual") {
+    return "default";
+  }
+  if (kind === "default" || kind === "yes" || kind === "no" || kind === "dashed") {
+    return kind;
+  }
+  return "default";
+}
+
+const EDGE_KIND_MENU_OPTIONS = [
+  { id: "default", label: "Обычная" },
+  { id: "yes", label: "Да" },
+  { id: "no", label: "Нет" },
+  { id: "dashed", label: "Пунктир" },
+];
+
+function sameStringLists(a, b) {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function beginTitleEdit(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  if (!node || !elements?.textEl || node.editable !== true) {
+    return;
+  }
+  if (state.editingTitleNodeId && state.editingTitleNodeId !== nodeId) {
+    cancelTitleEdit(state);
+  }
+  closeActiveEditPopover(state);
+  selectId(state, nodeId);
+  const textEl = elements.textEl;
+  state.editingTitleNodeId = nodeId;
+  textEl.classList.add("is-editing");
+  textEl.contentEditable = "true";
+  textEl.spellcheck = false;
+  textEl.focus();
+  const selection = state.ownerDocument.getSelection?.();
+  if (selection) {
+    const range = state.ownerDocument.createRange();
+    range.selectNodeContents(textEl);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      finishTitleEdit(state, nodeId, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      finishTitleEdit(state, nodeId, false);
+    }
+  };
+  const onBlur = () => {
+    finishTitleEdit(state, nodeId, true);
+  };
+  textEl._titleEditCleanup = () => {
+    textEl.removeEventListener("keydown", onKeyDown);
+    textEl.removeEventListener("blur", onBlur);
+    delete textEl._titleEditCleanup;
+  };
+  textEl.addEventListener("keydown", onKeyDown);
+  textEl.addEventListener("blur", onBlur);
+}
+
+function cancelTitleEdit(state) {
+  if (!state.editingTitleNodeId) {
+    return;
+  }
+  finishTitleEdit(state, state.editingTitleNodeId, false);
+}
+
+function finishTitleEdit(state, nodeId, commit) {
+  if (state.editingTitleNodeId !== nodeId) {
+    return;
+  }
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  const textEl = elements?.textEl;
+  state.editingTitleNodeId = null;
+  if (!textEl) {
+    return;
+  }
+  if (typeof textEl._titleEditCleanup === "function") {
+    textEl._titleEditCleanup();
+  }
+  textEl.contentEditable = "false";
+  textEl.classList.remove("is-editing");
+  const nextTitle = String(textEl.textContent || "").replace(/\s+/g, " ").trim();
+  const previous = String(node?.title || node?.text || "").trim();
+  if (!commit || !nextTitle) {
+    textEl.textContent = previous;
+    return;
+  }
+  textEl.textContent = nextTitle;
+  if (nextTitle !== previous) {
+    commitNodeEdit(state, nodeId, { title: nextTitle });
+  }
+}
+
+function closeActiveEditPopover(state) {
+  if (state.activeEditPopover) {
+    if (typeof state.activeEditPopover._cleanup === "function") {
+      state.activeEditPopover._cleanup();
+    }
+    state.activeEditPopover.remove();
+    state.activeEditPopover = null;
+  }
+}
+
+function destroyEditHud(state) {
+  closeActiveEditPopover(state);
+  if (state.editHud) {
+    state.editHud.remove();
+    state.editHud = null;
+  }
+}
+
+function syncSelectionEditHud(state) {
+  if (state.draggingNodeId || state.connectMode) {
+    destroyEditHud(state);
+    return;
+  }
+  const selectedId = state.selectedId;
+  const node = selectedId ? state.nodePayloadsById.get(selectedId) : null;
+  const edge = selectedId ? state.edgePayloadsById.get(selectedId) : null;
+  const singleNode = Boolean(
+    node
+    && node.editable === true
+    && state.selectedNodeIds.size <= 1
+    && isNodeSelected(state, selectedId),
+  );
+  const singleEdge = Boolean(
+    edge
+    && state.payload.edge_edit_enabled === true
+    && state.selectedNodeIds.size === 0
+    && state.selectedId === edge.id,
+  );
+  if (!singleNode && !singleEdge) {
+    destroyEditHud(state);
+    return;
+  }
+  const targetKey = singleNode ? `node:${selectedId}` : `edge:${selectedId}`;
+  if (state.editHud && state.editHud.dataset.targetKey === targetKey) {
+    positionEditHud(state);
+    return;
+  }
+  destroyEditHud(state);
+  const hud = createElement("div", "flow-edit-hud", state.root);
+  hud.dataset.targetKey = targetKey;
+  const trigger = createElement("button", "flow-edit-hud__trigger", hud);
+  trigger.type = "button";
+  trigger.textContent = "⋯";
+  trigger.title = "Редактировать";
+  trigger.setAttribute("aria-label", "Редактировать");
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (singleNode) {
+      openNodeEditActionMenu(state, selectedId, trigger);
+    } else {
+      openEdgeEditActionMenu(state, selectedId, trigger);
+    }
+  });
+  hud.addEventListener("pointerdown", (event) => event.stopPropagation());
+  state.editHud = hud;
+  positionEditHud(state);
+}
+
+function positionEditHud(state) {
+  const hud = state.editHud;
+  if (!hud) {
+    return;
+  }
+  const targetKey = hud.dataset.targetKey || "";
+  const rootRect = state.root.getBoundingClientRect();
+  let anchorRect = null;
+  if (targetKey.startsWith("node:")) {
+    const nodeId = targetKey.slice(5);
+    const elements = state.nodeElements.get(nodeId);
+    if (elements?.shell) {
+      anchorRect = elements.shell.getBoundingClientRect();
+    }
+  } else if (targetKey.startsWith("edge:")) {
+    const edgeId = targetKey.slice(5);
+    const elements = state.edgeElements.get(edgeId);
+    const edge = state.edgePayloadsById.get(edgeId);
+    if (elements?.label) {
+      anchorRect = elements.label.getBoundingClientRect();
+    } else if (edge?.points?.length) {
+      const mid = edge.points[Math.floor(edge.points.length / 2)];
+      const sx = state.view.x + mid.x * state.view.scale;
+      const sy = state.view.y + mid.y * state.view.scale;
+      anchorRect = {
+        left: rootRect.left + sx,
+        right: rootRect.left + sx,
+        top: rootRect.top + sy,
+        bottom: rootRect.top + sy,
+        width: 0,
+        height: 0,
+      };
+    }
+  }
+  if (!anchorRect) {
+    destroyEditHud(state);
+    return;
+  }
+  const left = Math.max(8, Math.min(
+    rootRect.width - 44,
+    anchorRect.right - rootRect.left + 6,
+  ));
+  const top = Math.max(8, Math.min(
+    rootRect.height - 44,
+    anchorRect.top - rootRect.top - 4,
+  ));
+  hud.style.left = `${left}px`;
+  hud.style.top = `${top}px`;
+}
+
+function openNodeEditActionMenu(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const actions = [
+    { id: "title", label: "Заголовок" },
+    { id: "kind", label: "Тип" },
+    { id: "roles", label: "Роли" },
+    { id: "duration", label: "Длительность" },
+    { id: "note", label: "Заметка" },
+    { id: "delete", label: "Удалить", danger: true },
+  ];
+  for (const action of actions) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = action.label;
+    if (action.danger) {
+      item.classList.add("is-danger");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      openNodeFieldEditor(state, nodeId, action.id, anchor);
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openEdgeEditActionMenu(state, edgeId, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const kindItem = createElement("button", "flow-edit-menu__item", menu);
+  kindItem.type = "button";
+  kindItem.textContent = "Тип связи";
+  kindItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openEdgeKindEditor(state, edgeId, anchor);
+  });
+  const deleteItem = createElement("button", "flow-edit-menu__item is-danger", menu);
+  deleteItem.type = "button";
+  deleteItem.textContent = "Удалить";
+  deleteItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openDeleteConfirmPopover(state, {
+      message: "Удалить связь?",
+      anchor,
+      onConfirm: () => commitEdgeEdit(state, edgeId, { deleted: true }),
+    });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openNodeFieldEditor(state, nodeId, field, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  if (field === "title") {
+    beginTitleEdit(state, nodeId);
+    return;
+  }
+  if (field === "kind") {
+    openKindMenu(state, nodeId, anchor);
+    return;
+  }
+  if (field === "roles") {
+    openRolesPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "delete") {
+    openDeleteConfirmPopover(state, {
+      message: "Удалить карточку?",
+      anchor,
+      onConfirm: () => commitNodeEdit(state, nodeId, { deleted: true }),
+    });
+    return;
+  }
+  if (field === "duration") {
+    openDurationPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "note") {
+    openTextFieldPopover(state, nodeId, field, anchor);
+  }
+}
+
+function openDeleteConfirmPopover(state, { message, anchor, onConfirm }) {
+  closeActiveEditPopover(state);
+  const pop = createElement("div", "flow-edit-field-popover flow-edit-confirm", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-confirm__message", pop);
+  label.textContent = message;
+  const actions = createElement("div", "flow-edit-confirm__actions", pop);
+  const cancel = createElement("button", "flow-edit-menu__item", actions);
+  cancel.type = "button";
+  cancel.textContent = "Отмена";
+  cancel.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+  });
+  const confirmBtn = createElement("button", "flow-edit-menu__item is-danger is-apply", actions);
+  confirmBtn.type = "button";
+  confirmBtn.textContent = "Удалить";
+  confirmBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    onConfirm();
+  });
+  positionEditPopover(state, pop, anchor);
+  confirmBtn.focus();
+}
+
+function openTextFieldPopover(state, nodeId, field, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const pop = createElement("div", "flow-edit-field-popover", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-field-popover__label", pop);
+  label.textContent = "Заметка";
+  const input = createElement("input", "flow-edit-field-popover__input", pop);
+  input.type = "text";
+  input.value = node.note || "";
+  input.placeholder = "…";
+  const apply = createElement("button", "flow-edit-menu__item is-apply", pop);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  const commit = () => {
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, { note: input.value });
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    commit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveEditPopover(state);
+    }
+  });
+  positionEditPopover(state, pop, anchor);
+  input.focus();
+  input.select();
+}
+
+const DURATION_UNIT_OPTIONS = [
+  { id: "minutes", label: "минут", singular: "minute", plural: "minutes" },
+  { id: "hours", label: "час", singular: "hour", plural: "hours" },
+  { id: "days", label: "день", singular: "day", plural: "days" },
+];
+
+function parseDurationParts(raw) {
+  const text = String(raw || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!text) {
+    return { amount: "", unit: "hours" };
+  }
+  const match = text.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/);
+  if (!match) {
+    return { amount: "", unit: "hours" };
+  }
+  const amount = match[1];
+  const token = match[2];
+  let unit = "hours";
+  if (token === "m" || token.startsWith("min")) {
+    unit = "minutes";
+  } else if (token === "d" || token.startsWith("day")) {
+    unit = "days";
+  }
+  return { amount, unit };
+}
+
+function formatDurationValue(amountRaw, unitId) {
+  const amount = Number.parseInt(String(amountRaw || "").trim(), 10);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return "";
+  }
+  if (amount === 0) {
+    return "";
+  }
+  const option = DURATION_UNIT_OPTIONS.find((item) => item.id === unitId)
+    || DURATION_UNIT_OPTIONS[1];
+  const unit = amount === 1 ? option.singular : option.plural;
+  return `${amount} ${unit}`;
+}
+
+function openDurationPopover(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const parsed = parseDurationParts(node.duration);
+  const pop = createElement("div", "flow-edit-field-popover flow-edit-duration", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-field-popover__label", pop);
+  label.textContent = "Длительность";
+  const row = createElement("div", "flow-edit-duration__row", pop);
+  const input = createElement("input", "flow-edit-field-popover__input flow-edit-duration__amount", row);
+  input.type = "number";
+  input.min = "0";
+  input.step = "1";
+  input.inputMode = "numeric";
+  input.placeholder = "0";
+  input.value = parsed.amount;
+  const unitSelect = createElement("select", "flow-edit-duration__unit", row);
+  for (const option of DURATION_UNIT_OPTIONS) {
+    const opt = createElement("option", "", unitSelect);
+    opt.value = option.id;
+    opt.textContent = option.label;
+  }
+  unitSelect.value = parsed.unit;
+  const apply = createElement("button", "flow-edit-menu__item is-apply", pop);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  const commit = () => {
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, {
+      duration: formatDurationValue(input.value, unitSelect.value),
+    });
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    commit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveEditPopover(state);
+    }
+  });
+  positionEditPopover(state, pop, anchor);
+  input.focus();
+  input.select();
+}
+
+function openKindMenu(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable || !Array.isArray(node.kind_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  for (const option of node.kind_options) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label || option.id;
+    if (option.id === node.kind) {
+      item.classList.add("is-active");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitNodeEdit(state, nodeId, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openEdgeKindEditor(state, edgeId, anchor) {
+  const edge = state.edgePayloadsById.get(edgeId);
+  if (!edge) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const current = sourceEdgeKind(edge.kind);
+  for (const option of EDGE_KIND_MENU_OPTIONS) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label;
+    if (option.id === current) {
+      item.classList.add("is-active");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitEdgeEdit(state, edgeId, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openRolesPopover(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable || !Array.isArray(node.responsible_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-node-roles-menu", state.root);
+  state.activeEditPopover = menu;
+
+  let responsible = node.responsible_id ?? null;
+  let participants = [...(node.participants || [])];
+
+  const responsibleRow = createElement("div", "flow-node-roles-menu__section", menu);
+  createElement("div", "flow-node-roles-menu__label", responsibleRow).textContent = "Ответственный";
+  const responsibleSelect = createElement("select", "flow-node-roles-menu__select", responsibleRow);
+  const noneOption = createElement("option", "", responsibleSelect);
+  noneOption.value = "";
+  noneOption.textContent = "—";
+  for (const option of node.responsible_options) {
+    const opt = createElement("option", "", responsibleSelect);
+    opt.value = option.id;
+    opt.textContent = option.label || option.id;
+  }
+  responsibleSelect.value = responsible || "";
+
+  const participantsBox = createRoleChecklist(
+    menu,
+    "Участники",
+    node.responsible_options,
+    participants,
+  );
+
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    responsible = responsibleSelect.value || null;
+    participants = participantsBox.getSelected().filter((id) => id !== responsible);
+    closeActiveEditPopover(state);
+    // Approvers stay editable only in the admin form — canvas roles UI is
+    // responsible + participants so the checklist has room to breathe.
+    commitNodeEdit(state, nodeId, {
+      responsible,
+      participants,
+    });
+  });
+
+  positionEditPopover(state, menu, anchor);
+}
+
+function createRoleChecklist(parent, label, options, selectedIds) {
+  const section = createElement("div", "flow-node-roles-menu__section", parent);
+  createElement("div", "flow-node-roles-menu__label", section).textContent = label;
+  const list = createElement("div", "flow-node-roles-menu__list", section);
+  const checks = [];
+  for (const option of options) {
+    const row = createElement("label", "flow-node-roles-menu__check", list);
+    const input = createElement("input", "", row);
+    input.type = "checkbox";
+    input.value = option.id;
+    input.checked = selectedIds.includes(option.id);
+    row.append(option.label || option.id);
+    checks.push(input);
+  }
+  return {
+    getSelected() {
+      return checks.filter((input) => input.checked).map((input) => input.value);
+    },
+  };
+}
+
+function positionEditPopover(state, menu, anchor) {
+  const rootRect = state.root.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, anchorRect.left - rootRect.left)}px`;
+  menu.style.top = `${Math.max(8, anchorRect.bottom - rootRect.top + 6)}px`;
+  // Keep pointer events from falling through to the canvas/viewport under the menu.
+  menu.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  const onDocPointer = (event) => {
+    // Streamlit hosts the canvas in Shadow DOM: document capture sees a
+    // retargeted host as event.target, so contains() alone falsely closes
+    // the menu before the item click fires.
+    if (
+      eventPathIncludes(event, menu)
+      || eventPathIncludes(event, anchor)
+      || eventPathIncludes(event, state.editHud)
+    ) {
+      return;
+    }
+    closeActiveEditPopover(state);
+  };
+  menu._cleanup = () => {
+    state.ownerDocument.removeEventListener("pointerdown", onDocPointer, true);
+    if (menu._outsideAttachTimer != null) {
+      state.ownerDocument.defaultView?.clearTimeout(menu._outsideAttachTimer);
+      menu._outsideAttachTimer = null;
+    }
+  };
+  // Attach on next tick so the opening click cannot dismiss immediately.
+  const view = state.ownerDocument.defaultView;
+  if (view) {
+    menu._outsideAttachTimer = view.setTimeout(() => {
+      menu._outsideAttachTimer = null;
+      if (state.activeEditPopover !== menu) {
+        return;
+      }
+      state.ownerDocument.addEventListener("pointerdown", onDocPointer, true);
+    }, 0);
+  } else {
+    state.ownerDocument.addEventListener("pointerdown", onDocPointer, true);
+  }
 }
 
 function buildMinimapEdgeElement(state, edge) {
@@ -14703,6 +17645,7 @@ function updateSelectionState(
   syncTokenSelectionById(state, nextSelectedId);
   syncLegendHighlight(state);
   syncConnectModeChrome(state);
+  syncSelectionEditHud(state);
 }
 
 function syncEdgeSelectionById(state, selectedId) {
@@ -14996,7 +17939,7 @@ function isCanvasInteractiveTarget(target) {
   }
   return (
     target.closest(
-      ".flow-canvas-topbar, .flow-canvas-toolbar, .flow-canvas-legend, .flow-canvas-minimap, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
+      ".flow-canvas-topbar, .flow-canvas-toolbar, .flow-canvas-legend, .flow-canvas-minimap, .flow-canvas-add-node, .flow-canvas-inspector-toggle, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
     ) !== null
   );
 }
@@ -15034,6 +17977,7 @@ function startNodeDrag(event, state, nodeId) {
   }
   state.draggingNodeId = nodeId;
   state.draggingNodeIds = Object.keys(origins);
+  destroyEditHud(state);
   const start = { x: event.clientX, y: event.clientY };
   let dragDistancePx = 0;
   const ownerDocument = state.ownerDocument;
@@ -15088,6 +18032,7 @@ function startNodeDrag(event, state, nodeId) {
     state.draggingNodeId = null;
     state.draggingNodeIds = [];
     state.component.setStateValue("positions", copyPositionMap(state.positions));
+    syncSelectionEditHud(state);
     queueRender(state);
   };
   ownerDocument.addEventListener("pointermove", move, { passive: false });
@@ -15254,17 +18199,6 @@ function updateConnectHint(state) {
       ? "Отпустите кнопку мыши — связь будет создана · Esc — отмена"
       : "Ведите линию до другой карточки · Esc — отмена";
     hint.classList.add("is-active");
-    return;
-  }
-  const hasSelectedNode = [...state.selectedNodeIds].some((nodeId) => (
-    state.nodePayloadsById.has(nodeId)
-  )) || (
-    typeof state.selectedId === "string" && state.nodePayloadsById.has(state.selectedId)
-  );
-  if (hasSelectedNode) {
-    hint.hidden = false;
-    hint.textContent = "Потяните точку на карточке к другой карточке, чтобы создать связь.";
-    hint.classList.remove("is-active");
     return;
   }
   hint.hidden = true;
@@ -15480,6 +18414,7 @@ function startConnectDrag(event, state, sourceId, side, handle) {
     cursor,
     targetId: null,
   };
+  destroyEditHud(state);
   syncConnectModeChrome(state);
   queueRender(state);
 
@@ -15572,6 +18507,7 @@ function beginConnectMode(state, sourceId, side) {
     cursor: { ...start },
     targetId: null,
   };
+  destroyEditHud(state);
   syncConnectModeChrome(state);
   queueRender(state);
 }
@@ -15584,6 +18520,7 @@ function cancelConnectMode(state) {
   }
   state.connectMode = null;
   syncConnectModeChrome(state);
+  syncSelectionEditHud(state);
   queueRender(state);
 }
 
@@ -15596,6 +18533,11 @@ function completeConnectMode(state, targetId) {
   }
   // One gesture → one pending_edge (pointerup + click / duplicate listeners).
   if (connectMode.submitted) {
+    return;
+  }
+  if (canvasHasDirectedEdge(state, sourceId, targetId)) {
+    cancelConnectMode(state);
+    flashConnectHint(state, "Между этими карточками уже есть связь");
     return;
   }
   connectMode.submitted = true;
@@ -15616,7 +18558,36 @@ function completeConnectMode(state, targetId) {
     state.selectedNodeIds = new Set([sourceId]);
     state.pendingSelectedId = sourceId;
   }
+  syncSelectionEditHud(state);
   queueRender(state);
+}
+
+function canvasHasDirectedEdge(state, sourceId, targetId) {
+  const edges = Array.isArray(state.payload?.edges) ? state.payload.edges : [];
+  return edges.some(
+    (edge) => edge
+      && edge.source === sourceId
+      && edge.target === targetId,
+  );
+}
+
+function flashConnectHint(state, message) {
+  const hint = state.dom?.connectHint;
+  if (!hint) {
+    return;
+  }
+  hint.hidden = false;
+  hint.textContent = message;
+  hint.classList.add("is-active");
+  if (state._connectHintTimer) {
+    state.ownerDocument.defaultView?.clearTimeout(state._connectHintTimer);
+  }
+  const view = state.ownerDocument.defaultView;
+  if (view) {
+    state._connectHintTimer = view.setTimeout(() => {
+      updateConnectHint(state);
+    }, 2200);
+  }
 }
 
 function selectId(state, value, options = {}) {
@@ -15727,51 +18698,108 @@ function fitView(state) {
 }
 
 function toggleFullscreen(state) {
-  const request = isRootFullscreen(state)
-    ? exitDocumentFullscreen(state.ownerDocument)
-    : requestElementFullscreen(state.root);
-  if (request && typeof request.catch === "function") {
-    request.catch(() => {});
+  setImmersiveMode(state, !state.immersiveMode);
+}
+
+function setImmersiveMode(state, enabled) {
+  state.immersiveMode = Boolean(enabled);
+  writeStoredImmersiveMode(state.ownerDocument, state.immersiveMode);
+  // Entering immersive: hide the inspector so edits don't resurrect the side panel.
+  if (state.immersiveMode && state.payload.inspector_collapsed !== true) {
+    state.payload.inspector_collapsed = true;
+    syncInspectorToggle(state);
+    if (state.component && typeof state.component.setStateValue === "function") {
+      state.component.setStateValue("inspector_collapsed", true);
+    }
+  }
+  syncImmersiveHost(state);
+  syncFullscreenClass(state);
+  syncToolbarState(state);
+  // Layout size changes under position:fixed — refit unless the user panned.
+  const view = state.ownerDocument.defaultView;
+  const refit = () => {
+    if (!state.userMovedView) {
+      fitView(state);
+    }
+    queueRender(state);
+  };
+  if (view) {
+    view.requestAnimationFrame(refit);
+  } else {
+    refit();
   }
 }
 
-function requestElementFullscreen(element) {
-  if (typeof element.requestFullscreen === "function") {
-    return element.requestFullscreen();
-  }
-  if (typeof element.webkitRequestFullscreen === "function") {
-    return element.webkitRequestFullscreen();
-  }
-  return null;
-}
-
-function exitDocumentFullscreen(ownerDocument) {
-  if (typeof ownerDocument.exitFullscreen === "function") {
-    return ownerDocument.exitFullscreen();
-  }
-  if (typeof ownerDocument.webkitExitFullscreen === "function") {
-    return ownerDocument.webkitExitFullscreen();
-  }
-  return null;
-}
-
-function isFullscreenSupported(element) {
-  return (
-    typeof element.requestFullscreen === "function" ||
-    typeof element.webkitRequestFullscreen === "function"
-  );
-}
-
-function fullscreenElementOfDocument(ownerDocument) {
-  return ownerDocument.fullscreenElement || ownerDocument.webkitFullscreenElement || null;
-}
-
-function isRootFullscreen(state) {
-  return fullscreenElementOfDocument(state.ownerDocument) === state.root;
+function isImmersiveMode(state) {
+  return Boolean(state.immersiveMode);
 }
 
 function syncFullscreenClass(state) {
-  state.root.classList.toggle("is-fullscreen", isRootFullscreen(state));
+  state.root.classList.toggle("is-fullscreen", isImmersiveMode(state));
+}
+
+function getShadowHost(state) {
+  const rootNode = state.root.getRootNode?.();
+  if (rootNode && rootNode !== state.ownerDocument && rootNode.host) {
+    return rootNode.host;
+  }
+  return null;
+}
+
+function syncImmersiveHost(state) {
+  // Streamlit columns apply transforms that trap position:fixed. Move the
+  // shadow host (keeps component CSS) to document.body while immersive.
+  const host = getShadowHost(state);
+  const body = state.ownerDocument.body;
+  if (!host || !body) {
+    syncFullscreenClass(state);
+    return;
+  }
+  if (isImmersiveMode(state)) {
+    if (!state._lightParent || !state._lightParent.isConnected) {
+      // Remember the light-DOM parent only while the host is still in-layout.
+      if (host.parentElement && host.parentElement !== body) {
+        state._lightParent = host.parentElement;
+      }
+    }
+    if (host.parentElement !== body) {
+      body.appendChild(host);
+    }
+    syncFullscreenClass(state);
+    return;
+  }
+  const home =
+    state._lightParent && state._lightParent.isConnected ? state._lightParent : null;
+  if (home && host.parentElement !== home) {
+    home.appendChild(host);
+  }
+  state._lightParent = null;
+  syncFullscreenClass(state);
+}
+
+function readStoredImmersiveMode(ownerDocument) {
+  try {
+    const storage = ownerDocument.defaultView?.sessionStorage;
+    return storage?.getItem(IMMERSIVE_STORAGE_KEY) === "1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function writeStoredImmersiveMode(ownerDocument, enabled) {
+  try {
+    const storage = ownerDocument.defaultView?.sessionStorage;
+    if (!storage) {
+      return;
+    }
+    if (enabled) {
+      storage.setItem(IMMERSIVE_STORAGE_KEY, "1");
+    } else {
+      storage.removeItem(IMMERSIVE_STORAGE_KEY);
+    }
+  } catch (_error) {
+    // Ignore quota / private-mode failures.
+  }
 }
 
 function attachMinimapHandlers(minimap, state) {
@@ -16122,6 +19150,33 @@ function getOwnerDocument(parentElement) {
 }
 
 ===END_FILE===
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_assets/flow_canvas_dom_utils.js	744
+/**
+ * Shadow-DOM-safe hit test for outside-click dismiss.
+ *
+ * Streamlit bidi components run in an open ShadowRoot. Document-capture
+ * listeners see a retargeted host as event.target, so node.contains(target)
+ * is false even when the real click was inside the menu — which closes the
+ * menu before the item click handler runs.
+ */
+export function eventPathIncludes(event, node) {
+  if (!node) {
+    return false;
+  }
+  if (typeof event.composedPath === "function") {
+    const path = event.composedPath();
+    if (Array.isArray(path) && path.includes(node)) {
+      return true;
+    }
+  }
+  const target = event.target;
+  if (target && typeof node.contains === "function" && node.contains(target)) {
+    return true;
+  }
+  return false;
+}
+
+===END_FILE===
 ===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_bounds.py	2838
 from __future__ import annotations
 
@@ -16209,7 +19264,7 @@ def node_overlay_width(node_payload: Mapping[str, Any]) -> float:
     return max(size_width, top_width, token_width)
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_component.py	2432
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_component.py	3129
 from __future__ import annotations
 
 from pathlib import Path
@@ -16242,12 +19297,22 @@ def render_flow_canvas(
             "positions": default_positions,
             "responsible_filter": list(default_responsible_filter or []),
             "pending_edge": None,
+            "pending_node_edit": None,
+            "pending_node_create": None,
+            "pending_edge_edit": None,
+            "history_action": None,
+            "inspector_collapsed": False,
         },
         height="content",
         on_selected_id_change=lambda: None,
         on_positions_change=lambda: None,
         on_responsible_filter_change=lambda: None,
         on_pending_edge_change=lambda: None,
+        on_pending_node_edit_change=lambda: None,
+        on_pending_node_create_change=lambda: None,
+        on_pending_edge_edit_change=lambda: None,
+        on_history_action_change=lambda: None,
+        on_inspector_collapsed_change=lambda: None,
     )
 
 
@@ -16278,16 +19343,19 @@ def _asset_text(filename: str) -> str:
 
 
 def _register_flow_canvas_component():
+    # Dom utils are a separate asset so Node can unit-test Shadow DOM hit logic;
+    # Streamlit injects one JS blob, so strip `export` and prepend.
+    dom_utils = _asset_text("flow_canvas_dom_utils.js").replace("export ", "", 1)
     return components_v2.component(
         FLOW_CANVAS_COMPONENT_NAME,
         html="<div id='flow-canvas-root'></div>",
         css=_asset_text("flow_canvas.css"),
-        js=_asset_text("flow_canvas.js"),
+        js=f"{dom_utils}\n{_asset_text('flow_canvas.js')}",
         isolate_styles=True,
     )
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_payload.py	14038
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_payload.py	17325
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
@@ -16321,7 +19389,25 @@ from .flow_render_metrics import canvas_height_for_snapshot
 from .flow_render_snapshot import FlowRenderSnapshot, build_flow_render_snapshot
 from .flow_route_geometry import EdgeRoute, NodeGeometry, port_point
 
-__all__ = ["build_flow_canvas_payload"]
+__all__ = ["CANVAS_NODE_KIND_OPTIONS", "build_flow_canvas_payload"]
+
+CANVAS_EDITABLE_NODE_KINDS = frozenset(
+    {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }
+)
+
+CANVAS_NODE_KIND_OPTIONS = [
+    {"id": "process", "label": "Процесс"},
+    {"id": "decision_diamond", "label": "Решение"},
+    {"id": "database", "label": "База данных"},
+    {"id": "input_data", "label": "Входные данные"},
+    {"id": "event", "label": "Событие"},
+]
 
 
 def build_flow_canvas_payload(
@@ -16335,6 +19421,10 @@ def build_flow_canvas_payload(
     layout_mode: str = "snake",
     domain_nodes_draggable: bool = False,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
+    can_undo: bool = False,
+    can_redo: bool = False,
+    inspector_collapsed: bool = False,
     revision: int | None = None,
     snapshot: FlowRenderSnapshot | None = None,
     snapshot_cache: MutableMapping[Any, Any] | None = None,
@@ -16364,6 +19454,7 @@ def build_flow_canvas_payload(
         kind_filter=[],
         selected_id=selected_id,
         domain_nodes_draggable=domain_nodes_draggable,
+        node_edit_enabled=node_edit_enabled,
     )
     edges = build_flow_canvas_edges_from_snapshot(
         snapshot,
@@ -16378,6 +19469,10 @@ def build_flow_canvas_payload(
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
         "edge_edit_enabled": bool(edge_edit_enabled),
+        "node_edit_enabled": bool(node_edit_enabled),
+        "can_undo": bool(can_undo),
+        "can_redo": bool(can_redo),
+        "inspector_collapsed": bool(inspector_collapsed),
         "search": search,
         "kind_filter": list(kind_filter or []),
         "layout_mode": snapshot.layout_mode,
@@ -16403,6 +19498,7 @@ def build_flow_canvas_nodes_from_snapshot(
     kind_filter: list[str] | None = None,
     selected_id: str | None = None,
     domain_nodes_draggable: bool = False,
+    node_edit_enabled: bool = False,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     responsible_filter = responsible_filter or []
     kind_filter = kind_filter or []
@@ -16434,6 +19530,7 @@ def build_flow_canvas_nodes_from_snapshot(
                 search=search,
                 active=is_active,
                 domain_nodes_draggable=domain_nodes_draggable,
+                node_edit_enabled=node_edit_enabled,
             )
         )
 
@@ -16453,9 +19550,10 @@ def build_flow_canvas_node(
     search: str,
     active: bool,
     domain_nodes_draggable: bool,
+    node_edit_enabled: bool = False,
 ) -> dict[str, Any]:
     source_position, target_position = node_ports(node_index, layout_mode)
-    return {
+    payload: dict[str, Any] = {
         "id": node.id,
         "kind": node.kind,
         "kind_label": KIND_LABELS[node.kind],
@@ -16489,6 +19587,79 @@ def build_flow_canvas_node(
             node_active=active,
         ),
     }
+    payload.update(build_node_edit_fields(graph, node, editable=node_edit_enabled))
+    return payload
+
+
+def build_node_edit_fields(
+    graph: FlowGraphDocument,
+    node: FlowNode,
+    *,
+    editable: bool,
+) -> dict[str, Any]:
+    if not editable or node.kind not in CANVAS_EDITABLE_NODE_KINDS:
+        return {"editable": False}
+
+    roles = canvas_node_roles(node)
+    return {
+        "editable": True,
+        "title": node.text,
+        "duration": node.time,
+        "note": roles["note"],
+        "responsible_id": roles["responsible"],
+        "participants": roles["participants"],
+        "approvers": roles["approvers"],
+        "kind_options": list(CANVAS_NODE_KIND_OPTIONS),
+        "responsible_options": [
+            {
+                "id": key,
+                "label": style.label,
+                "fill": style.fill,
+                "border": style.border,
+            }
+            for key, style in graph.responsibles.items()
+        ],
+    }
+
+
+def canvas_node_roles(node: FlowNode) -> dict[str, Any]:
+    meta = node.metadata
+    has_canvas_roles = any(
+        key in meta
+        for key in ("canvas_responsible", "canvas_participants", "canvas_approvers")
+    )
+    if has_canvas_roles:
+        raw_responsible = meta.get("canvas_responsible")
+        responsible = (
+            None
+            if raw_responsible in (None, "")
+            else str(raw_responsible)
+            if isinstance(raw_responsible, str)
+            else node.primary_responsible
+        )
+        participants = _csv_role_ids(meta.get("canvas_participants"))
+        approvers = _csv_role_ids(meta.get("canvas_approvers"))
+    else:
+        responsible = node.primary_responsible
+        participants = list(node.secondary_responsibles)
+        approvers = []
+
+    note_raw = meta.get("canvas_note")
+    if not isinstance(note_raw, str):
+        note_raw = meta.get("note")
+    note = note_raw.strip() if isinstance(note_raw, str) and note_raw.strip() else None
+    return {
+        "responsible": responsible,
+        "participants": participants,
+        "approvers": approvers,
+        "note": note,
+    }
+
+
+def _csv_role_ids(value: object) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    return [part for part in (item.strip() for item in value.split(",")) if part]
 
 
 def build_flow_canvas_edges_from_snapshot(
@@ -16716,7 +19887,7 @@ def component_style(style: Mapping[str, Any], *, interactive: bool = False) -> d
     return adjusted
 
 ===END_FILE===
-===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_state.py	4215
+===BEGIN_FILE===	src/pydiag/rendering/flow_canvas_state.py	10391
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -16785,6 +19956,208 @@ def component_pending_edge_from_state(
     if kind not in {"default", "yes", "no", "dashed"}:
         kind = "default"
     result = {"source": source, "target": target, "kind": kind}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        result["request_id"] = request_id.strip()
+    return result
+
+
+CANVAS_NODE_EDIT_KINDS = frozenset(
+    {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }
+)
+
+
+def component_pending_node_edit_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated pending canvas node edit patch (+ request_id)."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_node_edit")
+    if not isinstance(raw, Mapping):
+        return None
+    node_id = raw.get("node_id")
+    if not isinstance(node_id, str) or not node_id:
+        return None
+    node_ids = {node.id for node in graph.nodes}
+    if node_id not in node_ids:
+        return None
+
+    patch: dict[str, Any] = {"node_id": node_id}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        patch["request_id"] = request_id.strip()
+
+    if raw.get("deleted") is True:
+        patch["deleted"] = True
+        return patch
+
+    if "title" in raw:
+        title = raw.get("title")
+        if not isinstance(title, str):
+            return None
+        patch["title"] = title
+
+    if "kind" in raw:
+        kind = raw.get("kind")
+        if kind not in CANVAS_NODE_EDIT_KINDS:
+            return None
+        patch["kind"] = kind
+
+    if "responsible" in raw:
+        responsible = raw.get("responsible")
+        if responsible is not None and not isinstance(responsible, str):
+            return None
+        if isinstance(responsible, str) and responsible not in graph.responsibles:
+            return None
+        patch["responsible"] = responsible
+
+    if "participants" in raw:
+        participants = _role_id_list(raw.get("participants"), graph)
+        if participants is None:
+            return None
+        patch["participants"] = participants
+
+    if "approvers" in raw:
+        approvers = _role_id_list(raw.get("approvers"), graph)
+        if approvers is None:
+            return None
+        patch["approvers"] = approvers
+
+    if "duration" in raw:
+        duration = raw.get("duration")
+        if duration is not None and not isinstance(duration, str):
+            return None
+        patch["duration"] = duration
+
+    if "note" in raw:
+        note = raw.get("note")
+        if note is not None and not isinstance(note, str):
+            return None
+        patch["note"] = note
+
+    editable_keys = {
+        "title",
+        "kind",
+        "responsible",
+        "participants",
+        "approvers",
+        "duration",
+        "note",
+    }
+    if not editable_keys.intersection(patch):
+        return None
+    return patch
+
+
+CANVAS_EDGE_EDIT_KINDS = frozenset({"default", "yes", "no", "dashed"})
+
+
+def component_pending_edge_edit_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated pending canvas edge edit patch (+ request_id)."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_edge_edit")
+    if not isinstance(raw, Mapping):
+        return None
+    edge_id = raw.get("edge_id")
+    if not isinstance(edge_id, str) or not edge_id:
+        return None
+    edge_ids = {edge.id for edge in graph.edges}
+    if edge_id not in edge_ids:
+        return None
+
+    patch: dict[str, Any] = {"edge_id": edge_id}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        patch["request_id"] = request_id.strip()
+
+    if raw.get("deleted") is True:
+        patch["deleted"] = True
+        return patch
+
+    if "kind" in raw:
+        kind = raw.get("kind")
+        if kind not in CANVAS_EDGE_EDIT_KINDS:
+            return None
+        patch["kind"] = kind
+
+    if "kind" not in patch:
+        return None
+    return patch
+
+
+def _role_id_list(value: object, graph: FlowGraphDocument) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    result: list[str] = []
+    known = set(graph.responsibles)
+    for item in value:
+        if not isinstance(item, str) or item not in known:
+            return None
+        result.append(item)
+    return result
+
+
+def component_history_action_from_state(
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """Return validated {action: undo|redo, request_id} from canvas state."""
+    if component_state is None:
+        return None
+    raw = component_state.get("history_action")
+    if not isinstance(raw, Mapping):
+        return None
+    action = raw.get("action")
+    if action not in {"undo", "redo"}:
+        return None
+    request_id = raw.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return None
+    return {"action": action, "request_id": request_id.strip()}
+
+
+def component_pending_node_create_from_state(
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated create-node request from canvas state."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_node_create")
+    if not isinstance(raw, Mapping):
+        return None
+    title = raw.get("title")
+    kind = raw.get("kind", "process")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if kind not in CANVAS_NODE_EDIT_KINDS:
+        kind = "process"
+    layout_x = raw.get("layout_x")
+    layout_y = raw.get("layout_y")
+    layout_w = raw.get("layout_w", 280)
+    layout_h = raw.get("layout_h", 72)
+    if not isinstance(layout_x, int | float) or not isinstance(layout_y, int | float):
+        return None
+    if not isinstance(layout_w, int | float) or not isinstance(layout_h, int | float):
+        return None
+    result: dict[str, Any] = {
+        "title": " ".join(title.split()).strip(),
+        "kind": kind,
+        "layout_x": round(float(layout_x), 2),
+        "layout_y": round(float(layout_y), 2),
+        "layout_w": int(layout_w),
+        "layout_h": int(layout_h),
+    }
     request_id = raw.get("request_id")
     if isinstance(request_id, str) and request_id.strip():
         result["request_id"] = request_id.strip()
