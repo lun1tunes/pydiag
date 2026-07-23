@@ -34,6 +34,8 @@ FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
 FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
 FLOW_CANVAS_SESSION_EPOCH_KEY = "_flow_canvas_session_epoch"
+# One-shot: after undo/redo of positions, ignore stale FE positions once.
+SKIP_POSITION_AUTOSAVE_ONCE_KEY = "_flow_skip_position_autosave_once"
 # Sidebar multiselect widget key — must not collide with canvas component state
 # field "responsible_filter" nested under FLOW_CANVAS_COMPONENT_KEY.
 RESPONSIBLE_FILTER_SESSION_KEY = "sidebar_responsible_filter"
@@ -48,6 +50,9 @@ __all__ = [
     "FLOW_RENDER_SNAPSHOT_CACHE_KEY",
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
+    "SKIP_POSITION_AUTOSAVE_ONCE_KEY",
+    "sync_component_positions",
+    "take_skip_position_autosave_once",
     "HISTORY_ACTION_REQUEST_KEY",
     "RESPONSIBLE_FILTER_LAST_KEY",
     "RESPONSIBLE_FILTER_SESSION_KEY",
@@ -163,6 +168,29 @@ def detect_canvas_position_autosave(
             changed = True
         merged[node_id] = xy
     return merged if changed else None
+
+
+def sync_component_positions(
+    session_state: MutableMapping[str, Any],
+    positions: dict[str, tuple[float, float]],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> None:
+    """Overwrite canvas component positions so stale FE state cannot re-autosave."""
+    current = session_state.get(component_key)
+    updated = dict(current) if isinstance(current, dict) else {}
+    updated["positions"] = {
+        node_id: {"x": float(xy[0]), "y": float(xy[1])}
+        for node_id, xy in positions.items()
+    }
+    session_state[component_key] = updated
+
+
+def take_skip_position_autosave_once(session_state: MutableMapping[str, Any]) -> bool:
+    """Consume one-shot skip set after undo/redo of node positions."""
+    if not session_state.pop(SKIP_POSITION_AUTOSAVE_ONCE_KEY, False):
+        return False
+    return True
 
 
 def consume_history_action(

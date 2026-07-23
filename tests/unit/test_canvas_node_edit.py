@@ -23,12 +23,14 @@ class FakeStreamlitModule:
         self.session_state: dict[str, object] = {}
         self.errors: list[str] = []
         self.reruns = 0
+        self.rerun_scopes: list[str] = []
 
     def error(self, message: str) -> None:
         self.errors.append(message)
 
-    def rerun(self) -> None:
+    def rerun(self, *, scope: str = "app") -> None:
         self.reruns += 1
+        self.rerun_scopes.append(scope)
 
 
 class FakeAuth:
@@ -128,6 +130,7 @@ def test_runtime_consumes_pending_canvas_edge_edit(documents) -> None:
                 }
             }
             self.commands: list[object] = []
+            self.kwargs: list[dict] = []
             self.edit_available = True
 
         def graph_source_edit_available(self) -> bool:
@@ -141,8 +144,9 @@ def test_runtime_consumes_pending_canvas_edge_edit(documents) -> None:
             return FakeDraft()
 
         def save_graph_source_edge(self, graph_doc, command, **kwargs):
-            _ = graph_doc, kwargs
+            _ = graph_doc
             self.commands.append(command)
+            self.kwargs.append(kwargs)
             return True
 
     session = FakeSession()
@@ -154,6 +158,8 @@ def test_runtime_consumes_pending_canvas_edge_edit(documents) -> None:
     assert command.edge_id == edge.id
     assert command.kind == "dashed"
     assert command.deleted is None
+    assert session.kwargs[0]["record_history"] is True
+    assert session.kwargs[0]["before_snapshot"]["kind"] == "default"
     assert session.session_state["well_drilling_flow_canvas"]["pending_edge_edit"] is None
 
 
@@ -205,6 +211,7 @@ def test_apply_canvas_edge_edit_writes_yaml(tmp_path: Path) -> None:
     )
     assert ok is True
     assert st_module.errors == []
+    assert st_module.rerun_scopes == ["fragment"]
     saved = load_structured_payload(source_path.read_bytes())
     transition = next(
         item
@@ -260,6 +267,7 @@ def test_apply_canvas_node_edit_writes_yaml_and_undo_restores(tmp_path: Path) ->
     )
     assert ok is True
     assert st_module.errors == []
+    assert st_module.rerun_scopes == ["fragment"]
     saved = load_structured_payload(source_path.read_bytes())
     assert saved["nodes"]["proc_initial_review"]["title"] == "Inline renamed"
     assert saved["nodes"]["proc_initial_review"]["kind"] == "decision_diamond"

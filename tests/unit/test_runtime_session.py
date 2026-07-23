@@ -112,7 +112,8 @@ class FakeStreamlitModule:
     def error(self, message: str) -> None:
         self.messages.append(("error", message))
 
-    def rerun(self) -> None:
+    def rerun(self, *, scope: str = "app") -> None:
+        _ = scope
         self.reruns += 1
 
 

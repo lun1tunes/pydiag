@@ -19,6 +19,11 @@ from pydiag.application import (
     render_flow as render_flow_view,
 )
 from pydiag.application.edit_history import can_redo, can_undo
+from pydiag.application.flow_position_edit import graph_node_positions
+from pydiag.application.flow_view import (
+    sync_component_positions,
+    take_skip_position_autosave_once,
+)
 from pydiag.common.auth_sessions import AuthSessionStore
 from pydiag.domain.models import FlowGraphDocument, FlowNode, WellsDocument
 from pydiag.presentation.admin import (
@@ -367,6 +372,9 @@ class StreamlitAppRuntime:
         kind = pending.get("kind", draft.kind)
         if kind not in {"default", "yes", "no", "dashed"}:
             kind = draft.kind
+        from pydiag.presentation.runtime_session import edge_snapshot_from_draft
+
+        before = edge_snapshot_from_draft(draft)
         session.save_graph_source_edge(
             graph,
             UpdateGraphSourceEdgeCommand(
@@ -380,7 +388,8 @@ class StreamlitAppRuntime:
                 deleted=True if pending.get("deleted") is True else None,
             ),
             quiet=True,
-            record_history=False,
+            record_history=True,
+            before_snapshot=before,
         )
 
     def _consume_history_action(self, graph: FlowGraphDocument) -> None:
@@ -402,6 +411,15 @@ class StreamlitAppRuntime:
         if not position_edit_enabled or not self.session.position_edit_available():
             return
         if not self.auth_context().current_user_is_admin():
+            return
+        # After undo/redo of moves, FE may still hold pre-undo positions in
+        # component state. Skip one autosave and resync so redo stack survives.
+        if take_skip_position_autosave_once(self.session.session_state):
+            sync_component_positions(
+                self.session.session_state,
+                graph_node_positions(graph),
+                component_key=FLOW_CANVAS_COMPONENT_KEY,
+            )
             return
         positions = detect_canvas_position_autosave(
             self.session.session_state,
@@ -440,6 +458,9 @@ class StreamlitAppRuntime:
         # fragment widgets into containers owned by the outer script run.
         @self.st_module.fragment
         def render_workspace_fragment() -> None:
+            # Re-load inside the fragment so quiet fragment-scoped reruns after
+            # canvas edits see the persisted graph without a full-app remount.
+            graph, wells = session.load_app_data()
             diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
             try:
                 with diagram_col:
@@ -457,6 +478,8 @@ class StreamlitAppRuntime:
                         graph,
                         position_edit_enabled=position_edit_enabled,
                     )
+                    # Persist may have refreshed session docs; use the latest.
+                    graph, wells = session.load_app_data()
                     selected_id = self._render_flow(
                         graph,
                         wells,

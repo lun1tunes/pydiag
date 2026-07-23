@@ -402,6 +402,11 @@ function syncStateFromPayload(state) {
   if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
     state.positions = nextPositions;
     state.positionsVersion += 1;
+    // Echo host-authoritative positions after graph revision changes (undo/redo
+    // of layout). Otherwise stale FE positions re-autosave and wipe the redo stack.
+    if (graphChanged && state.component && typeof state.component.setStateValue === "function") {
+      state.component.setStateValue("positions", copyPositionMap(state.positions));
+    }
   }
 
   if (Object.prototype.hasOwnProperty.call(payload, "selected_id")) {
@@ -1147,7 +1152,37 @@ function commitNodeEdit(state, nodeId, patch) {
   }
   closeActiveEditPopover(state);
   state.suppressNextNodeClick = true;
+  applyOptimisticNodeEdit(state, nodeId, payload);
   state.component.setStateValue("pending_node_edit", payload);
+}
+
+function applyOptimisticNodeEdit(state, nodeId, payload) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  if (!node) {
+    return;
+  }
+  if (typeof payload.title === "string") {
+    node.title = payload.title;
+    node.text = payload.title;
+    if (elements?.textEl) {
+      elements.textEl.textContent = payload.title;
+    }
+  }
+  if ("duration" in payload) {
+    node.duration = payload.duration || "";
+  }
+  if ("note" in payload) {
+    node.note = payload.note || "";
+  }
+  if (typeof payload.kind === "string" && payload.kind && elements?.card) {
+    const previous = node.kind;
+    if (typeof previous === "string" && previous) {
+      elements.card.classList.remove(`is-${previous.replaceAll("_", "-")}`);
+    }
+    node.kind = payload.kind;
+    elements.card.classList.add(`is-${payload.kind.replaceAll("_", "-")}`);
+  }
 }
 
 function commitEdgeEdit(state, edgeId, patch) {

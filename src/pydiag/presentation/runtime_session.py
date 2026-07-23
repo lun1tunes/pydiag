@@ -25,10 +25,12 @@ from pydiag.application.edit_history import (
     pop_redo,
     pop_undo,
     push_create_edge_command,
+    push_delete_edge_command,
     push_delete_node_command,
     push_move_nodes_command,
     push_onto_undo_from_redo,
     push_onto_undo_keep_redo,
+    push_update_edge_command,
     push_update_node_command,
 )
 from pydiag.application.flow_position_edit import graph_node_positions
@@ -303,7 +305,11 @@ class StreamlitSessionCoordinator:
                     before=before,
                     after=positions,
                 )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
         return result.saved
 
     def load_graph_source_node(self, node_id: str) -> GraphSourceNodeDraft:
@@ -368,7 +374,11 @@ class StreamlitSessionCoordinator:
                 )
         if command.deleted is True and self.session_state.get("selected_id") == command.node_id:
             self.session_state.pop("selected_id", None)
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
         return result.saved
 
     def apply_canvas_node_edit(
@@ -513,6 +523,7 @@ class StreamlitSessionCoordinator:
         *,
         quiet: bool = False,
         record_history: bool = False,
+        before_snapshot: dict[str, Any] | None = None,
     ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
@@ -539,9 +550,27 @@ class StreamlitSessionCoordinator:
                 )
             ),
         )
+        if record_history and result.saved and before_snapshot is not None:
+            if command.deleted is True:
+                push_delete_edge_command(
+                    self.session_state,
+                    edge_id=command.edge_id,
+                    before=before_snapshot,
+                )
+            else:
+                push_update_edge_command(
+                    self.session_state,
+                    edge_id=command.edge_id,
+                    before=before_snapshot,
+                    after=edge_snapshot_from_command(command),
+                )
         if command.deleted is True and self.session_state.get("selected_id") == command.edge_id:
             self.session_state.pop("selected_id", None)
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
         return result.saved
 
     def create_graph_source_edge(
@@ -601,7 +630,11 @@ class StreamlitSessionCoordinator:
                 condition=command.condition,
                 note=command.note,
             )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
         return created_edge_id if result.saved else None
 
     def can_undo_edit(self) -> bool:
@@ -656,6 +689,15 @@ class StreamlitSessionCoordinator:
                 current[str(node_id)] = (float(xy[0]), float(xy[1]))
             # Clear autosave sig so undo/redo positions always write.
             self.session_state.pop(POSITION_AUTOSAVE_SIG_KEY, None)
+            # Neutralize stale FE positions before persist+rerun; otherwise the
+            # next fragment run re-autosaves the pre-undo layout and wipes redo.
+            from pydiag.application.flow_view import (
+                SKIP_POSITION_AUTOSAVE_ONCE_KEY,
+                sync_component_positions,
+            )
+
+            self.session_state[SKIP_POSITION_AUTOSAVE_ONCE_KEY] = True
+            sync_component_positions(self.session_state, current)
             return self.save_graph_positions(
                 graph,
                 current,
@@ -729,6 +771,47 @@ class StreamlitSessionCoordinator:
                 quiet=True,
                 record_history=False,
             )
+        if kind == "update_edge":
+            payload = command.get("before" if reverse else "after")
+            edge_id = command.get("edge_id")
+            if not isinstance(edge_id, str) or not isinstance(payload, dict):
+                return False
+            return self.save_graph_source_edge(
+                graph,
+                update_command_from_edge_snapshot(edge_id, payload, deleted=None),
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "delete_edge":
+            edge_id = command.get("edge_id")
+            before = command.get("before")
+            if not isinstance(edge_id, str) or not isinstance(before, dict):
+                return False
+            if reverse:
+                kind_value = before.get("kind") or "default"
+                if kind_value not in {"default", "yes", "no", "dashed"}:
+                    kind_value = "default"
+                created = self.create_graph_source_edge(
+                    graph,
+                    CreateGraphSourceEdgeCommand(
+                        source=str(before.get("source") or ""),
+                        target=str(before.get("target") or ""),
+                        kind=kind_value,  # type: ignore[arg-type]
+                        label=before.get("label"),
+                        condition=before.get("condition"),
+                        note=before.get("note"),
+                        edge_id=edge_id,
+                    ),
+                    quiet=True,
+                    record_history=False,
+                )
+                return created is not None
+            return self.save_graph_source_edge(
+                graph,
+                update_command_from_edge_snapshot(edge_id, before, deleted=True),
+                quiet=True,
+                record_history=False,
+            )
         return False
 
     def working_schema_selected(self) -> bool:
@@ -761,13 +844,23 @@ class StreamlitSessionCoordinator:
         return None
 
     def finalize_persistence(
-        self, should_rerun: bool, error_message: str | None
+        self,
+        should_rerun: bool,
+        error_message: str | None,
+        *,
+        scope: str = "app",
     ) -> None:
         if error_message is not None:
             self.st_module.error(error_message)
             return
         if should_rerun:
-            self.st_module.rerun()
+            # Canvas quiet edits run inside a fragment: app-scoped rerun remounts
+            # the whole page and feels like the view/selection "falls apart".
+            rerun_scope = "fragment" if scope == "fragment" else "app"
+            try:
+                self.st_module.rerun(scope=rerun_scope)
+            except TypeError:
+                self.st_module.rerun()
 
     def _set_selected_graph_version(self, version_id: str | None) -> None:
         if version_id is None:
@@ -827,6 +920,28 @@ def node_snapshot_from_command(command: UpdateGraphSourceNodeCommand) -> dict[st
     }
 
 
+def edge_snapshot_from_draft(draft: GraphSourceEdgeDraft) -> dict[str, Any]:
+    return {
+        "source": draft.source,
+        "target": draft.target,
+        "kind": draft.kind,
+        "label": draft.label,
+        "condition": draft.condition,
+        "note": draft.note,
+    }
+
+
+def edge_snapshot_from_command(command: UpdateGraphSourceEdgeCommand) -> dict[str, Any]:
+    return {
+        "source": command.source,
+        "target": command.target,
+        "kind": command.kind,
+        "label": command.label,
+        "condition": command.condition,
+        "note": command.note,
+    }
+
+
 def update_command_from_node_snapshot(
     node_id: str,
     snapshot: dict[str, Any],
@@ -847,6 +962,27 @@ def update_command_from_node_snapshot(
         participants=tuple(participants) if isinstance(participants, list) else (),
         approvers=tuple(approvers) if isinstance(approvers, list) else (),
         duration=snapshot.get("duration"),
+        note=snapshot.get("note"),
+        deleted=deleted,
+    )
+
+
+def update_command_from_edge_snapshot(
+    edge_id: str,
+    snapshot: dict[str, Any],
+    *,
+    deleted: bool | None,
+) -> UpdateGraphSourceEdgeCommand:
+    kind = snapshot.get("kind") or "default"
+    if kind not in {"default", "yes", "no", "dashed"}:
+        kind = "default"
+    return UpdateGraphSourceEdgeCommand(
+        edge_id=edge_id,
+        source=str(snapshot.get("source") or ""),
+        target=str(snapshot.get("target") or ""),
+        kind=kind,  # type: ignore[arg-type]
+        label=snapshot.get("label"),
+        condition=snapshot.get("condition"),
         note=snapshot.get("note"),
         deleted=deleted,
     )

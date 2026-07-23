@@ -40,12 +40,12 @@ const bundle = [
 
 const api = vm.runInNewContext(bundle);
 
-assert.deepEqual(api.parseDurationParts("16 hours"), { amount: "16", unit: "hours" });
-assert.deepEqual(api.parseDurationParts("1 hour"), { amount: "1", unit: "hours" });
-assert.deepEqual(api.parseDurationParts("40 minutes"), { amount: "40", unit: "minutes" });
-assert.deepEqual(api.parseDurationParts("2 days"), { amount: "2", unit: "days" });
-assert.deepEqual(api.parseDurationParts("3h"), { amount: "3", unit: "hours" });
-assert.deepEqual(api.parseDurationParts(""), { amount: "", unit: "hours" });
+assert.equal(JSON.stringify(api.parseDurationParts("16 hours")), JSON.stringify({ amount: "16", unit: "hours" }));
+assert.equal(JSON.stringify(api.parseDurationParts("1 hour")), JSON.stringify({ amount: "1", unit: "hours" }));
+assert.equal(JSON.stringify(api.parseDurationParts("40 minutes")), JSON.stringify({ amount: "40", unit: "minutes" }));
+assert.equal(JSON.stringify(api.parseDurationParts("2 days")), JSON.stringify({ amount: "2", unit: "days" }));
+assert.equal(JSON.stringify(api.parseDurationParts("3h")), JSON.stringify({ amount: "3", unit: "hours" }));
+assert.equal(JSON.stringify(api.parseDurationParts("")), JSON.stringify({ amount: "", unit: "hours" }));
 
 assert.equal(api.formatDurationValue("16", "hours"), "16 hours");
 assert.equal(api.formatDurationValue("1", "hours"), "1 hour");
@@ -56,9 +56,9 @@ assert.equal(api.formatDurationValue("1", "days"), "1 day");
 assert.equal(api.formatDurationValue("0", "hours"), "");
 assert.equal(api.formatDurationValue("", "hours"), "");
 
-assert.deepEqual(
-  api.DURATION_UNIT_OPTIONS.map((item) => item.label),
-  ["минут", "час", "день"],
+assert.equal(
+  JSON.stringify(api.DURATION_UNIT_OPTIONS.map((item) => item.label)),
+  JSON.stringify(["минут", "час", "день"]),
 );
 
 console.log("duration_units: ok");

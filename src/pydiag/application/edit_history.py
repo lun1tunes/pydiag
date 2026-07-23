@@ -4,7 +4,14 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any, Literal
 
 HistoryAction = Literal["undo", "redo"]
-CommandKind = Literal["move_nodes", "create_edge", "update_node", "delete_node"]
+CommandKind = Literal[
+    "move_nodes",
+    "create_edge",
+    "update_node",
+    "delete_node",
+    "update_edge",
+    "delete_edge",
+]
 
 EDIT_UNDO_KEY = "_flow_edit_undo"
 EDIT_REDO_KEY = "_flow_edit_redo"
@@ -24,8 +31,10 @@ __all__ = [
     "pop_redo",
     "pop_undo",
     "push_create_edge_command",
+    "push_delete_edge_command",
     "push_delete_node_command",
     "push_move_nodes_command",
+    "push_update_edge_command",
     "push_update_node_command",
 ]
 
@@ -155,6 +164,42 @@ def push_delete_node_command(
         {
             "kind": "delete_node",
             "node_id": node_id,
+            "before": dict(before),
+        },
+    )
+
+
+def push_update_edge_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    edge_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    if before == after:
+        return
+    _push(
+        session_state,
+        {
+            "kind": "update_edge",
+            "edge_id": edge_id,
+            "before": dict(before),
+            "after": dict(after),
+        },
+    )
+
+
+def push_delete_edge_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    edge_id: str,
+    before: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "delete_edge",
+            "edge_id": edge_id,
             "before": dict(before),
         },
     )

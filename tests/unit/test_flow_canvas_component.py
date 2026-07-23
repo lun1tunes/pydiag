@@ -218,6 +218,7 @@ def test_flow_canvas_supports_selection_edit_hud() -> None:
     assert 'setStateValue("pending_edge_edit"' in js
     assert "function openKindMenu(state, nodeId, anchor)" in js
     assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert "function applyOptimisticNodeEdit(state, nodeId, payload)" in js
     assert "function openDeleteConfirmPopover(state," in js
     assert "function openDurationPopover(state, nodeId, anchor)" in js
     assert "function parseDurationParts(raw)" in js

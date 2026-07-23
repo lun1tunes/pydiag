@@ -86,6 +86,7 @@ def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
         "_flow_edit_redo",
         "_flow_history_action_request_id",
         "_flow_position_autosave_sig",
+        "_flow_skip_position_autosave_once",
         "_flow_canvas_pending_edge_request_id",
         "_flow_canvas_pending_node_edit_request_id",
         "_flow_canvas_pending_edge_edit_request_id",
