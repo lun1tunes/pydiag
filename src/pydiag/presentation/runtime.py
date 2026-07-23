@@ -6,12 +6,14 @@ from typing import Any
 
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     FLOW_CANVAS_COMPONENT_KEY,
     DocumentsGateway,
     UpdateGraphSourceEdgeCommand,
     consume_history_action,
     consume_pending_canvas_edge,
     consume_pending_canvas_edge_edit,
+    consume_pending_canvas_node_create,
     consume_pending_canvas_node_edit,
     detect_canvas_position_autosave,
 )
@@ -23,6 +25,7 @@ from pydiag.application.flow_position_edit import graph_node_positions
 from pydiag.application.flow_view import (
     sync_component_positions,
     take_skip_position_autosave_once,
+    resolve_inspector_collapsed,
 )
 from pydiag.common.auth_sessions import AuthSessionStore
 from pydiag.domain.models import FlowGraphDocument, FlowNode, WellsDocument
@@ -346,6 +349,47 @@ class StreamlitAppRuntime:
             return
         session.apply_canvas_node_edit(graph, wells, pending, quiet=True, record_history=True)
 
+    def _consume_pending_canvas_node_create(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_create(
+            session.session_state,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Добавление карточек доступно только администратору.")
+            return
+        # process/decision require ≥1 responsible in the runtime graph model.
+        default_responsible = None
+        if pending["kind"] in {"process", "decision_diamond"} and graph.responsibles:
+            preferred = [
+                key
+                for key in graph.responsibles
+                if key not in {"unassigned", "none", ""}
+            ]
+            default_responsible = preferred[0] if preferred else next(iter(graph.responsibles))
+        session.create_graph_source_node(
+            graph,
+            CreateGraphSourceNodeCommand(
+                title=pending["title"],
+                kind=pending["kind"],  # type: ignore[arg-type]
+                layout_x=pending["layout_x"],
+                layout_y=pending["layout_y"],
+                layout_w=pending["layout_w"],
+                layout_h=pending["layout_h"],
+                responsible=default_responsible,
+            ),
+            quiet=True,
+            record_history=True,
+        )
+
     def _consume_pending_canvas_edge_edit(self, graph: FlowGraphDocument) -> None:
         session = self.session
         pending = consume_pending_canvas_edge_edit(
@@ -461,7 +505,12 @@ class StreamlitAppRuntime:
             # Re-load inside the fragment so quiet fragment-scoped reruns after
             # canvas edits see the persisted graph without a full-app remount.
             graph, wells = session.load_app_data()
-            diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
+            inspector_collapsed = resolve_inspector_collapsed(session.session_state)
+            if inspector_collapsed:
+                diagram_col = self.st_module.container()
+                side_col = None
+            else:
+                diagram_col, side_col = self.st_module.columns((2.3, 1.1), gap="large")
             try:
                 with diagram_col:
                     edge_edit_enabled = (
@@ -472,6 +521,7 @@ class StreamlitAppRuntime:
                     # Mutate widget session_state BEFORE the canvas is mounted.
                     self._consume_history_action(graph)
                     self._consume_pending_canvas_edge(graph)
+                    self._consume_pending_canvas_node_create(graph)
                     self._consume_pending_canvas_node_edit(graph, wells)
                     self._consume_pending_canvas_edge_edit(graph)
                     self._autosave_canvas_positions(
@@ -500,18 +550,19 @@ class StreamlitAppRuntime:
             if not isinstance(selected_id, str) or not selected_id:
                 selected_id = None
 
-            try:
-                with side_col:
-                    with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
-                        self._render_inspector(
-                            graph,
-                            wells,
-                            selected_id,
-                            layout_mode=layout_mode,
-                            position_edit_enabled=position_edit_enabled,
-                        )
-            except Exception as exc:
-                self.st_module.error(f"Ошибка панели инспектора: {exc}")
+            if side_col is not None:
+                try:
+                    with side_col:
+                        with self.st_module.container(height=WORKSPACE_PANEL_HEIGHT, border=True):
+                            self._render_inspector(
+                                graph,
+                                wells,
+                                selected_id,
+                                layout_mode=layout_mode,
+                                position_edit_enabled=position_edit_enabled,
+                            )
+                except Exception as exc:
+                    self.st_module.error(f"Ошибка панели инспектора: {exc}")
 
             # Sidebar save/enable flags live outside this fragment.
             if session.consume_position_edit_rerun_request():

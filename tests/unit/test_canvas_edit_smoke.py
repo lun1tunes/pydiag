@@ -132,6 +132,8 @@ def test_canvas_edit_menu_js_covers_every_action() -> None:
     assert "function openDurationPopover(state, nodeId, anchor)" in js
     assert "function openDeleteConfirmPopover(state," in js
     assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert '"Участники"' in js
+    assert "Согласующие" not in js
     assert "function openKindMenu(state, nodeId, anchor)" in js
     assert "function beginTitleEdit(state, nodeId)" in js
     assert "function applyOptimisticNodeEdit(state, nodeId, payload)" in js
@@ -173,7 +175,6 @@ def test_smoke_all_node_edit_buttons_use_fragment_rerun(tmp_path: Path) -> None:
             {
                 "responsible": "geology",
                 "participants": ["planning"],
-                "approvers": [],
             },
         ),
         ("duration", {"duration": "45 minutes"}),

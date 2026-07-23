@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
@@ -103,6 +104,7 @@ __all__ = [
     "is_flow_source_payload",
     "load_structured_payload",
     "create_flow_source_payload_edge",
+    "create_flow_source_payload_node",
     "flow_source_has_directed_edge",
     "update_flow_source_payload_custom_layout",
     "update_flow_source_payload_edge",
@@ -784,6 +786,97 @@ def create_flow_source_payload_edge(
         )
     )
     return updated.model_dump(mode="json")
+
+
+def create_flow_source_payload_node(
+    payload: object,
+    *,
+    command: CreateGraphSourceNodeCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    title = " ".join(str(command.title or "").split()).strip()
+    if not title:
+        raise ValueError("Заголовок карточки обязателен.")
+    kind = command.kind
+    if kind not in DEFAULT_NODE_SIZES:
+        raise ValueError(f"Unsupported node kind: {kind}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    used_ids = set(updated.nodes)
+    preferred_id = command.node_id if isinstance(command.node_id, str) and command.node_id.strip() else None
+    if preferred_id and preferred_id not in used_ids:
+        node_id = preferred_id.strip()
+    elif preferred_id and preferred_id in used_ids and flow_source_node_deleted(updated.nodes[preferred_id]):
+        node_id = preferred_id.strip()
+    else:
+        node_id = unique_node_id(kind=kind, title=title, used_ids=used_ids)
+
+    layout_w = int(command.layout_w) if command.layout_w else DEFAULT_NODE_SIZES[kind][0]
+    layout_h = int(command.layout_h) if command.layout_h else DEFAULT_NODE_SIZES[kind][1]
+    layout_entry = FlowSourceLayoutEntry(
+        x=round(float(command.layout_x), 2),
+        y=round(float(command.layout_y), 2),
+        w=max(80, min(1200, layout_w)),
+        h=max(40, min(800, layout_h)),
+    )
+
+    if node_id in updated.nodes:
+        current = updated.nodes[node_id]
+        if not flow_source_node_deleted(current):
+            raise ValueError(f"Node already exists: {node_id}")
+        updated.nodes[node_id] = current.model_copy(
+            update={
+                "title": title,
+                "kind": kind,
+                "responsible": command.responsible,
+                "participants": list(command.participants),
+                "approvers": list(command.approvers),
+                "duration": command.duration,
+                "note": command.note,
+                "deleted": False,
+                "transitions": [],
+                "metadata": {"manual_layout_size": True},
+            }
+        )
+    else:
+        updated.nodes[node_id] = FlowSourceNode(
+            title=title,
+            kind=kind,
+            responsible=command.responsible,
+            participants=list(command.participants),
+            approvers=list(command.approvers),
+            duration=command.duration,
+            note=command.note,
+            deleted=False,
+            transitions=[],
+            metadata={"manual_layout_size": True},
+        )
+    updated.layout[node_id] = layout_entry
+    return updated.model_dump(mode="json")
+
+
+def unique_node_id(*, kind: EditableNodeKind, title: str, used_ids: set[str]) -> str:
+    prefix = {
+        "process": "proc",
+        "decision_diamond": "dec",
+        "database": "db",
+        "input_data": "input",
+        "event": "event",
+    }.get(kind, "node")
+    slug = slugify(title) or "new"
+    base = f"{prefix}_{slug}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
 
 
 def flow_source_has_directed_edge(

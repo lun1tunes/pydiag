@@ -7,6 +7,7 @@ HistoryAction = Literal["undo", "redo"]
 CommandKind = Literal[
     "move_nodes",
     "create_edge",
+    "create_node",
     "update_node",
     "delete_node",
     "update_edge",
@@ -31,6 +32,7 @@ __all__ = [
     "pop_redo",
     "pop_undo",
     "push_create_edge_command",
+    "push_create_node_command",
     "push_delete_edge_command",
     "push_delete_node_command",
     "push_move_nodes_command",
@@ -129,6 +131,22 @@ def push_create_edge_command(
             "label": label,
             "condition": condition,
             "note": note,
+        },
+    )
+
+
+def push_create_node_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    node_id: str,
+    after: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "create_node",
+            "node_id": node_id,
+            "after": dict(after),
         },
     )
 

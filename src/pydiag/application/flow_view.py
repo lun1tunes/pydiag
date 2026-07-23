@@ -12,6 +12,7 @@ from pydiag.rendering import (
 from pydiag.rendering.flow_canvas_state import (
     component_history_action_from_state,
     component_pending_edge_edit_from_state,
+    component_pending_node_create_from_state,
     component_pending_node_edit_from_state,
     component_positions_from_state,
 )
@@ -29,6 +30,7 @@ from .flow_view_state import flow_state_timestamp
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
 FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY = "_flow_canvas_pending_edge_request_id"
 FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY = "_flow_canvas_pending_node_edit_request_id"
+FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY = "_flow_canvas_pending_node_create_request_id"
 FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY = "_flow_canvas_pending_edge_edit_request_id"
 FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
@@ -36,6 +38,7 @@ FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
 FLOW_CANVAS_SESSION_EPOCH_KEY = "_flow_canvas_session_epoch"
 # One-shot: after undo/redo of positions, ignore stale FE positions once.
 SKIP_POSITION_AUTOSAVE_ONCE_KEY = "_flow_skip_position_autosave_once"
+INSPECTOR_COLLAPSED_KEY = "_flow_inspector_collapsed"
 # Sidebar multiselect widget key — must not collide with canvas component state
 # field "responsible_filter" nested under FLOW_CANVAS_COMPONENT_KEY.
 RESPONSIBLE_FILTER_SESSION_KEY = "sidebar_responsible_filter"
@@ -45,14 +48,17 @@ __all__ = [
     "FLOW_CANVAS_COMPONENT_KEY",
     "FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY",
     "FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY",
     "FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY",
     "FLOW_CANVAS_SESSION_EPOCH_KEY",
     "FLOW_RENDER_SNAPSHOT_CACHE_KEY",
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
     "SKIP_POSITION_AUTOSAVE_ONCE_KEY",
+    "INSPECTOR_COLLAPSED_KEY",
     "sync_component_positions",
     "take_skip_position_autosave_once",
+    "resolve_inspector_collapsed",
     "HISTORY_ACTION_REQUEST_KEY",
     "RESPONSIBLE_FILTER_LAST_KEY",
     "RESPONSIBLE_FILTER_SESSION_KEY",
@@ -60,6 +66,7 @@ __all__ = [
     "consume_history_action",
     "consume_pending_canvas_edge",
     "consume_pending_canvas_edge_edit",
+    "consume_pending_canvas_node_create",
     "consume_pending_canvas_node_edit",
     "consume_responsible_filter_rerun_request",
     "detect_canvas_position_autosave",
@@ -133,6 +140,9 @@ def render_flow(
         node_edit_enabled=node_edit_enabled,
         can_undo=can_undo,
         can_redo=can_redo,
+        inspector_collapsed=resolve_inspector_collapsed(
+            session_state, component_key=component_key
+        ),
         revision=revision,
         snapshot_cache=snapshot_cache,
         session_epoch=int(session_state.get(FLOW_CANVAS_SESSION_EPOCH_KEY, 0) or 0),
@@ -191,6 +201,21 @@ def take_skip_position_autosave_once(session_state: MutableMapping[str, Any]) ->
     if not session_state.pop(SKIP_POSITION_AUTOSAVE_ONCE_KEY, False):
         return False
     return True
+
+
+def resolve_inspector_collapsed(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> bool:
+    """Mirror canvas toggle into session so column layout survives remounts."""
+    component_state = component_state_from_session(session_state, component_key)
+    if isinstance(component_state, dict) and "inspector_collapsed" in component_state:
+        raw = component_state.get("inspector_collapsed")
+        if isinstance(raw, bool):
+            session_state[INSPECTOR_COLLAPSED_KEY] = raw
+            return raw
+    return bool(session_state.get(INSPECTOR_COLLAPSED_KEY, False))
 
 
 def consume_history_action(
@@ -302,6 +327,41 @@ def _clear_pending_node_edit_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_node_edit"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_node_create(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas node create once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_create_from_state(component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY) == request_id:
+            _clear_pending_node_create_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY] = request_id
+
+    _clear_pending_node_create_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_node_create_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_create"] = None
         session_state[component_key] = updated
 
 

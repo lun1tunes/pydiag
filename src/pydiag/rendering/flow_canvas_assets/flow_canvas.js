@@ -12,6 +12,7 @@ const PAN_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const CANVAS_STATE_STORE_KEY = "__pydiagFlowCanvasStates";
 const CANVAS_STATE_KEY = "well_drilling_flow_canvas_v2";
+const IMMERSIVE_STORAGE_KEY = "pydiag-flow-canvas-immersive";
 
 export default function(component) {
   const state = adoptCanvasState(component);
@@ -44,7 +45,7 @@ function adoptCanvasState(component) {
   let state = store.get(CANVAS_STATE_KEY);
 
   if (state) {
-    if (state.root.parentElement !== parentElement) {
+    if (state.root.parentElement !== parentElement && !isImmersiveMode(state)) {
       for (const child of parentElement.querySelectorAll(".flow-canvas-root")) {
         if (child !== state.root) {
           child.remove();
@@ -54,17 +55,21 @@ function adoptCanvasState(component) {
     }
     state.component = component;
     state.ownerDocument = ownerDocument;
+    state._hostParent = parentElement;
     state.root.__flowCanvasState = state;
     attachCanvasObservers(state);
+    syncImmersiveHost(state);
     return state;
   }
 
   const root = ensureRoot(parentElement);
   state = createCanvasState(root, component, ownerDocument);
+  state._hostParent = parentElement;
   initializeRootStructure(state);
   attachCanvasObservers(state);
   root.__flowCanvasState = state;
   store.set(CANVAS_STATE_KEY, state);
+  syncImmersiveHost(state);
   return state;
 }
 
@@ -136,7 +141,9 @@ function createCanvasState(root, component, ownerDocument) {
     draggingNodeId: null,
     draggingNodeIds: [],
     connectMode: null,
-    immersiveMode: false,
+    immersiveMode: readStoredImmersiveMode(ownerDocument),
+    _hostParent: null,
+    _lightParent: null,
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
@@ -267,6 +274,26 @@ function initializeRootStructure(state) {
   minimapViewport.setAttribute("rx", "12");
   minimapSvg.appendChild(minimapViewport);
 
+  const addNodeButton = createElement("button", "flow-canvas-add-node", root);
+  addNodeButton.type = "button";
+  addNodeButton.textContent = "+ Карточка";
+  addNodeButton.title = "Добавить карточку";
+  addNodeButton.setAttribute("aria-label", "Добавить карточку");
+  addNodeButton.hidden = true;
+  addNodeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    requestCreateNode(state);
+  });
+
+  const inspectorToggle = createElement("button", "flow-canvas-inspector-toggle", root);
+  inspectorToggle.type = "button";
+  inspectorToggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleInspectorCollapsed(state);
+  });
+
   state.dom = {
     emptyState,
     topbar,
@@ -290,6 +317,8 @@ function initializeRootStructure(state) {
     minimapEdgeLayer,
     minimapNodeLayer,
     minimapViewport,
+    addNodeButton,
+    inspectorToggle,
   };
 
   if (!state.keydownHandler) {
@@ -599,6 +628,62 @@ function syncToolbarState(state) {
   fullscreenButton.title = title;
   fullscreenButton.setAttribute("aria-label", title);
   fullscreenButton.classList.toggle("is-active", fullscreenActive);
+  syncAddNodeButton(state);
+  syncInspectorToggle(state);
+}
+
+function syncAddNodeButton(state) {
+  const button = state.dom.addNodeButton;
+  if (!button) {
+    return;
+  }
+  const enabled = state.payload.node_edit_enabled === true;
+  button.hidden = !enabled;
+  button.disabled = !enabled;
+}
+
+function syncInspectorToggle(state) {
+  const button = state.dom.inspectorToggle;
+  if (!button) {
+    return;
+  }
+  const collapsed = state.payload.inspector_collapsed === true;
+  const title = collapsed ? "Показать инспектор" : "Скрыть инспектор";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.setAttribute("aria-pressed", collapsed ? "true" : "false");
+  button.classList.toggle("is-collapsed", collapsed);
+  button.textContent = collapsed ? "‹" : "›";
+}
+
+function toggleInspectorCollapsed(state) {
+  const next = state.payload.inspector_collapsed !== true;
+  state.payload.inspector_collapsed = next;
+  syncInspectorToggle(state);
+  if (state.component && typeof state.component.setStateValue === "function") {
+    state.component.setStateValue("inspector_collapsed", next);
+  }
+}
+
+function requestCreateNode(state) {
+  if (state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  const viewport = currentViewportWorldRect(state);
+  const layoutW = 280;
+  const layoutH = 72;
+  const layoutX = round(viewport.x + Math.max(0, viewport.width / 2 - layoutW / 2));
+  const layoutY = round(viewport.y + Math.max(0, viewport.height / 2 - layoutH / 2));
+  const requestId = `nc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  state.component.setStateValue("pending_node_create", {
+    request_id: requestId,
+    title: "Измени меня",
+    kind: "process",
+    layout_x: layoutX,
+    layout_y: layoutY,
+    layout_w: layoutW,
+    layout_h: layoutH,
+  });
 }
 
 function isEditableKeyboardTarget(target) {
@@ -1746,7 +1831,6 @@ function openRolesPopover(state, nodeId, anchor) {
 
   let responsible = node.responsible_id ?? null;
   let participants = [...(node.participants || [])];
-  let approvers = [...(node.approvers || [])];
 
   const responsibleRow = createElement("div", "flow-node-roles-menu__section", menu);
   createElement("div", "flow-node-roles-menu__label", responsibleRow).textContent = "Ответственный";
@@ -1767,12 +1851,6 @@ function openRolesPopover(state, nodeId, anchor) {
     node.responsible_options,
     participants,
   );
-  const approversBox = createRoleChecklist(
-    menu,
-    "Согласующие",
-    node.responsible_options,
-    approvers,
-  );
 
   const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
   apply.type = "button";
@@ -1780,15 +1858,13 @@ function openRolesPopover(state, nodeId, anchor) {
   apply.addEventListener("click", (event) => {
     event.stopPropagation();
     responsible = responsibleSelect.value || null;
-    participants = participantsBox.getSelected();
-    approvers = approversBox.getSelected();
-    participants = participants.filter((id) => id !== responsible);
-    approvers = approvers.filter((id) => id !== responsible && !participants.includes(id));
+    participants = participantsBox.getSelected().filter((id) => id !== responsible);
     closeActiveEditPopover(state);
+    // Approvers stay editable only in the admin form — canvas roles UI is
+    // responsible + participants so the checklist has room to breathe.
     commitNodeEdit(state, nodeId, {
       responsible,
       participants,
-      approvers,
     });
   });
 
@@ -2334,7 +2410,7 @@ function isCanvasInteractiveTarget(target) {
   }
   return (
     target.closest(
-      ".flow-canvas-topbar, .flow-canvas-toolbar, .flow-canvas-legend, .flow-canvas-minimap, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
+      ".flow-canvas-topbar, .flow-canvas-toolbar, .flow-canvas-legend, .flow-canvas-minimap, .flow-canvas-add-node, .flow-canvas-inspector-toggle, .flow-node-shell, .flow-edge-label, .flow-edge-hit",
     ) !== null
   );
 }
@@ -3098,6 +3174,16 @@ function toggleFullscreen(state) {
 
 function setImmersiveMode(state, enabled) {
   state.immersiveMode = Boolean(enabled);
+  writeStoredImmersiveMode(state.ownerDocument, state.immersiveMode);
+  // Entering immersive: hide the inspector so edits don't resurrect the side panel.
+  if (state.immersiveMode && state.payload.inspector_collapsed !== true) {
+    state.payload.inspector_collapsed = true;
+    syncInspectorToggle(state);
+    if (state.component && typeof state.component.setStateValue === "function") {
+      state.component.setStateValue("inspector_collapsed", true);
+    }
+  }
+  syncImmersiveHost(state);
   syncFullscreenClass(state);
   syncToolbarState(state);
   // Layout size changes under position:fixed — refit unless the user panned.
@@ -3121,6 +3207,70 @@ function isImmersiveMode(state) {
 
 function syncFullscreenClass(state) {
   state.root.classList.toggle("is-fullscreen", isImmersiveMode(state));
+}
+
+function getShadowHost(state) {
+  const rootNode = state.root.getRootNode?.();
+  if (rootNode && rootNode !== state.ownerDocument && rootNode.host) {
+    return rootNode.host;
+  }
+  return null;
+}
+
+function syncImmersiveHost(state) {
+  // Streamlit columns apply transforms that trap position:fixed. Move the
+  // shadow host (keeps component CSS) to document.body while immersive.
+  const host = getShadowHost(state);
+  const body = state.ownerDocument.body;
+  if (!host || !body) {
+    syncFullscreenClass(state);
+    return;
+  }
+  if (isImmersiveMode(state)) {
+    if (!state._lightParent || !state._lightParent.isConnected) {
+      // Remember the light-DOM parent only while the host is still in-layout.
+      if (host.parentElement && host.parentElement !== body) {
+        state._lightParent = host.parentElement;
+      }
+    }
+    if (host.parentElement !== body) {
+      body.appendChild(host);
+    }
+    syncFullscreenClass(state);
+    return;
+  }
+  const home =
+    state._lightParent && state._lightParent.isConnected ? state._lightParent : null;
+  if (home && host.parentElement !== home) {
+    home.appendChild(host);
+  }
+  state._lightParent = null;
+  syncFullscreenClass(state);
+}
+
+function readStoredImmersiveMode(ownerDocument) {
+  try {
+    const storage = ownerDocument.defaultView?.sessionStorage;
+    return storage?.getItem(IMMERSIVE_STORAGE_KEY) === "1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function writeStoredImmersiveMode(ownerDocument, enabled) {
+  try {
+    const storage = ownerDocument.defaultView?.sessionStorage;
+    if (!storage) {
+      return;
+    }
+    if (enabled) {
+      storage.setItem(IMMERSIVE_STORAGE_KEY, "1");
+    } else {
+      storage.removeItem(IMMERSIVE_STORAGE_KEY);
+    }
+  } catch (_error) {
+    // Ignore quota / private-mode failures.
+  }
 }
 
 function attachMinimapHandlers(minimap, state) {

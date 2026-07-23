@@ -4,6 +4,7 @@ from .auth_sessions import AuthSessionRecord, AuthSessionStore
 from .errors import FileLockTimeoutError, VersionConflictError
 from .graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceEdgeKind,
     GraphSourceNodeDraft,
@@ -17,6 +18,7 @@ __all__ = [
     "AuthSessionRecord",
     "AuthSessionStore",
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "FileLockTimeoutError",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",

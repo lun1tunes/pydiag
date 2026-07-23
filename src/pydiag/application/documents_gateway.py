@@ -70,6 +70,14 @@ class DocumentsGateway(Protocol):
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument: ...
 
+    def create_graph_source_node(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
     def list_graph_versions(self) -> list[GraphVersionInfo]: ...
 
     def live_graph_source_exists(self) -> bool: ...

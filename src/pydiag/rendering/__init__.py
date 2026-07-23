@@ -35,6 +35,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_node_edit_from_state",
     ),
+    "component_pending_node_create_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_node_create_from_state",
+    ),
     "component_pending_edge_edit_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_edge_edit_from_state",

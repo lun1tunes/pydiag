@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
 )
@@ -21,6 +22,7 @@ from .figma_import import (
 )
 from .flow_source_graph import (
     create_flow_source_payload_edge,
+    create_flow_source_payload_node,
     dump_flow_source_payload,
     editable_flow_graph_payload_from_source_payload,
     graph_source_edge_draft_from_payload,
@@ -39,6 +41,7 @@ from .storage_paths import graph_path, source_graph_path, wells_path
 
 __all__ = [
     "create_graph_source_edge_with_version_check",
+    "create_graph_source_node_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",
@@ -231,6 +234,28 @@ def create_graph_source_edge_with_version_check(
             raise ValueError(f"Graph source editing requires source YAML: {target}")
         try:
             updated_payload = create_flow_source_payload_edge(
+                payload,
+                command=command,
+                expected_version=expected_version,
+            )
+        except RuntimeError as exc:
+            raise VersionConflictError(str(exc)) from exc
+        return save_flow_source_payload(target, updated_payload)
+
+
+def create_graph_source_node_with_version_check(
+    command: CreateGraphSourceNodeCommand,
+    *,
+    expected_version: int,
+    path: str | Path,
+) -> FlowGraphDocument:
+    target = Path(path)
+    with json_file_lock(target):
+        payload = load_structured_payload(target.read_bytes())
+        if not is_flow_source_payload(payload):
+            raise ValueError(f"Graph source editing requires source YAML: {target}")
+        try:
+            updated_payload = create_flow_source_payload_node(
                 payload,
                 command=command,
                 expected_version=expected_version,

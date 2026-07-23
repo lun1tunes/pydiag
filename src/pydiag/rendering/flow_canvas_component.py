@@ -31,8 +31,10 @@ def render_flow_canvas(
             "responsible_filter": list(default_responsible_filter or []),
             "pending_edge": None,
             "pending_node_edit": None,
+            "pending_node_create": None,
             "pending_edge_edit": None,
             "history_action": None,
+            "inspector_collapsed": False,
         },
         height="content",
         on_selected_id_change=lambda: None,
@@ -40,8 +42,10 @@ def render_flow_canvas(
         on_responsible_filter_change=lambda: None,
         on_pending_edge_change=lambda: None,
         on_pending_node_edit_change=lambda: None,
+        on_pending_node_create_change=lambda: None,
         on_pending_edge_edit_change=lambda: None,
         on_history_action_change=lambda: None,
+        on_inspector_collapsed_change=lambda: None,
     )
 
 

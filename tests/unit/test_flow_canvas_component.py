@@ -218,6 +218,8 @@ def test_flow_canvas_supports_selection_edit_hud() -> None:
     assert 'setStateValue("pending_edge_edit"' in js
     assert "function openKindMenu(state, nodeId, anchor)" in js
     assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert '"Участники"' in js
+    assert "Согласующие" not in js
     assert "function applyOptimisticNodeEdit(state, nodeId, payload)" in js
     assert "function openDeleteConfirmPopover(state," in js
     assert "function openDurationPopover(state, nodeId, anchor)" in js
@@ -383,10 +385,11 @@ def test_flow_canvas_assets_define_fullscreen_mode() -> None:
     css = _asset_text("flow_canvas.css")
 
     # CSS immersive mode survives Streamlit remounts (native Fullscreen does not).
-    assert "immersiveMode: false" in js
+    assert "readStoredImmersiveMode" in js
     assert "function setImmersiveMode(state, enabled)" in js
     assert "function isImmersiveMode(state)" in js
     assert "state.immersiveMode" in js
+    assert "function syncImmersiveHost(state)" in js
     assert "requestElementFullscreen" not in js
     assert "exitDocumentFullscreen" not in js
     assert 'ownerDocument.addEventListener("fullscreenchange"' not in js
@@ -400,3 +403,8 @@ def test_flow_canvas_assets_define_fullscreen_mode() -> None:
     assert ".flow-canvas-root:fullscreen" not in css
     assert ".flow-canvas-toolbar__button--icon {" in css
     assert ".flow-canvas-toolbar__button.is-active {" in css
+    assert "flow-canvas-inspector-toggle" in js
+    assert "Скрыть инспектор" in js
+    assert "Показать инспектор" in js
+    assert ".flow-canvas-inspector-toggle" in css
+    assert 'setStateValue("inspector_collapsed"' in js

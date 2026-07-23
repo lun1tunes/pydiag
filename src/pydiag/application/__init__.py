@@ -22,6 +22,7 @@ from .flow_view import (
     consume_history_action,
     consume_pending_canvas_edge,
     consume_pending_canvas_edge_edit,
+    consume_pending_canvas_node_create,
     consume_pending_canvas_node_edit,
     consume_responsible_filter_rerun_request,
     detect_canvas_position_autosave,
@@ -30,6 +31,7 @@ from .flow_view import (
 from .flow_view_state import flow_state_timestamp
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     GraphSourceEdgeDraft,
     GraphSourceEdgeKind,
     GraphSourceNodeDraft,
@@ -59,9 +61,11 @@ __all__ = [
     "consume_history_action",
     "consume_pending_canvas_edge",
     "consume_pending_canvas_edge_edit",
+    "consume_pending_canvas_node_create",
     "consume_pending_canvas_node_edit",
     "consume_responsible_filter_rerun_request",
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "CreateWellCommand",
     "custom_layout_positions_for_graph",
     "detect_canvas_position_autosave",

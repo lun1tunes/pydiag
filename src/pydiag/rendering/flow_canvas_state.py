@@ -237,6 +237,43 @@ def component_history_action_from_state(
     return {"action": action, "request_id": request_id.strip()}
 
 
+def component_pending_node_create_from_state(
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated create-node request from canvas state."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_node_create")
+    if not isinstance(raw, Mapping):
+        return None
+    title = raw.get("title")
+    kind = raw.get("kind", "process")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if kind not in CANVAS_NODE_EDIT_KINDS:
+        kind = "process"
+    layout_x = raw.get("layout_x")
+    layout_y = raw.get("layout_y")
+    layout_w = raw.get("layout_w", 280)
+    layout_h = raw.get("layout_h", 72)
+    if not isinstance(layout_x, int | float) or not isinstance(layout_y, int | float):
+        return None
+    if not isinstance(layout_w, int | float) or not isinstance(layout_h, int | float):
+        return None
+    result: dict[str, Any] = {
+        "title": " ".join(title.split()).strip(),
+        "kind": kind,
+        "layout_x": round(float(layout_x), 2),
+        "layout_y": round(float(layout_y), 2),
+        "layout_w": int(layout_w),
+        "layout_h": int(layout_h),
+    }
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        result["request_id"] = request_id.strip()
+    return result
+
+
 def component_selected_id_from_state(
     graph: FlowGraphDocument,
     wells_doc: WellsDocument,

@@ -6,6 +6,7 @@ from typing import Any
 
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
+    CreateGraphSourceNodeCommand,
     DocumentsGateway,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
     GraphSourceEdgeDraft,
@@ -25,6 +26,7 @@ from pydiag.application.edit_history import (
     pop_redo,
     pop_undo,
     push_create_edge_command,
+    push_create_node_command,
     push_delete_edge_command,
     push_delete_node_command,
     push_move_nodes_command,
@@ -637,6 +639,66 @@ class StreamlitSessionCoordinator:
         )
         return created_edge_id if result.saved else None
 
+    def create_graph_source_node(
+        self,
+        graph: FlowGraphDocument,
+        command: CreateGraphSourceNodeCommand,
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> str | None:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return None
+
+        before_ids = {node.id for node in graph.nodes}
+        created_node_id: str | None = None
+
+        def save() -> FlowGraphDocument:
+            nonlocal created_node_id
+            updated = self.documents_gateway.create_graph_source_node(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            )
+            new_ids = {node.id for node in updated.nodes} - before_ids
+            if command.node_id and command.node_id in {node.id for node in updated.nodes}:
+                created_node_id = command.node_id
+            elif len(new_ids) == 1:
+                created_node_id = next(iter(new_ids))
+            elif new_ids:
+                title = command.title.strip()
+                for node in updated.nodes:
+                    if node.id in new_ids and node.title == title:
+                        created_node_id = node.id
+                        break
+                if created_node_id is None:
+                    created_node_id = sorted(new_ids)[0]
+            return updated
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
+            reload_data=self.load_app_data,
+            success_message=None if quiet else "Карточка схемы создана",
+        )
+        if result.saved and record_history and created_node_id:
+            push_create_node_command(
+                self.session_state,
+                node_id=created_node_id,
+                after=node_snapshot_from_create_command(command),
+            )
+            self.session_state["selected_id"] = created_node_id
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+        )
+        return created_node_id if result.saved else None
+
     def can_undo_edit(self) -> bool:
         return can_undo(self.session_state)
 
@@ -738,6 +800,25 @@ class StreamlitSessionCoordinator:
                     note=command.get("note"),
                     edge_id=edge_id,
                 ),
+                quiet=True,
+                record_history=False,
+            )
+            return created is not None
+        if kind == "create_node":
+            node_id = command.get("node_id")
+            after = command.get("after")
+            if not isinstance(node_id, str) or not isinstance(after, dict):
+                return False
+            if reverse:
+                return self.save_graph_source_node(
+                    graph,
+                    update_command_from_node_snapshot(node_id, after, deleted=True),
+                    quiet=True,
+                    record_history=False,
+                )
+            created = self.create_graph_source_node(
+                graph,
+                create_command_from_node_snapshot(node_id, after),
                 quiet=True,
                 record_history=False,
             )
@@ -920,6 +1001,22 @@ def node_snapshot_from_command(command: UpdateGraphSourceNodeCommand) -> dict[st
     }
 
 
+def node_snapshot_from_create_command(command: CreateGraphSourceNodeCommand) -> dict[str, Any]:
+    return {
+        "title": command.title,
+        "kind": command.kind,
+        "layout_x": command.layout_x,
+        "layout_y": command.layout_y,
+        "layout_w": command.layout_w,
+        "layout_h": command.layout_h,
+        "responsible": command.responsible,
+        "participants": list(command.participants),
+        "approvers": list(command.approvers),
+        "duration": command.duration,
+        "note": command.note,
+    }
+
+
 def edge_snapshot_from_draft(draft: GraphSourceEdgeDraft) -> dict[str, Any]:
     return {
         "source": draft.source,
@@ -964,6 +1061,37 @@ def update_command_from_node_snapshot(
         duration=snapshot.get("duration"),
         note=snapshot.get("note"),
         deleted=deleted,
+    )
+
+
+def create_command_from_node_snapshot(
+    node_id: str,
+    snapshot: dict[str, Any],
+) -> CreateGraphSourceNodeCommand:
+    participants = snapshot.get("participants") or []
+    approvers = snapshot.get("approvers") or []
+    kind = snapshot.get("kind") or "process"
+    if kind not in {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }:
+        kind = "process"
+    return CreateGraphSourceNodeCommand(
+        node_id=node_id,
+        title=str(snapshot.get("title") or "Измени меня"),
+        kind=kind,  # type: ignore[arg-type]
+        layout_x=float(snapshot.get("layout_x") or 0),
+        layout_y=float(snapshot.get("layout_y") or 0),
+        layout_w=int(snapshot.get("layout_w") or 280),
+        layout_h=int(snapshot.get("layout_h") or 72),
+        responsible=snapshot.get("responsible"),
+        participants=tuple(participants) if isinstance(participants, list) else (),
+        approvers=tuple(approvers) if isinstance(approvers, list) else (),
+        duration=snapshot.get("duration"),
+        note=snapshot.get("note"),
     )
 
 

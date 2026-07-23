@@ -14,6 +14,7 @@ GraphSourceEdgeKind = Literal["default", "yes", "no", "dashed"]
 
 __all__ = [
     "CreateGraphSourceEdgeCommand",
+    "CreateGraphSourceNodeCommand",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
     "GraphSourceNodeDraft",
@@ -88,3 +89,19 @@ class CreateGraphSourceEdgeCommand:
     condition: str | None
     note: str | None
     edge_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CreateGraphSourceNodeCommand:
+    title: str
+    kind: GraphSourceNodeKind
+    layout_x: float
+    layout_y: float
+    layout_w: int
+    layout_h: int
+    responsible: str | None = None
+    participants: tuple[str, ...] = ()
+    approvers: tuple[str, ...] = ()
+    duration: str | None = None
+    note: str | None = None
+    node_id: str | None = None
