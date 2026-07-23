@@ -9,7 +9,15 @@ from pydiag.rendering import (
     component_pending_edge_from_state,
     component_responsible_filter_from_state,
 )
+from pydiag.rendering.flow_canvas_state import (
+    component_history_action_from_state,
+    component_pending_edge_edit_from_state,
+    component_pending_node_edit_from_state,
+    component_positions_from_state,
+)
 
+from .edit_history import HISTORY_ACTION_REQUEST_KEY
+from .flow_position_edit import graph_node_positions
 from .flow_view_context import prepare_render_context
 from .flow_view_selection import (
     component_state_from_session,
@@ -20,6 +28,8 @@ from .flow_view_state import flow_state_timestamp
 
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
 FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY = "_flow_canvas_pending_edge_request_id"
+FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY = "_flow_canvas_pending_node_edit_request_id"
+FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY = "_flow_canvas_pending_edge_edit_request_id"
 FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
 FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
@@ -32,15 +42,22 @@ RESPONSIBLE_FILTER_LAST_KEY = "_responsible_filter_last"
 __all__ = [
     "FLOW_CANVAS_COMPONENT_KEY",
     "FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY",
+    "FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY",
     "FLOW_CANVAS_SESSION_EPOCH_KEY",
     "FLOW_RENDER_SNAPSHOT_CACHE_KEY",
     "FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY",
     "FLOW_SELECTION_RERUN_REQUEST_KEY",
+    "HISTORY_ACTION_REQUEST_KEY",
     "RESPONSIBLE_FILTER_LAST_KEY",
     "RESPONSIBLE_FILTER_SESSION_KEY",
     "bump_flow_canvas_session_epoch",
+    "consume_history_action",
     "consume_pending_canvas_edge",
+    "consume_pending_canvas_edge_edit",
+    "consume_pending_canvas_node_edit",
     "consume_responsible_filter_rerun_request",
+    "detect_canvas_position_autosave",
     "flow_state_timestamp",
     "render_flow",
     "resolve_responsible_filter",
@@ -58,6 +75,9 @@ def render_flow(
     layout_mode: str,
     position_edit_enabled: bool,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
+    can_undo: bool = False,
+    can_redo: bool = False,
     render_canvas,
     component_key: str = FLOW_CANVAS_COMPONENT_KEY,
 ) -> str | None:
@@ -89,6 +109,7 @@ def render_flow(
         layout_mode=render_context.layout_mode,
         position_edit_enabled=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
     )
     snapshot_cache = session_state.setdefault(FLOW_RENDER_SNAPSHOT_CACHE_KEY, {})
     if not isinstance(snapshot_cache, dict):
@@ -104,6 +125,9 @@ def render_flow(
         layout_mode=render_context.layout_mode,
         domain_nodes_draggable=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
+        can_undo=can_undo,
+        can_redo=can_redo,
         revision=revision,
         snapshot_cache=snapshot_cache,
         session_epoch=int(session_state.get(FLOW_CANVAS_SESSION_EPOCH_KEY, 0) or 0),
@@ -118,6 +142,57 @@ def render_flow(
     # Selection stays local in canvas JS; session_state is only mirrored for the
     # inspector in the same fragment. Never request a full-app selection rerun.
     return sync_returned_selected_id(session_state, graph, wells, selected_id, returned)
+
+
+def detect_canvas_position_autosave(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, tuple[float, float]] | None:
+    """Return full node positions to persist when canvas drag changed layout."""
+    component_state = component_state_from_session(session_state, component_key)
+    incoming = component_positions_from_state(graph, component_state)
+    if incoming is None:
+        return None
+    persisted = graph_node_positions(graph)
+    changed = False
+    merged = dict(persisted)
+    for node_id, xy in incoming.items():
+        if persisted.get(node_id) != xy:
+            changed = True
+        merged[node_id] = xy
+    return merged if changed else None
+
+
+def consume_history_action(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> str | None:
+    """Take a pending undo/redo action once. Returns ``\"undo\"`` / ``\"redo\"``."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_history_action_from_state(component_state)
+    if pending is None:
+        return None
+    request_id = pending["request_id"]
+    if session_state.get(HISTORY_ACTION_REQUEST_KEY) == request_id:
+        _clear_history_action_component_state(session_state, component_key)
+        return None
+    session_state[HISTORY_ACTION_REQUEST_KEY] = request_id
+    _clear_history_action_component_state(session_state, component_key)
+    return pending["action"]
+
+
+def _clear_history_action_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["history_action"] = None
+        session_state[component_key] = updated
 
 
 def consume_pending_canvas_edge(
@@ -163,6 +238,78 @@ def _clear_pending_edge_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_edge"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_node_edit(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas node edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_edit_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY) == request_id:
+            _clear_pending_node_edit_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY] = request_id
+
+    _clear_pending_node_edit_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_node_edit_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_edit"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_edge_edit(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending canvas edge edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_edge_edit_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY) == request_id:
+            _clear_pending_edge_edit_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY] = request_id
+
+    _clear_pending_edge_edit_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_edge_edit_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_edge_edit"] = None
         session_state[component_key] = updated
 
 

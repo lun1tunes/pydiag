@@ -87,3 +87,4 @@ class CreateGraphSourceEdgeCommand:
     label: str | None
     condition: str | None
     note: str | None
+    edge_id: str | None = None

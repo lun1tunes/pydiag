@@ -82,6 +82,13 @@ def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
         "_flow_selection_rerun_requested",
         "_flow_responsible_filter_rerun_requested",
         "_flow_render_snapshot_cache",
+        "_flow_edit_undo",
+        "_flow_edit_redo",
+        "_flow_history_action_request_id",
+        "_flow_position_autosave_sig",
+        "_flow_canvas_pending_edge_request_id",
+        "_flow_canvas_pending_node_edit_request_id",
+        "_flow_canvas_pending_edge_edit_request_id",
     ):
         session_state.pop(key, None)
     for key in list(session_state):

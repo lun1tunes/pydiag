@@ -21,11 +21,14 @@
     linear-gradient(180deg, #fafaf8 0%, #f3f4f6 100%);
 }
 
-.flow-canvas-root.is-fullscreen,
-.flow-canvas-root:fullscreen,
-.flow-canvas-root:-webkit-full-screen {
+.flow-canvas-root.is-fullscreen {
+  /* CSS immersive mode (not browser Fullscreen API): survives Streamlit
+     fragment remounts that would otherwise exit native fullscreen. */
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
   border-radius: 0;
 }
 
@@ -181,6 +184,13 @@
   font-weight: 700;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
   cursor: pointer;
+}
+
+.flow-canvas-toolbar__button:disabled {
+  opacity: 0.42;
+  cursor: default;
+  box-shadow: none;
+  transform: none;
 }
 
 .flow-canvas-toolbar__button--icon {
@@ -706,4 +716,216 @@
     padding: 6px;
   }
 
+}
+
+.flow-node-text.is-editing {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  outline: 1px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  padding: 0 2px;
+}
+
+.flow-edit-hud {
+  position: absolute;
+  z-index: 18;
+  pointer-events: auto;
+}
+
+.flow-edit-hud__trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  color: #334155;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.flow-edit-hud__trigger:hover {
+  border-color: rgba(37, 99, 235, 0.45);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu,
+.flow-edit-field-popover {
+  position: absolute;
+  z-index: 22;
+  min-width: 168px;
+  max-width: 280px;
+  max-height: min(360px, 55vh);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+  pointer-events: auto;
+}
+
+.flow-edit-field-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+
+.flow-edit-field-popover__label {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.flow-edit-field-popover__input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+}
+
+.flow-edit-duration__row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.flow-edit-duration__amount {
+  flex: 1 1 72px;
+  width: auto;
+}
+
+.flow-edit-duration__unit {
+  flex: 0 0 auto;
+  min-width: 88px;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.flow-edit-confirm__message {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.flow-edit-confirm__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.flow-edit-confirm__actions .flow-edit-menu__item {
+  flex: 1 1 0;
+  text-align: center;
+  margin-top: 0;
+}
+
+.flow-edit-menu__item {
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.flow-edit-menu__item:hover,
+.flow-edit-menu__item.is-active {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu__item.is-apply {
+  margin-top: 4px;
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+}
+
+.flow-edit-menu__item.is-danger {
+  color: #b91c1c;
+}
+
+.flow-edit-menu__item.is-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #991b1b;
+}
+
+.flow-node-roles-menu__section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.flow-node-roles-menu__label {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.flow-node-roles-menu__select {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 7px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+}
+
+.flow-node-roles-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 110px;
+  overflow: auto;
+}
+
+.flow-node-roles-menu__check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
 }

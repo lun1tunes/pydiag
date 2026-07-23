@@ -19,6 +19,7 @@ POSITION_EDIT_DIRTY_KEY = "position_edit_dirty"
 __all__ = [
     "custom_layout_positions_for_graph",
     "ensure_position_edit_positions",
+    "graph_node_positions",
     "graph_with_positions",
     "initial_position_edit_positions",
     "is_position_pair",

@@ -8,11 +8,17 @@ from pydiag.application import (
     CreateGraphSourceEdgeCommand,
     FLOW_CANVAS_COMPONENT_KEY,
     DocumentsGateway,
+    UpdateGraphSourceEdgeCommand,
+    consume_history_action,
     consume_pending_canvas_edge,
+    consume_pending_canvas_edge_edit,
+    consume_pending_canvas_node_edit,
+    detect_canvas_position_autosave,
 )
 from pydiag.application import (
     render_flow as render_flow_view,
 )
+from pydiag.application.edit_history import can_redo, can_undo
 from pydiag.common.auth_sessions import AuthSessionStore
 from pydiag.domain.models import FlowGraphDocument, FlowNode, WellsDocument
 from pydiag.presentation.admin import (
@@ -259,6 +265,7 @@ class StreamlitAppRuntime:
         *,
         position_edit_enabled: bool = False,
         edge_edit_enabled: bool = False,
+        node_edit_enabled: bool = False,
         render_canvas: Callable[..., object] | None = None,
     ) -> str | None:
         return render_flow_view(
@@ -271,6 +278,9 @@ class StreamlitAppRuntime:
             layout_mode=layout_mode,
             position_edit_enabled=position_edit_enabled,
             edge_edit_enabled=edge_edit_enabled,
+            node_edit_enabled=node_edit_enabled,
+            can_undo=can_undo(self.session.session_state),
+            can_redo=can_redo(self.session.session_state),
             render_canvas=render_canvas or self.render_canvas,
             component_key=FLOW_CANVAS_COMPONENT_KEY,
         )
@@ -303,6 +313,108 @@ class StreamlitAppRuntime:
                 condition=None,
                 note=None,
             ),
+            quiet=True,
+            record_history=True,
+        )
+
+    def _consume_pending_canvas_node_edit(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+    ) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_edit(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование карточек доступно только администратору.")
+            return
+        session.apply_canvas_node_edit(graph, wells, pending, quiet=True, record_history=True)
+
+    def _consume_pending_canvas_edge_edit(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_edge_edit(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование связей доступно только администратору.")
+            return
+        try:
+            draft = session.load_graph_source_edge(pending["edge_id"])
+        except Exception as exc:
+            self.st_module.error(f"Не удалось загрузить связь: {exc}")
+            return
+        kind = pending.get("kind", draft.kind)
+        if kind not in {"default", "yes", "no", "dashed"}:
+            kind = draft.kind
+        session.save_graph_source_edge(
+            graph,
+            UpdateGraphSourceEdgeCommand(
+                edge_id=draft.edge_id,
+                source=draft.source,
+                target=draft.target,
+                kind=kind,  # type: ignore[arg-type]
+                label=draft.label,
+                condition=draft.condition,
+                note=draft.note,
+                deleted=True if pending.get("deleted") is True else None,
+            ),
+            quiet=True,
+            record_history=False,
+        )
+
+    def _consume_history_action(self, graph: FlowGraphDocument) -> None:
+        action = consume_history_action(
+            self.session.session_state,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if action == "undo":
+            self.session.undo_edit(graph)
+        elif action == "redo":
+            self.session.redo_edit(graph)
+
+    def _autosave_canvas_positions(
+        self,
+        graph: FlowGraphDocument,
+        *,
+        position_edit_enabled: bool,
+    ) -> None:
+        if not position_edit_enabled or not self.session.position_edit_available():
+            return
+        if not self.auth_context().current_user_is_admin():
+            return
+        positions = detect_canvas_position_autosave(
+            self.session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if positions is None:
+            return
+        self.session.save_graph_positions(
+            graph,
+            positions,
+            quiet=True,
+            record_history=True,
         )
 
     def run(self) -> None:
@@ -335,10 +447,16 @@ class StreamlitAppRuntime:
                         self.auth_context().current_user_is_admin()
                         and session.graph_source_edit_available()
                     )
-                    # Clear pending_edge in session_state BEFORE the canvas
-                    # widget is instantiated — Streamlit forbids mutating
-                    # st.session_state[widget_key] after that point.
+                    node_edit_enabled = edge_edit_enabled
+                    # Mutate widget session_state BEFORE the canvas is mounted.
+                    self._consume_history_action(graph)
                     self._consume_pending_canvas_edge(graph)
+                    self._consume_pending_canvas_node_edit(graph, wells)
+                    self._consume_pending_canvas_edge_edit(graph)
+                    self._autosave_canvas_positions(
+                        graph,
+                        position_edit_enabled=position_edit_enabled,
+                    )
                     selected_id = self._render_flow(
                         graph,
                         wells,
@@ -348,6 +466,7 @@ class StreamlitAppRuntime:
                         layout_mode=layout_mode,
                         position_edit_enabled=position_edit_enabled,
                         edge_edit_enabled=edge_edit_enabled,
+                        node_edit_enabled=node_edit_enabled,
                     )
             except Exception as exc:
                 self.st_module.error(f"Ошибка отрисовки схемы: {exc}")

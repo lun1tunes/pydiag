@@ -23,6 +23,7 @@ def flow_state_timestamp(
     layout_mode: str,
     position_edit_enabled: bool = False,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
 ) -> int:
     # Search / kind / responsible filters and live draft positions are applied
     # without bumping scene revision (client dim + incremental geometry).
@@ -33,6 +34,7 @@ def flow_state_timestamp(
         layout_mode=layout_mode,
         position_edit_enabled=position_edit_enabled,
         edge_edit_enabled=edge_edit_enabled,
+        node_edit_enabled=node_edit_enabled,
     )
     if session_state.get(FLOW_VIEW_SIGNATURE_KEY) != signature:
         previous = int(session_state.get(FLOW_STATE_TIMESTAMP_KEY, 0))
@@ -48,6 +50,7 @@ def flow_view_signature(
     layout_mode: str,
     position_edit_enabled: bool,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
 ) -> tuple[Any, ...]:
     # Topology / versions / chrome flags only. Node positions are synced
     # incrementally via positionsVersion so drag does not clear the scene.
@@ -59,4 +62,5 @@ def flow_view_signature(
         layout_mode,
         position_edit_enabled,
         edge_edit_enabled,
+        node_edit_enabled,
     )

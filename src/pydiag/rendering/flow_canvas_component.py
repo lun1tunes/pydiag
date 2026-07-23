@@ -30,12 +30,18 @@ def render_flow_canvas(
             "positions": default_positions,
             "responsible_filter": list(default_responsible_filter or []),
             "pending_edge": None,
+            "pending_node_edit": None,
+            "pending_edge_edit": None,
+            "history_action": None,
         },
         height="content",
         on_selected_id_change=lambda: None,
         on_positions_change=lambda: None,
         on_responsible_filter_change=lambda: None,
         on_pending_edge_change=lambda: None,
+        on_pending_node_edit_change=lambda: None,
+        on_pending_edge_edit_change=lambda: None,
+        on_history_action_change=lambda: None,
     )
 
 
@@ -66,10 +72,13 @@ def _asset_text(filename: str) -> str:
 
 
 def _register_flow_canvas_component():
+    # Dom utils are a separate asset so Node can unit-test Shadow DOM hit logic;
+    # Streamlit injects one JS blob, so strip `export` and prepend.
+    dom_utils = _asset_text("flow_canvas_dom_utils.js").replace("export ", "", 1)
     return components_v2.component(
         FLOW_CANVAS_COMPONENT_NAME,
         html="<div id='flow-canvas-root'></div>",
         css=_asset_text("flow_canvas.css"),
-        js=_asset_text("flow_canvas.js"),
+        js=f"{dom_utils}\n{_asset_text('flow_canvas.js')}",
         isolate_styles=True,
     )

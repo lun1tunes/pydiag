@@ -362,7 +362,7 @@ def test_streamlit_admin_can_edit_newest_archive_even_when_live_exists(
     assert live["nodes"]["proc_initial_review"]["title"] != "Newest archive editable"
 
 
-def test_streamlit_admin_can_save_source_layout_to_flow_source(
+def test_streamlit_admin_canvas_positions_autosave_to_flow_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -376,10 +376,20 @@ def test_streamlit_admin_can_save_source_layout_to_flow_source(
     login_as_admin(app)
 
     set_toggle(app, "Редактировать положение", True)
-    app.session_state["position_edit_positions"] = {"proc_initial_review": (733.5, 412.25)}
+    # Simulate canvas drag end: bidi component reports new positions.
+    canvas_state = {}
+    try:
+        existing = app.session_state["well_drilling_flow_canvas"]
+        if isinstance(existing, dict):
+            canvas_state = dict(existing)
+    except KeyError:
+        pass
+    canvas_state["positions"] = {
+        "proc_initial_review": {"x": 733.5, "y": 412.25},
+    }
+    app.session_state["well_drilling_flow_canvas"] = canvas_state
     app.run(timeout=30)
     assert not app.exception
-    click_button(app, "Сохранить")
 
     saved = load_structured_payload(source_path.read_bytes())
     assert saved["layout"]["proc_initial_review"] == {

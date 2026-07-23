@@ -19,6 +19,19 @@ from pydiag.application import (
     position_edit_positions_from_state,
     reset_position_edit_state,
 )
+from pydiag.application.edit_history import (
+    can_redo,
+    can_undo,
+    pop_redo,
+    pop_undo,
+    push_create_edge_command,
+    push_delete_node_command,
+    push_move_nodes_command,
+    push_onto_undo_from_redo,
+    push_onto_undo_keep_redo,
+    push_update_node_command,
+)
+from pydiag.application.flow_position_edit import graph_node_positions
 from pydiag.application import (
     flash as store_flash,
 )
@@ -41,6 +54,7 @@ from pydiag.domain.models import FlowGraphDocument, WellsDocument
 SELECTED_GRAPH_VERSION_KEY = "selected_graph_version_id"
 LOADED_GRAPH_VERSION_KEY = "loaded_graph_version_id"
 POSITION_EDIT_RERUN_REQUEST_KEY = "_position_edit_rerun_requested"
+POSITION_AUTOSAVE_SIG_KEY = "_flow_position_autosave_sig"
 
 
 @dataclass(frozen=True)
@@ -249,13 +263,21 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         positions: dict[str, tuple[float, float]],
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> bool:
         if not self.position_edit_available():
             self.st_module.error(
                 self.position_edit_block_reason()
                 or "Редактирование расположения сейчас недоступно."
             )
-            return
+            return False
+
+        before = graph_node_positions(graph)
+        sig = _positions_signature(positions)
+        if self.session_state.get(POSITION_AUTOSAVE_SIG_KEY) == sig:
+            return False
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.save_graph_positions(
@@ -271,9 +293,18 @@ class StreamlitSessionCoordinator:
             reset_position_edit_state=lambda: reset_position_edit_state(
                 self.session_state
             ),
-            success_message="Расположение карточек сохранено",
+            success_message=None if quiet else "Расположение карточек сохранено",
         )
+        if result.saved:
+            self.session_state[POSITION_AUTOSAVE_SIG_KEY] = sig
+            if record_history:
+                push_move_nodes_command(
+                    self.session_state,
+                    before=before,
+                    after=positions,
+                )
         self.finalize_persistence(result.should_rerun, result.error_message)
+        return result.saved
 
     def load_graph_source_node(self, node_id: str) -> GraphSourceNodeDraft:
         return self.documents_gateway.load_graph_source_node(
@@ -291,13 +322,17 @@ class StreamlitSessionCoordinator:
         self,
         graph: FlowGraphDocument,
         command: UpdateGraphSourceNodeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = False,
+        before_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return False
 
         result = persist_graph_document_update(
             self.session_state,
@@ -308,24 +343,183 @@ class StreamlitSessionCoordinator:
             ),
             reload_data=self.load_app_data,
             success_message=(
-                "Карточка схемы удалена"
-                if command.deleted is True
-                else "Карточка схемы обновлена"
+                None
+                if quiet
+                else (
+                    "Карточка схемы удалена"
+                    if command.deleted is True
+                    else "Карточка схемы обновлена"
+                )
             ),
         )
+        if record_history and result.saved and before_snapshot is not None:
+            if command.deleted is True:
+                push_delete_node_command(
+                    self.session_state,
+                    node_id=command.node_id,
+                    before=before_snapshot,
+                )
+            else:
+                push_update_node_command(
+                    self.session_state,
+                    node_id=command.node_id,
+                    before=before_snapshot,
+                    after=node_snapshot_from_command(command),
+                )
+        if command.deleted is True and self.session_state.get("selected_id") == command.node_id:
+            self.session_state.pop("selected_id", None)
         self.finalize_persistence(result.should_rerun, result.error_message)
+        return result.saved
+
+    def apply_canvas_node_edit(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+        patch: dict[str, Any],
+        *,
+        quiet: bool = True,
+        record_history: bool = True,
+    ) -> bool:
+        from pydiag.presentation.admin import validate_graph_source_node_form
+        from pydiag.presentation.admin_models import (
+            graph_source_node_delete_block_reason,
+            normalized_optional_text,
+        )
+
+        node_id = patch.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            return False
+        try:
+            draft = self.load_graph_source_node(node_id)
+        except Exception as exc:
+            self.st_module.error(str(exc))
+            return False
+
+        before = node_snapshot_from_draft(draft)
+        if patch.get("deleted") is True:
+            block = graph_source_node_delete_block_reason(node_id, wells)
+            if block is not None:
+                self.st_module.error(block)
+                return False
+            return self.save_graph_source_node(
+                graph,
+                UpdateGraphSourceNodeCommand(
+                    node_id=draft.node_id,
+                    title=draft.title,
+                    kind=draft.kind,
+                    layout_x=draft.layout_x,
+                    layout_y=draft.layout_y,
+                    layout_w=draft.layout_w,
+                    layout_h=draft.layout_h,
+                    responsible=draft.responsible,
+                    participants=draft.participants,
+                    approvers=draft.approvers,
+                    duration=draft.duration,
+                    note=draft.note,
+                    deleted=True,
+                ),
+                quiet=quiet,
+                record_history=record_history,
+                before_snapshot=before,
+            )
+
+        title = patch["title"] if "title" in patch else draft.title
+        kind = patch["kind"] if "kind" in patch else draft.kind
+        responsible = patch["responsible"] if "responsible" in patch else draft.responsible
+        participants = (
+            tuple(patch["participants"])
+            if "participants" in patch
+            else draft.participants
+        )
+        approvers = (
+            tuple(patch["approvers"]) if "approvers" in patch else draft.approvers
+        )
+        if "duration" in patch:
+            duration = normalized_optional_text(str(patch["duration"] or ""))
+        else:
+            duration = draft.duration
+        if "note" in patch:
+            note = normalized_optional_text(str(patch["note"] or ""))
+        else:
+            note = draft.note
+
+        if not isinstance(title, str):
+            return False
+        if kind not in {
+            "process",
+            "decision_diamond",
+            "database",
+            "input_data",
+            "event",
+        }:
+            return False
+
+        # Responsible wins; participants win over approvers (same as canvas UI).
+        participants = tuple(
+            item for item in participants if item and item != responsible
+        )
+        approvers = tuple(
+            item
+            for item in approvers
+            if item and item != responsible and item not in participants
+        )
+
+        error_message = validate_graph_source_node_form(
+            title=title,
+            kind=kind,
+            responsible=responsible,
+            participants=list(participants),
+            approvers=list(approvers),
+        )
+        if error_message is not None:
+            self.st_module.error(error_message)
+            return False
+
+        if duration is not None:
+            try:
+                from pydiag.domain.models import parse_node_time
+
+                parse_node_time(duration)
+            except ValueError as exc:
+                self.st_module.error(str(exc))
+                return False
+
+        return self.save_graph_source_node(
+            graph,
+            UpdateGraphSourceNodeCommand(
+                node_id=draft.node_id,
+                title=title.strip(),
+                kind=kind,  # type: ignore[arg-type]
+                layout_x=draft.layout_x,
+                layout_y=draft.layout_y,
+                layout_w=draft.layout_w,
+                layout_h=draft.layout_h,
+                responsible=responsible,
+                participants=tuple(participants),
+                approvers=tuple(approvers),
+                duration=duration,
+                note=note,
+                deleted=None,
+            ),
+            quiet=quiet,
+            record_history=record_history,
+            before_snapshot=before,
+        )
 
     def save_graph_source_edge(
         self,
         graph: FlowGraphDocument,
         command: UpdateGraphSourceEdgeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = False,
+    ) -> bool:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return False
 
         result = persist_graph_document_update(
             self.session_state,
@@ -336,38 +530,206 @@ class StreamlitSessionCoordinator:
             ),
             reload_data=self.load_app_data,
             success_message=(
-                "Связь схемы удалена"
-                if command.deleted is True
-                else "Связь схемы обновлена"
+                None
+                if quiet
+                else (
+                    "Связь схемы удалена"
+                    if command.deleted is True
+                    else "Связь схемы обновлена"
+                )
             ),
         )
         if command.deleted is True and self.session_state.get("selected_id") == command.edge_id:
             self.session_state.pop("selected_id", None)
         self.finalize_persistence(result.should_rerun, result.error_message)
+        return result.saved
 
     def create_graph_source_edge(
         self,
         graph: FlowGraphDocument,
         command: CreateGraphSourceEdgeCommand,
-    ) -> None:
+        *,
+        quiet: bool = False,
+        record_history: bool = True,
+    ) -> str | None:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return
+            return None
 
-        result = persist_graph_document_update(
-            self.session_state,
-            save=lambda: self.documents_gateway.create_graph_source_edge(
+        before_ids = {edge.id for edge in graph.edges}
+        created_edge_id: str | None = None
+
+        def save() -> FlowGraphDocument:
+            nonlocal created_edge_id
+            updated = self.documents_gateway.create_graph_source_edge(
                 command,
                 expected_version=graph.version,
                 graph_version_id=self.editable_graph_version_id(),
-            ),
+            )
+            new_ids = {edge.id for edge in updated.edges} - before_ids
+            if command.edge_id and command.edge_id in {edge.id for edge in updated.edges}:
+                created_edge_id = command.edge_id
+            elif len(new_ids) == 1:
+                created_edge_id = next(iter(new_ids))
+            elif new_ids:
+                # Prefer an edge matching source/target.
+                for edge in updated.edges:
+                    if edge.id in new_ids and edge.source == command.source and edge.target == command.target:
+                        created_edge_id = edge.id
+                        break
+                if created_edge_id is None:
+                    created_edge_id = sorted(new_ids)[0]
+            return updated
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
             reload_data=self.load_app_data,
-            success_message="Связь схемы создана",
+            success_message=None if quiet else "Связь схемы создана",
         )
+        if result.saved and record_history and created_edge_id:
+            push_create_edge_command(
+                self.session_state,
+                edge_id=created_edge_id,
+                source=command.source,
+                target=command.target,
+                kind=command.kind,
+                label=command.label,
+                condition=command.condition,
+                note=command.note,
+            )
         self.finalize_persistence(result.should_rerun, result.error_message)
+        return created_edge_id if result.saved else None
+
+    def can_undo_edit(self) -> bool:
+        return can_undo(self.session_state)
+
+    def can_redo_edit(self) -> bool:
+        return can_redo(self.session_state)
+
+    def undo_edit(self, graph: FlowGraphDocument) -> None:
+        command = pop_undo(self.session_state)
+        if command is None:
+            return
+        # Park on redo before persist+rerun so the stack survives RerunException.
+        push_onto_undo_keep_redo(self.session_state, command)
+        ok = self._apply_history_command(graph, command, reverse=True)
+        if not ok:
+            restored = pop_redo(self.session_state)
+            if restored is not None:
+                undo_stack = list(self.session_state.get("_flow_edit_undo") or [])
+                undo_stack.append(restored)
+                self.session_state["_flow_edit_undo"] = undo_stack
+
+    def redo_edit(self, graph: FlowGraphDocument) -> None:
+        command = pop_redo(self.session_state)
+        if command is None:
+            return
+        push_onto_undo_from_redo(self.session_state, command)
+        ok = self._apply_history_command(graph, command, reverse=False)
+        if not ok:
+            restored = pop_undo(self.session_state)
+            if restored is not None:
+                redo_stack = list(self.session_state.get("_flow_edit_redo") or [])
+                redo_stack.append(restored)
+                self.session_state["_flow_edit_redo"] = redo_stack
+
+    def _apply_history_command(
+        self,
+        graph: FlowGraphDocument,
+        command: dict[str, Any],
+        *,
+        reverse: bool,
+    ) -> bool:
+        kind = command.get("kind")
+        if kind == "move_nodes":
+            payload = command.get("before" if reverse else "after")
+            if not isinstance(payload, dict):
+                return False
+            current = graph_node_positions(graph)
+            for node_id, xy in payload.items():
+                if not isinstance(xy, list | tuple) or len(xy) != 2:
+                    continue
+                current[str(node_id)] = (float(xy[0]), float(xy[1]))
+            # Clear autosave sig so undo/redo positions always write.
+            self.session_state.pop(POSITION_AUTOSAVE_SIG_KEY, None)
+            return self.save_graph_positions(
+                graph,
+                current,
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "create_edge":
+            edge_id = command.get("edge_id")
+            source = command.get("source")
+            target = command.get("target")
+            edge_kind = command.get("kind_value", "default")
+            if not isinstance(edge_id, str) or not isinstance(source, str) or not isinstance(target, str):
+                return False
+            if reverse:
+                return self.save_graph_source_edge(
+                    graph,
+                    UpdateGraphSourceEdgeCommand(
+                        edge_id=edge_id,
+                        source=source,
+                        target=target,
+                        kind=edge_kind,  # type: ignore[arg-type]
+                        label=command.get("label"),
+                        condition=command.get("condition"),
+                        note=command.get("note"),
+                        deleted=True,
+                    ),
+                    quiet=True,
+                    record_history=False,
+                )
+            created = self.create_graph_source_edge(
+                graph,
+                CreateGraphSourceEdgeCommand(
+                    source=source,
+                    target=target,
+                    kind=edge_kind,  # type: ignore[arg-type]
+                    label=command.get("label"),
+                    condition=command.get("condition"),
+                    note=command.get("note"),
+                    edge_id=edge_id,
+                ),
+                quiet=True,
+                record_history=False,
+            )
+            return created is not None
+        if kind == "update_node":
+            payload = command.get("before" if reverse else "after")
+            node_id = command.get("node_id")
+            if not isinstance(node_id, str) or not isinstance(payload, dict):
+                return False
+            return self.save_graph_source_node(
+                graph,
+                update_command_from_node_snapshot(node_id, payload, deleted=None),
+                quiet=True,
+                record_history=False,
+            )
+        if kind == "delete_node":
+            node_id = command.get("node_id")
+            before = command.get("before")
+            if not isinstance(node_id, str) or not isinstance(before, dict):
+                return False
+            if reverse:
+                return self.save_graph_source_node(
+                    graph,
+                    update_command_from_node_snapshot(node_id, before, deleted=False),
+                    quiet=True,
+                    record_history=False,
+                )
+            return self.save_graph_source_node(
+                graph,
+                update_command_from_node_snapshot(node_id, before, deleted=True),
+                quiet=True,
+                record_history=False,
+            )
+        return False
 
     def working_schema_selected(self) -> bool:
         """True for any selectable schema: live «Текущая» or any archived ``v000x``.
@@ -422,3 +784,69 @@ class StreamlitSessionCoordinator:
             "Фактические данные импортированы в текущую схему. "
             f"Предыдущая версия сохранена как {result.backup_version.label}"
         )
+
+
+def _positions_signature(positions: dict[str, tuple[float, float]]) -> tuple[tuple[str, float, float], ...]:
+    return tuple(
+        sorted(
+            (node_id, round(float(xy[0]), 2), round(float(xy[1]), 2))
+            for node_id, xy in positions.items()
+        )
+    )
+
+
+def node_snapshot_from_draft(draft: GraphSourceNodeDraft) -> dict[str, Any]:
+    return {
+        "title": draft.title,
+        "kind": draft.kind,
+        "layout_x": draft.layout_x,
+        "layout_y": draft.layout_y,
+        "layout_w": draft.layout_w,
+        "layout_h": draft.layout_h,
+        "responsible": draft.responsible,
+        "participants": list(draft.participants),
+        "approvers": list(draft.approvers),
+        "duration": draft.duration,
+        "note": draft.note,
+    }
+
+
+def node_snapshot_from_command(command: UpdateGraphSourceNodeCommand) -> dict[str, Any]:
+    return {
+        "title": command.title,
+        "kind": command.kind,
+        "layout_x": command.layout_x,
+        "layout_y": command.layout_y,
+        "layout_w": command.layout_w,
+        "layout_h": command.layout_h,
+        "responsible": command.responsible,
+        "participants": list(command.participants),
+        "approvers": list(command.approvers),
+        "duration": command.duration,
+        "note": command.note,
+    }
+
+
+def update_command_from_node_snapshot(
+    node_id: str,
+    snapshot: dict[str, Any],
+    *,
+    deleted: bool | None,
+) -> UpdateGraphSourceNodeCommand:
+    participants = snapshot.get("participants") or []
+    approvers = snapshot.get("approvers") or []
+    return UpdateGraphSourceNodeCommand(
+        node_id=node_id,
+        title=str(snapshot.get("title") or ""),
+        kind=snapshot.get("kind") or "process",  # type: ignore[arg-type]
+        layout_x=float(snapshot.get("layout_x") or 0),
+        layout_y=float(snapshot.get("layout_y") or 0),
+        layout_w=int(snapshot.get("layout_w") or 280),
+        layout_h=int(snapshot.get("layout_h") or 72),
+        responsible=snapshot.get("responsible"),
+        participants=tuple(participants) if isinstance(participants, list) else (),
+        approvers=tuple(approvers) if isinstance(approvers, list) else (),
+        duration=snapshot.get("duration"),
+        note=snapshot.get("note"),
+        deleted=deleted,
+    )

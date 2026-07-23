@@ -1,4 +1,6 @@
 const TOOLBAR_BUTTONS = [
+  { id: "undo", label: "↶", title: "Отменить (Ctrl+Z)" },
+  { id: "redo", label: "↷", title: "Повторить (Ctrl+Shift+Z)" },
   { id: "zoom-in", label: "+" },
   { id: "zoom-out", label: "-" },
   { id: "reset-view", label: "Reset view" },
@@ -71,14 +73,6 @@ function detachCanvasState(state) {
     state.resizeObserver.disconnect();
     state.resizeObserver = null;
   }
-  if (state.fullscreenChangeHandler) {
-    state.ownerDocument.removeEventListener("fullscreenchange", state.fullscreenChangeHandler);
-    state.ownerDocument.removeEventListener(
-      "webkitfullscreenchange",
-      state.fullscreenChangeHandler,
-    );
-    state.fullscreenChangeHandler = null;
-  }
 }
 
 function attachCanvasObservers(state) {
@@ -91,17 +85,7 @@ function attachCanvasObservers(state) {
     });
     state.resizeObserver.observe(state.root);
   }
-  if (!state.fullscreenChangeHandler) {
-    state.fullscreenChangeHandler = () => {
-      syncFullscreenClass(state);
-      queueRender(state);
-    };
-    state.ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);
-    state.ownerDocument.addEventListener(
-      "webkitfullscreenchange",
-      state.fullscreenChangeHandler,
-    );
-  }
+  // Restore immersive chrome after Streamlit remounts the host.
   syncFullscreenClass(state);
 }
 
@@ -127,6 +111,7 @@ function createCanvasState(root, component, ownerDocument) {
       selected_id: null,
       position_edit_enabled: false,
       edge_edit_enabled: false,
+      node_edit_enabled: false,
       revision: null,
     },
     nodePayloadsById: new Map(),
@@ -140,6 +125,9 @@ function createCanvasState(root, component, ownerDocument) {
     pendingSelectedId: undefined,
     selectedNodeIds: new Set(),
     suppressNextNodeClick: false,
+    editingTitleNodeId: null,
+    activeEditPopover: null,
+    editHud: null,
     responsibleFilter: [],
     pendingResponsibleFilter: undefined,
     lastHostResponsibleFilter: [],
@@ -148,6 +136,7 @@ function createCanvasState(root, component, ownerDocument) {
     draggingNodeId: null,
     draggingNodeIds: [],
     connectMode: null,
+    immersiveMode: false,
     frameRequested: false,
     lastRevision: null,
     sceneRevision: null,
@@ -160,7 +149,6 @@ function createCanvasState(root, component, ownerDocument) {
     renderedDraggingNodeId: null,
     renderedDraggingNodeIds: [],
     resizeObserver: null,
-    fullscreenChangeHandler: null,
     keydownHandler: null,
     ownerDocument,
     dom: null,
@@ -192,7 +180,19 @@ function initializeRootStructure(state) {
     const button = createElement("button", "flow-canvas-toolbar__button", toolbar);
     button.type = "button";
     button.textContent = buttonDef.label;
+    if (buttonDef.title) {
+      button.title = buttonDef.title;
+      button.setAttribute("aria-label", buttonDef.title);
+    }
     button.addEventListener("click", () => {
+      if (buttonDef.id === "undo") {
+        requestHistoryAction(state, "undo");
+        return;
+      }
+      if (buttonDef.id === "redo") {
+        requestHistoryAction(state, "redo");
+        return;
+      }
       if (buttonDef.id === "zoom-in") {
         zoomAtCenter(state, 1.12);
       } else if (buttonDef.id === "zoom-out") {
@@ -294,8 +294,40 @@ function initializeRootStructure(state) {
 
   if (!state.keydownHandler) {
     state.keydownHandler = (event) => {
+      if (event.key === "Escape" && state.activeEditPopover) {
+        closeActiveEditPopover(state);
+        return;
+      }
       if (event.key === "Escape" && state.connectMode) {
         cancelConnectMode(state);
+        return;
+      }
+      if (event.key === "Escape" && state.immersiveMode) {
+        event.preventDefault();
+        setImmersiveMode(state, false);
+        return;
+      }
+      if (isEditableKeyboardTarget(event.target)) {
+        return;
+      }
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) {
+        return;
+      }
+      const key = String(event.key || "").toLowerCase();
+      if (key === "z" && event.shiftKey) {
+        event.preventDefault();
+        requestHistoryAction(state, "redo");
+        return;
+      }
+      if (key === "z") {
+        event.preventDefault();
+        requestHistoryAction(state, "undo");
+        return;
+      }
+      if (key === "y") {
+        event.preventDefault();
+        requestHistoryAction(state, "redo");
       }
     };
     state.ownerDocument.addEventListener("keydown", state.keydownHandler);
@@ -475,6 +507,7 @@ function renderState(state) {
     state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
     state.renderedDraggingNodeIds = [...state.draggingNodeIds];
+    syncSelectionEditHud(state);
   } else {
     const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;
     const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;
@@ -528,20 +561,26 @@ function renderState(state) {
   syncResponsibleFilterDim(state);
   updateMinimapViewport(state);
   syncConnectModeChrome(state);
+  if (state.editHud) {
+    positionEditHud(state);
+  }
 }
 
 function syncToolbarState(state) {
   const fullscreenButton = state.dom.fullscreenButton;
-  const fullscreenSupported = isFullscreenSupported(state.root);
-  const fullscreenActive = isRootFullscreen(state);
-
-  fullscreenButton.hidden = !fullscreenSupported;
-  if (!fullscreenSupported) {
-    return;
+  const fullscreenActive = isImmersiveMode(state);
+  const canUndo = state.payload.can_undo === true;
+  const canRedo = state.payload.can_redo === true;
+  for (const [id, button] of Object.entries(state.dom.toolbarButtons || {})) {
+    if (id === "undo") {
+      button.disabled = !canUndo;
+    } else if (id === "redo") {
+      button.disabled = !canRedo;
+    }
   }
-
+  fullscreenButton.hidden = false;
   const title = fullscreenActive
-    ? "Выйти из полноэкранного режима"
+    ? "Свернуть схему"
     : "Развернуть схему на весь экран";
   if (
     fullscreenButton.dataset.fullscreenActive !== String(fullscreenActive) ||
@@ -555,6 +594,31 @@ function syncToolbarState(state) {
   fullscreenButton.title = title;
   fullscreenButton.setAttribute("aria-label", title);
   fullscreenButton.classList.toggle("is-active", fullscreenActive);
+}
+
+function isEditableKeyboardTarget(target) {
+  if (!target || typeof target.closest !== "function") {
+    return false;
+  }
+  const tag = String(target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    return true;
+  }
+  return Boolean(target.isContentEditable || target.closest("[contenteditable='true']"));
+}
+
+function requestHistoryAction(state, action) {
+  if (action === "undo" && state.payload.can_undo !== true) {
+    return;
+  }
+  if (action === "redo" && state.payload.can_redo !== true) {
+    return;
+  }
+  const requestId = `ha-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  state.component.setStateValue("history_action", {
+    action,
+    request_id: requestId,
+  });
 }
 
 function fullscreenEnterIcon() {
@@ -823,6 +887,8 @@ function syncMinimapGeometry(state) {
 }
 
 function clearScene(state) {
+  closeActiveEditPopover(state);
+  destroyEditHud(state);
   state.dom.defs.replaceChildren();
   state.dom.edgeLayer.replaceChildren();
   state.dom.labelsLayer.replaceChildren();
@@ -926,7 +992,7 @@ function buildNodeElement(state, node) {
   shell.style.width = `${node.size.w}px`;
   shell.style.height = `${node.size.h}px`;
 
-  if (node.time_badge || node.responsible_badges.length) {
+  if (node.time_badge || (node.responsible_badges && node.responsible_badges.length)) {
     const rail = createElement("div", "flow-node-top-rail", shell);
     if (node.time_badge) {
       const badge = createElement("div", "flow-node-badge", rail);
@@ -934,7 +1000,7 @@ function buildNodeElement(state, node) {
       badge.textContent = node.time_badge.text;
       badge.title = node.time_badge.title;
     }
-    for (const badgePayload of node.responsible_badges) {
+    for (const badgePayload of node.responsible_badges || []) {
       const badge = createElement("div", "flow-node-badge", rail);
       applyStyles(badge, badgePayload.style);
       badge.textContent = badgePayload.abbr;
@@ -961,6 +1027,9 @@ function buildNodeElement(state, node) {
       state.suppressNextNodeClick = false;
       return;
     }
+    if (state.editingTitleNodeId === node.id) {
+      return;
+    }
     if (state.connectMode) {
       // Drag-to-connect is finalized only by pointerup. Ignoring click here
       // prevents a second pending_edge from the same gesture.
@@ -973,12 +1042,28 @@ function buildNodeElement(state, node) {
     selectId(state, node.id, { additive: isMultiSelectModifier(event) });
   });
   if (node.draggable && state.payload.position_edit_enabled) {
-    card.addEventListener("pointerdown", (event) => startNodeDrag(event, state, node.id));
+    card.addEventListener("pointerdown", (event) => {
+      if (state.editingTitleNodeId === node.id) {
+        return;
+      }
+      if (event.target?.closest?.(".flow-node-text.is-editing")) {
+        return;
+      }
+      startNodeDrag(event, state, node.id);
+    });
   }
 
   const content = createElement("span", "flow-node-content", card);
   const text = createElement("span", "flow-node-text", content);
   text.textContent = node.text;
+  if (node.editable) {
+    text.title = "Двойной клик — изменить заголовок";
+    text.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      beginTitleEdit(state, node.id);
+    });
+  }
 
   if (node.well_tokens.length) {
     const wells = createElement("div", "flow-node-wells", shell);
@@ -996,11 +1081,748 @@ function buildNodeElement(state, node) {
     }
   }
 
-  const elements = { shell, card, overlay: null, handles: [] };
+  const elements = {
+    shell,
+    card,
+    overlay: null,
+    handles: [],
+    textEl: text,
+  };
   syncNodeShellPosition(shell, state.positions[node.id] || node.position);
   setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
   state.nodeElements.set(node.id, elements);
   syncConnectionHandlesForNode(state, node.id);
+}
+
+function requestNodeEditId() {
+  return `ne-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function requestEdgeEditId() {
+  return `ee-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function commitNodeEdit(state, nodeId, patch) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node || node.editable !== true) {
+    return;
+  }
+  const payload = { node_id: nodeId, request_id: requestNodeEditId(), ...patch };
+  if ("title" in patch) {
+    const next = String(patch.title || "").trim();
+    if (!next || next === String(node.title || node.text || "").trim()) {
+      return;
+    }
+    payload.title = next;
+  }
+  if ("duration" in patch) {
+    const next = String(patch.duration || "").trim();
+    const prev = String(node.duration || "").trim();
+    if (next === prev) {
+      return;
+    }
+    payload.duration = next;
+  }
+  if ("note" in patch) {
+    const next = String(patch.note || "").trim();
+    const prev = String(node.note || "").trim();
+    if (next === prev) {
+      return;
+    }
+    payload.note = next;
+  }
+  if ("kind" in patch && patch.kind === node.kind) {
+    return;
+  }
+  if ("responsible" in patch || "participants" in patch || "approvers" in patch) {
+    const sameResponsible = !("responsible" in patch)
+      || patch.responsible === (node.responsible_id ?? null);
+    const sameParticipants = !("participants" in patch)
+      || sameStringLists(patch.participants, node.participants || []);
+    const sameApprovers = !("approvers" in patch)
+      || sameStringLists(patch.approvers, node.approvers || []);
+    if (sameResponsible && sameParticipants && sameApprovers && !("deleted" in patch)) {
+      return;
+    }
+  }
+  closeActiveEditPopover(state);
+  state.suppressNextNodeClick = true;
+  state.component.setStateValue("pending_node_edit", payload);
+}
+
+function commitEdgeEdit(state, edgeId, patch) {
+  const edge = state.edgePayloadsById.get(edgeId);
+  if (!edge || state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  const nextPatch = { ...patch };
+  if ("kind" in nextPatch) {
+    const next = sourceEdgeKind(nextPatch.kind);
+    const prev = sourceEdgeKind(edge.kind);
+    if (next === prev && !("deleted" in nextPatch)) {
+      return;
+    }
+    nextPatch.kind = next;
+  }
+  closeActiveEditPopover(state);
+  state.component.setStateValue("pending_edge_edit", {
+    edge_id: edgeId,
+    request_id: requestEdgeEditId(),
+    ...nextPatch,
+  });
+}
+
+function sourceEdgeKind(kind) {
+  if (kind === "usual") {
+    return "default";
+  }
+  if (kind === "default" || kind === "yes" || kind === "no" || kind === "dashed") {
+    return kind;
+  }
+  return "default";
+}
+
+const EDGE_KIND_MENU_OPTIONS = [
+  { id: "default", label: "Обычная" },
+  { id: "yes", label: "Да" },
+  { id: "no", label: "Нет" },
+  { id: "dashed", label: "Пунктир" },
+];
+
+function sameStringLists(a, b) {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function beginTitleEdit(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  if (!node || !elements?.textEl || node.editable !== true) {
+    return;
+  }
+  if (state.editingTitleNodeId && state.editingTitleNodeId !== nodeId) {
+    cancelTitleEdit(state);
+  }
+  closeActiveEditPopover(state);
+  selectId(state, nodeId);
+  const textEl = elements.textEl;
+  state.editingTitleNodeId = nodeId;
+  textEl.classList.add("is-editing");
+  textEl.contentEditable = "true";
+  textEl.spellcheck = false;
+  textEl.focus();
+  const selection = state.ownerDocument.getSelection?.();
+  if (selection) {
+    const range = state.ownerDocument.createRange();
+    range.selectNodeContents(textEl);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      finishTitleEdit(state, nodeId, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      finishTitleEdit(state, nodeId, false);
+    }
+  };
+  const onBlur = () => {
+    finishTitleEdit(state, nodeId, true);
+  };
+  textEl._titleEditCleanup = () => {
+    textEl.removeEventListener("keydown", onKeyDown);
+    textEl.removeEventListener("blur", onBlur);
+    delete textEl._titleEditCleanup;
+  };
+  textEl.addEventListener("keydown", onKeyDown);
+  textEl.addEventListener("blur", onBlur);
+}
+
+function cancelTitleEdit(state) {
+  if (!state.editingTitleNodeId) {
+    return;
+  }
+  finishTitleEdit(state, state.editingTitleNodeId, false);
+}
+
+function finishTitleEdit(state, nodeId, commit) {
+  if (state.editingTitleNodeId !== nodeId) {
+    return;
+  }
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  const textEl = elements?.textEl;
+  state.editingTitleNodeId = null;
+  if (!textEl) {
+    return;
+  }
+  if (typeof textEl._titleEditCleanup === "function") {
+    textEl._titleEditCleanup();
+  }
+  textEl.contentEditable = "false";
+  textEl.classList.remove("is-editing");
+  const nextTitle = String(textEl.textContent || "").replace(/\s+/g, " ").trim();
+  const previous = String(node?.title || node?.text || "").trim();
+  if (!commit || !nextTitle) {
+    textEl.textContent = previous;
+    return;
+  }
+  textEl.textContent = nextTitle;
+  if (nextTitle !== previous) {
+    commitNodeEdit(state, nodeId, { title: nextTitle });
+  }
+}
+
+function closeActiveEditPopover(state) {
+  if (state.activeEditPopover) {
+    if (typeof state.activeEditPopover._cleanup === "function") {
+      state.activeEditPopover._cleanup();
+    }
+    state.activeEditPopover.remove();
+    state.activeEditPopover = null;
+  }
+}
+
+function destroyEditHud(state) {
+  closeActiveEditPopover(state);
+  if (state.editHud) {
+    state.editHud.remove();
+    state.editHud = null;
+  }
+}
+
+function syncSelectionEditHud(state) {
+  if (state.draggingNodeId || state.connectMode) {
+    destroyEditHud(state);
+    return;
+  }
+  const selectedId = state.selectedId;
+  const node = selectedId ? state.nodePayloadsById.get(selectedId) : null;
+  const edge = selectedId ? state.edgePayloadsById.get(selectedId) : null;
+  const singleNode = Boolean(
+    node
+    && node.editable === true
+    && state.selectedNodeIds.size <= 1
+    && isNodeSelected(state, selectedId),
+  );
+  const singleEdge = Boolean(
+    edge
+    && state.payload.edge_edit_enabled === true
+    && state.selectedNodeIds.size === 0
+    && state.selectedId === edge.id,
+  );
+  if (!singleNode && !singleEdge) {
+    destroyEditHud(state);
+    return;
+  }
+  const targetKey = singleNode ? `node:${selectedId}` : `edge:${selectedId}`;
+  if (state.editHud && state.editHud.dataset.targetKey === targetKey) {
+    positionEditHud(state);
+    return;
+  }
+  destroyEditHud(state);
+  const hud = createElement("div", "flow-edit-hud", state.root);
+  hud.dataset.targetKey = targetKey;
+  const trigger = createElement("button", "flow-edit-hud__trigger", hud);
+  trigger.type = "button";
+  trigger.textContent = "⋯";
+  trigger.title = "Редактировать";
+  trigger.setAttribute("aria-label", "Редактировать");
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (singleNode) {
+      openNodeEditActionMenu(state, selectedId, trigger);
+    } else {
+      openEdgeEditActionMenu(state, selectedId, trigger);
+    }
+  });
+  hud.addEventListener("pointerdown", (event) => event.stopPropagation());
+  state.editHud = hud;
+  positionEditHud(state);
+}
+
+function positionEditHud(state) {
+  const hud = state.editHud;
+  if (!hud) {
+    return;
+  }
+  const targetKey = hud.dataset.targetKey || "";
+  const rootRect = state.root.getBoundingClientRect();
+  let anchorRect = null;
+  if (targetKey.startsWith("node:")) {
+    const nodeId = targetKey.slice(5);
+    const elements = state.nodeElements.get(nodeId);
+    if (elements?.shell) {
+      anchorRect = elements.shell.getBoundingClientRect();
+    }
+  } else if (targetKey.startsWith("edge:")) {
+    const edgeId = targetKey.slice(5);
+    const elements = state.edgeElements.get(edgeId);
+    const edge = state.edgePayloadsById.get(edgeId);
+    if (elements?.label) {
+      anchorRect = elements.label.getBoundingClientRect();
+    } else if (edge?.points?.length) {
+      const mid = edge.points[Math.floor(edge.points.length / 2)];
+      const sx = state.view.x + mid.x * state.view.scale;
+      const sy = state.view.y + mid.y * state.view.scale;
+      anchorRect = {
+        left: rootRect.left + sx,
+        right: rootRect.left + sx,
+        top: rootRect.top + sy,
+        bottom: rootRect.top + sy,
+        width: 0,
+        height: 0,
+      };
+    }
+  }
+  if (!anchorRect) {
+    destroyEditHud(state);
+    return;
+  }
+  const left = Math.max(8, Math.min(
+    rootRect.width - 44,
+    anchorRect.right - rootRect.left + 6,
+  ));
+  const top = Math.max(8, Math.min(
+    rootRect.height - 44,
+    anchorRect.top - rootRect.top - 4,
+  ));
+  hud.style.left = `${left}px`;
+  hud.style.top = `${top}px`;
+}
+
+function openNodeEditActionMenu(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const actions = [
+    { id: "title", label: "Заголовок" },
+    { id: "kind", label: "Тип" },
+    { id: "roles", label: "Роли" },
+    { id: "duration", label: "Длительность" },
+    { id: "note", label: "Заметка" },
+    { id: "delete", label: "Удалить", danger: true },
+  ];
+  for (const action of actions) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = action.label;
+    if (action.danger) {
+      item.classList.add("is-danger");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      openNodeFieldEditor(state, nodeId, action.id, anchor);
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openEdgeEditActionMenu(state, edgeId, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const kindItem = createElement("button", "flow-edit-menu__item", menu);
+  kindItem.type = "button";
+  kindItem.textContent = "Тип связи";
+  kindItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openEdgeKindEditor(state, edgeId, anchor);
+  });
+  const deleteItem = createElement("button", "flow-edit-menu__item is-danger", menu);
+  deleteItem.type = "button";
+  deleteItem.textContent = "Удалить";
+  deleteItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openDeleteConfirmPopover(state, {
+      message: "Удалить связь?",
+      anchor,
+      onConfirm: () => commitEdgeEdit(state, edgeId, { deleted: true }),
+    });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openNodeFieldEditor(state, nodeId, field, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  if (field === "title") {
+    beginTitleEdit(state, nodeId);
+    return;
+  }
+  if (field === "kind") {
+    openKindMenu(state, nodeId, anchor);
+    return;
+  }
+  if (field === "roles") {
+    openRolesPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "delete") {
+    openDeleteConfirmPopover(state, {
+      message: "Удалить карточку?",
+      anchor,
+      onConfirm: () => commitNodeEdit(state, nodeId, { deleted: true }),
+    });
+    return;
+  }
+  if (field === "duration") {
+    openDurationPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "note") {
+    openTextFieldPopover(state, nodeId, field, anchor);
+  }
+}
+
+function openDeleteConfirmPopover(state, { message, anchor, onConfirm }) {
+  closeActiveEditPopover(state);
+  const pop = createElement("div", "flow-edit-field-popover flow-edit-confirm", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-confirm__message", pop);
+  label.textContent = message;
+  const actions = createElement("div", "flow-edit-confirm__actions", pop);
+  const cancel = createElement("button", "flow-edit-menu__item", actions);
+  cancel.type = "button";
+  cancel.textContent = "Отмена";
+  cancel.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+  });
+  const confirmBtn = createElement("button", "flow-edit-menu__item is-danger is-apply", actions);
+  confirmBtn.type = "button";
+  confirmBtn.textContent = "Удалить";
+  confirmBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    onConfirm();
+  });
+  positionEditPopover(state, pop, anchor);
+  confirmBtn.focus();
+}
+
+function openTextFieldPopover(state, nodeId, field, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const pop = createElement("div", "flow-edit-field-popover", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-field-popover__label", pop);
+  label.textContent = "Заметка";
+  const input = createElement("input", "flow-edit-field-popover__input", pop);
+  input.type = "text";
+  input.value = node.note || "";
+  input.placeholder = "…";
+  const apply = createElement("button", "flow-edit-menu__item is-apply", pop);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  const commit = () => {
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, { note: input.value });
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    commit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveEditPopover(state);
+    }
+  });
+  positionEditPopover(state, pop, anchor);
+  input.focus();
+  input.select();
+}
+
+const DURATION_UNIT_OPTIONS = [
+  { id: "minutes", label: "минут", singular: "minute", plural: "minutes" },
+  { id: "hours", label: "час", singular: "hour", plural: "hours" },
+  { id: "days", label: "день", singular: "day", plural: "days" },
+];
+
+function parseDurationParts(raw) {
+  const text = String(raw || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!text) {
+    return { amount: "", unit: "hours" };
+  }
+  const match = text.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/);
+  if (!match) {
+    return { amount: "", unit: "hours" };
+  }
+  const amount = match[1];
+  const token = match[2];
+  let unit = "hours";
+  if (token === "m" || token.startsWith("min")) {
+    unit = "minutes";
+  } else if (token === "d" || token.startsWith("day")) {
+    unit = "days";
+  }
+  return { amount, unit };
+}
+
+function formatDurationValue(amountRaw, unitId) {
+  const amount = Number.parseInt(String(amountRaw || "").trim(), 10);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return "";
+  }
+  if (amount === 0) {
+    return "";
+  }
+  const option = DURATION_UNIT_OPTIONS.find((item) => item.id === unitId)
+    || DURATION_UNIT_OPTIONS[1];
+  const unit = amount === 1 ? option.singular : option.plural;
+  return `${amount} ${unit}`;
+}
+
+function openDurationPopover(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const parsed = parseDurationParts(node.duration);
+  const pop = createElement("div", "flow-edit-field-popover flow-edit-duration", state.root);
+  state.activeEditPopover = pop;
+  const label = createElement("div", "flow-edit-field-popover__label", pop);
+  label.textContent = "Длительность";
+  const row = createElement("div", "flow-edit-duration__row", pop);
+  const input = createElement("input", "flow-edit-field-popover__input flow-edit-duration__amount", row);
+  input.type = "number";
+  input.min = "0";
+  input.step = "1";
+  input.inputMode = "numeric";
+  input.placeholder = "0";
+  input.value = parsed.amount;
+  const unitSelect = createElement("select", "flow-edit-duration__unit", row);
+  for (const option of DURATION_UNIT_OPTIONS) {
+    const opt = createElement("option", "", unitSelect);
+    opt.value = option.id;
+    opt.textContent = option.label;
+  }
+  unitSelect.value = parsed.unit;
+  const apply = createElement("button", "flow-edit-menu__item is-apply", pop);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  const commit = () => {
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, {
+      duration: formatDurationValue(input.value, unitSelect.value),
+    });
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    commit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveEditPopover(state);
+    }
+  });
+  positionEditPopover(state, pop, anchor);
+  input.focus();
+  input.select();
+}
+
+function openKindMenu(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable || !Array.isArray(node.kind_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  for (const option of node.kind_options) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label || option.id;
+    if (option.id === node.kind) {
+      item.classList.add("is-active");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitNodeEdit(state, nodeId, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openEdgeKindEditor(state, edgeId, anchor) {
+  const edge = state.edgePayloadsById.get(edgeId);
+  if (!edge) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const current = sourceEdgeKind(edge.kind);
+  for (const option of EDGE_KIND_MENU_OPTIONS) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label;
+    if (option.id === current) {
+      item.classList.add("is-active");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitEdgeEdit(state, edgeId, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openRolesPopover(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable || !Array.isArray(node.responsible_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-node-roles-menu", state.root);
+  state.activeEditPopover = menu;
+
+  let responsible = node.responsible_id ?? null;
+  let participants = [...(node.participants || [])];
+  let approvers = [...(node.approvers || [])];
+
+  const responsibleRow = createElement("div", "flow-node-roles-menu__section", menu);
+  createElement("div", "flow-node-roles-menu__label", responsibleRow).textContent = "Ответственный";
+  const responsibleSelect = createElement("select", "flow-node-roles-menu__select", responsibleRow);
+  const noneOption = createElement("option", "", responsibleSelect);
+  noneOption.value = "";
+  noneOption.textContent = "—";
+  for (const option of node.responsible_options) {
+    const opt = createElement("option", "", responsibleSelect);
+    opt.value = option.id;
+    opt.textContent = option.label || option.id;
+  }
+  responsibleSelect.value = responsible || "";
+
+  const participantsBox = createRoleChecklist(
+    menu,
+    "Участники",
+    node.responsible_options,
+    participants,
+  );
+  const approversBox = createRoleChecklist(
+    menu,
+    "Согласующие",
+    node.responsible_options,
+    approvers,
+  );
+
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    responsible = responsibleSelect.value || null;
+    participants = participantsBox.getSelected();
+    approvers = approversBox.getSelected();
+    participants = participants.filter((id) => id !== responsible);
+    approvers = approvers.filter((id) => id !== responsible && !participants.includes(id));
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, {
+      responsible,
+      participants,
+      approvers,
+    });
+  });
+
+  positionEditPopover(state, menu, anchor);
+}
+
+function createRoleChecklist(parent, label, options, selectedIds) {
+  const section = createElement("div", "flow-node-roles-menu__section", parent);
+  createElement("div", "flow-node-roles-menu__label", section).textContent = label;
+  const list = createElement("div", "flow-node-roles-menu__list", section);
+  const checks = [];
+  for (const option of options) {
+    const row = createElement("label", "flow-node-roles-menu__check", list);
+    const input = createElement("input", "", row);
+    input.type = "checkbox";
+    input.value = option.id;
+    input.checked = selectedIds.includes(option.id);
+    row.append(option.label || option.id);
+    checks.push(input);
+  }
+  return {
+    getSelected() {
+      return checks.filter((input) => input.checked).map((input) => input.value);
+    },
+  };
+}
+
+function positionEditPopover(state, menu, anchor) {
+  const rootRect = state.root.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, anchorRect.left - rootRect.left)}px`;
+  menu.style.top = `${Math.max(8, anchorRect.bottom - rootRect.top + 6)}px`;
+  // Keep pointer events from falling through to the canvas/viewport under the menu.
+  menu.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  const onDocPointer = (event) => {
+    // Streamlit hosts the canvas in Shadow DOM: document capture sees a
+    // retargeted host as event.target, so contains() alone falsely closes
+    // the menu before the item click fires.
+    if (
+      eventPathIncludes(event, menu)
+      || eventPathIncludes(event, anchor)
+      || eventPathIncludes(event, state.editHud)
+    ) {
+      return;
+    }
+    closeActiveEditPopover(state);
+  };
+  menu._cleanup = () => {
+    state.ownerDocument.removeEventListener("pointerdown", onDocPointer, true);
+    if (menu._outsideAttachTimer != null) {
+      state.ownerDocument.defaultView?.clearTimeout(menu._outsideAttachTimer);
+      menu._outsideAttachTimer = null;
+    }
+  };
+  // Attach on next tick so the opening click cannot dismiss immediately.
+  const view = state.ownerDocument.defaultView;
+  if (view) {
+    menu._outsideAttachTimer = view.setTimeout(() => {
+      menu._outsideAttachTimer = null;
+      if (state.activeEditPopover !== menu) {
+        return;
+      }
+      state.ownerDocument.addEventListener("pointerdown", onDocPointer, true);
+    }, 0);
+  } else {
+    state.ownerDocument.addEventListener("pointerdown", onDocPointer, true);
+  }
 }
 
 function buildMinimapEdgeElement(state, edge) {
@@ -1183,6 +2005,7 @@ function updateSelectionState(
   syncTokenSelectionById(state, nextSelectedId);
   syncLegendHighlight(state);
   syncConnectModeChrome(state);
+  syncSelectionEditHud(state);
 }
 
 function syncEdgeSelectionById(state, selectedId) {
@@ -1514,6 +2337,7 @@ function startNodeDrag(event, state, nodeId) {
   }
   state.draggingNodeId = nodeId;
   state.draggingNodeIds = Object.keys(origins);
+  destroyEditHud(state);
   const start = { x: event.clientX, y: event.clientY };
   let dragDistancePx = 0;
   const ownerDocument = state.ownerDocument;
@@ -1568,6 +2392,7 @@ function startNodeDrag(event, state, nodeId) {
     state.draggingNodeId = null;
     state.draggingNodeIds = [];
     state.component.setStateValue("positions", copyPositionMap(state.positions));
+    syncSelectionEditHud(state);
     queueRender(state);
   };
   ownerDocument.addEventListener("pointermove", move, { passive: false });
@@ -1734,17 +2559,6 @@ function updateConnectHint(state) {
       ? "Отпустите кнопку мыши — связь будет создана · Esc — отмена"
       : "Ведите линию до другой карточки · Esc — отмена";
     hint.classList.add("is-active");
-    return;
-  }
-  const hasSelectedNode = [...state.selectedNodeIds].some((nodeId) => (
-    state.nodePayloadsById.has(nodeId)
-  )) || (
-    typeof state.selectedId === "string" && state.nodePayloadsById.has(state.selectedId)
-  );
-  if (hasSelectedNode) {
-    hint.hidden = false;
-    hint.textContent = "Потяните точку на карточке к другой карточке, чтобы создать связь.";
-    hint.classList.remove("is-active");
     return;
   }
   hint.hidden = true;
@@ -1960,6 +2774,7 @@ function startConnectDrag(event, state, sourceId, side, handle) {
     cursor,
     targetId: null,
   };
+  destroyEditHud(state);
   syncConnectModeChrome(state);
   queueRender(state);
 
@@ -2052,6 +2867,7 @@ function beginConnectMode(state, sourceId, side) {
     cursor: { ...start },
     targetId: null,
   };
+  destroyEditHud(state);
   syncConnectModeChrome(state);
   queueRender(state);
 }
@@ -2064,6 +2880,7 @@ function cancelConnectMode(state) {
   }
   state.connectMode = null;
   syncConnectModeChrome(state);
+  syncSelectionEditHud(state);
   queueRender(state);
 }
 
@@ -2076,6 +2893,11 @@ function completeConnectMode(state, targetId) {
   }
   // One gesture → one pending_edge (pointerup + click / duplicate listeners).
   if (connectMode.submitted) {
+    return;
+  }
+  if (canvasHasDirectedEdge(state, sourceId, targetId)) {
+    cancelConnectMode(state);
+    flashConnectHint(state, "Между этими карточками уже есть связь");
     return;
   }
   connectMode.submitted = true;
@@ -2096,7 +2918,36 @@ function completeConnectMode(state, targetId) {
     state.selectedNodeIds = new Set([sourceId]);
     state.pendingSelectedId = sourceId;
   }
+  syncSelectionEditHud(state);
   queueRender(state);
+}
+
+function canvasHasDirectedEdge(state, sourceId, targetId) {
+  const edges = Array.isArray(state.payload?.edges) ? state.payload.edges : [];
+  return edges.some(
+    (edge) => edge
+      && edge.source === sourceId
+      && edge.target === targetId,
+  );
+}
+
+function flashConnectHint(state, message) {
+  const hint = state.dom?.connectHint;
+  if (!hint) {
+    return;
+  }
+  hint.hidden = false;
+  hint.textContent = message;
+  hint.classList.add("is-active");
+  if (state._connectHintTimer) {
+    state.ownerDocument.defaultView?.clearTimeout(state._connectHintTimer);
+  }
+  const view = state.ownerDocument.defaultView;
+  if (view) {
+    state._connectHintTimer = view.setTimeout(() => {
+      updateConnectHint(state);
+    }, 2200);
+  }
 }
 
 function selectId(state, value, options = {}) {
@@ -2207,51 +3058,34 @@ function fitView(state) {
 }
 
 function toggleFullscreen(state) {
-  const request = isRootFullscreen(state)
-    ? exitDocumentFullscreen(state.ownerDocument)
-    : requestElementFullscreen(state.root);
-  if (request && typeof request.catch === "function") {
-    request.catch(() => {});
+  setImmersiveMode(state, !state.immersiveMode);
+}
+
+function setImmersiveMode(state, enabled) {
+  state.immersiveMode = Boolean(enabled);
+  syncFullscreenClass(state);
+  syncToolbarState(state);
+  // Layout size changes under position:fixed — refit unless the user panned.
+  const view = state.ownerDocument.defaultView;
+  const refit = () => {
+    if (!state.userMovedView) {
+      fitView(state);
+    }
+    queueRender(state);
+  };
+  if (view) {
+    view.requestAnimationFrame(refit);
+  } else {
+    refit();
   }
 }
 
-function requestElementFullscreen(element) {
-  if (typeof element.requestFullscreen === "function") {
-    return element.requestFullscreen();
-  }
-  if (typeof element.webkitRequestFullscreen === "function") {
-    return element.webkitRequestFullscreen();
-  }
-  return null;
-}
-
-function exitDocumentFullscreen(ownerDocument) {
-  if (typeof ownerDocument.exitFullscreen === "function") {
-    return ownerDocument.exitFullscreen();
-  }
-  if (typeof ownerDocument.webkitExitFullscreen === "function") {
-    return ownerDocument.webkitExitFullscreen();
-  }
-  return null;
-}
-
-function isFullscreenSupported(element) {
-  return (
-    typeof element.requestFullscreen === "function" ||
-    typeof element.webkitRequestFullscreen === "function"
-  );
-}
-
-function fullscreenElementOfDocument(ownerDocument) {
-  return ownerDocument.fullscreenElement || ownerDocument.webkitFullscreenElement || null;
-}
-
-function isRootFullscreen(state) {
-  return fullscreenElementOfDocument(state.ownerDocument) === state.root;
+function isImmersiveMode(state) {
+  return Boolean(state.immersiveMode);
 }
 
 function syncFullscreenClass(state) {
-  state.root.classList.toggle("is-fullscreen", isRootFullscreen(state));
+  state.root.classList.toggle("is-fullscreen", isImmersiveMode(state));
 }
 
 function attachMinimapHandlers(minimap, state) {

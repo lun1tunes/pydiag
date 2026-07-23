@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
     UpdateGraphSourceEdgeCommand,
@@ -184,6 +186,35 @@ def test_graph_source_edge_create_appends_transition_with_stable_id() -> None:
     draft = graph_source_edge_draft_from_payload(updated, created["id"])
     assert draft.source == "proc_initial_review"
     assert draft.target == "card_mitigation"
+
+
+def test_graph_source_edge_create_rejects_duplicate_directed_pair() -> None:
+    payload = load_fixture_payload()
+    first = create_flow_source_payload_edge(
+        payload,
+        command=CreateGraphSourceEdgeCommand(
+            source="proc_initial_review",
+            target="card_mitigation",
+            kind="default",
+            label=None,
+            condition=None,
+            note=None,
+        ),
+        expected_version=1,
+    )
+    with pytest.raises(ValueError, match="уже есть связь"):
+        create_flow_source_payload_edge(
+            first,
+            command=CreateGraphSourceEdgeCommand(
+                source="proc_initial_review",
+                target="card_mitigation",
+                kind="dashed",
+                label=None,
+                condition=None,
+                note=None,
+            ),
+            expected_version=2,
+        )
 
 
 def test_graph_source_custom_layout_update_keeps_source_layout_intact() -> None:

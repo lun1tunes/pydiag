@@ -683,9 +683,21 @@ def render_create_graph_source_edge_form(
 ) -> None:
     editable = actions.graph_source_edit_available()
     node_ids = [item.id for item in graph.nodes]
-    target_options = [node_id for node_id in node_ids if node_id != source_node.id]
+    existing_targets = {
+        edge.target for edge in graph.edges if edge.source == source_node.id
+    }
+    target_options = [
+        node_id
+        for node_id in node_ids
+        if node_id != source_node.id and node_id not in existing_targets
+    ]
     if not target_options:
-        st_module.caption("Нет других карточек для новой связи.")
+        st_module.caption(
+            "Нет других карточек для новой связи "
+            "(ко всем доступным уже есть связь из этой карточки)."
+            if existing_targets
+            else "Нет других карточек для новой связи."
+        )
         return
 
     node_map = node_by_id(graph)

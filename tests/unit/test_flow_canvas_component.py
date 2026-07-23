@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import inspect
+import subprocess
+from pathlib import Path
+
 from pydiag.rendering.flow_canvas_component import (
     _FLOW_CANVAS_COMPONENTS,
     _asset_text,
@@ -157,6 +161,8 @@ def test_flow_canvas_supports_drag_to_connect_handles() -> None:
     assert 'setStateValue("pending_edge"' in js
     assert "request_id: requestId" in js
     assert "connectMode.submitted" in js
+    assert "function canvasHasDirectedEdge(state, sourceId, targetId)" in js
+    assert "Между этими карточками уже есть связь" in js
     assert "Drag-to-connect is finalized only by pointerup" in js
     assert "startConnectDrag(event, state, node.id, side, handle)" in js
     assert "completeConnectMode(state, dropId)" in js
@@ -174,13 +180,117 @@ def test_flow_canvas_supports_drag_to_connect_handles() -> None:
     assert ".flow-connect-preview" in css
     assert ".flow-canvas-connect-hint" in css
     assert ".flow-canvas-root.is-connecting .flow-canvas-edges" in css
-    assert "Потяните точку на карточке" in js
+    assert "Потяните точку на карточке" not in js
     # Connect drag must not capture the handle (that stuck hit-tests to source).
     connect_start = js.index("function startConnectDrag(event, state, sourceId, side, handle)")
     connect_fn = js[connect_start : connect_start + 3500]
     assert "handle.setPointerCapture" not in connect_fn
     assert "geometryFirst: true" in connect_fn
     assert "stopped = true" in connect_fn
+
+
+def test_flow_canvas_supports_undo_redo_toolbar_and_hotkeys() -> None:
+    js = _asset_text("flow_canvas.js")
+    css = _asset_text("flow_canvas.css")
+
+    assert '{ id: "undo", label: "↶"' in js
+    assert '{ id: "redo", label: "↷"' in js
+    assert "function requestHistoryAction(state, action)" in js
+    assert 'setStateValue("history_action"' in js
+    assert "state.payload.can_undo" in js
+    assert "state.payload.can_redo" in js
+    assert 'requestHistoryAction(state, "undo")' in js
+    assert 'requestHistoryAction(state, "redo")' in js
+    assert ".flow-canvas-toolbar__button:disabled" in css
+
+
+def test_flow_canvas_supports_selection_edit_hud() -> None:
+    js = _asset_text("flow_canvas.js")
+    css = _asset_text("flow_canvas.css")
+    dom_utils = _asset_text("flow_canvas_dom_utils.js")
+
+    assert "node_edit_enabled" in js
+    assert "function beginTitleEdit(state, nodeId)" in js
+    assert "function commitNodeEdit(state, nodeId, patch)" in js
+    assert "function commitEdgeEdit(state, edgeId, patch)" in js
+    assert "function syncSelectionEditHud(state)" in js
+    assert 'setStateValue("pending_node_edit"' in js
+    assert 'setStateValue("pending_edge_edit"' in js
+    assert "function openKindMenu(state, nodeId, anchor)" in js
+    assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert "function openDeleteConfirmPopover(state," in js
+    assert "function openDurationPopover(state, nodeId, anchor)" in js
+    assert "function parseDurationParts(raw)" in js
+    assert "function formatDurationValue(amountRaw, unitId)" in js
+    assert 'label: "минут"' in js
+    assert 'label: "час"' in js
+    assert 'label: "день"' in js
+    assert "flow-edit-duration__unit" in js
+    assert ".flow-edit-duration__unit" in css
+    assert "flow-edit-confirm" in js
+    assert "Удалить карточку?" in js
+    assert "Удалить связь?" in js
+    assert ".confirm(" not in js
+    assert "window.confirm" not in js
+    assert "flow-edit-hud" in js
+    assert "flow-edit-menu" in js
+    assert "flow-edit-field-popover" in js
+    assert "function positionEditPopover(state, menu, anchor)" in js
+    # Outside-dismiss must use Shadow-DOM-safe path (not contains(target) alone).
+    assert "eventPathIncludes(event, menu)" in js
+    assert "eventPathIncludes(event, anchor)" in js
+    assert "eventPathIncludes(event, state.editHud)" in js
+    assert "menu.contains(event.target)" not in js
+    assert "_outsideAttachTimer" in js
+    assert "opening click cannot dismiss immediately" in js
+    assert "export function eventPathIncludes(event, node)" in dom_utils
+    assert "composedPath" in dom_utils
+    assert "Заголовок" in js
+    assert "Тип связи" in js
+    assert "flow-node-edit-panel" not in js
+    assert "flow-node-roles-add" not in js
+    assert "flow-node-kind-chip" not in js
+    assert 'contentEditable = "true"' in js
+    assert ".flow-edit-hud" in css
+    assert ".flow-edit-menu" in css
+    assert ".flow-edit-field-popover" in css
+    assert ".flow-edit-confirm__message" in css
+    assert ".flow-node-text.is-editing" in css
+    assert ".flow-node-edit-panel" not in css
+
+
+def test_flow_canvas_bundles_dom_utils_into_component_js() -> None:
+    from pydiag.rendering import flow_canvas_component as mod
+
+    source = inspect.getsource(mod._register_flow_canvas_component)
+    assert "flow_canvas_dom_utils.js" in source
+    assert 'replace("export "' in source
+
+
+def test_event_path_includes_shadow_dom_regression_via_node() -> None:
+    script = (
+        Path(__file__).resolve().parent / "js" / "event_path_includes.test.mjs"
+    )
+    result = subprocess.run(
+        ["node", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "event_path_includes: ok" in result.stdout
+
+
+def test_duration_unit_helpers_via_node() -> None:
+    script = Path(__file__).resolve().parent / "js" / "duration_units.test.mjs"
+    result = subprocess.run(
+        ["node", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "duration_units: ok" in result.stdout
 
 
 def test_flow_canvas_refreshes_edge_geometry_without_revision_bump() -> None:
@@ -271,12 +381,21 @@ def test_flow_canvas_assets_define_fullscreen_mode() -> None:
     js = _asset_text("flow_canvas.js")
     css = _asset_text("flow_canvas.css")
 
-    assert 'ownerDocument.addEventListener("fullscreenchange", state.fullscreenChangeHandler);' in js
-    assert "requestElementFullscreen(state.root)" in js
-    assert "exitDocumentFullscreen(state.ownerDocument)" in js
+    # CSS immersive mode survives Streamlit remounts (native Fullscreen does not).
+    assert "immersiveMode: false" in js
+    assert "function setImmersiveMode(state, enabled)" in js
+    assert "function isImmersiveMode(state)" in js
+    assert "state.immersiveMode" in js
+    assert "requestElementFullscreen" not in js
+    assert "exitDocumentFullscreen" not in js
+    assert 'ownerDocument.addEventListener("fullscreenchange"' not in js
     assert "fullscreenEnterIcon()" in js
     assert "fullscreenExitIcon()" in js
-    assert 'fullscreenActive ? fullscreenExitIcon() : fullscreenEnterIcon()' in js
-    assert ".flow-canvas-root.is-fullscreen," in css
+    assert "fullscreenActive ? fullscreenExitIcon() : fullscreenEnterIcon()" in js
+    assert "Escape" in js and "state.immersiveMode" in js
+    assert ".flow-canvas-root.is-fullscreen {" in css
+    assert "position: fixed;" in css
+    assert "z-index: 10000;" in css
+    assert ".flow-canvas-root:fullscreen" not in css
     assert ".flow-canvas-toolbar__button--icon {" in css
     assert ".flow-canvas-toolbar__button.is-active {" in css

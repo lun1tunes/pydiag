@@ -362,15 +362,5 @@ def render_layout_section(
         save_positions_enabled=save_positions_enabled,
     )
     if position_edit_state.enabled:
-        col_a, col_b = st_module.columns(2)
-        with col_a:
-            if st_module.button(
-                "Сохранить",
-                width="stretch",
-                disabled=position_edit_state.save_disabled,
-            ):
-                save_positions()
-        with col_b:
-            if st_module.button("Сбросить", width="stretch"):
-                reset_positions()
+        st_module.caption("Перетащите карточки на схеме — положение сохраняется сразу.")
     return position_edit_state.enabled

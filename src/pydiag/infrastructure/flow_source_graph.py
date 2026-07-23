@@ -34,7 +34,16 @@ AUTO_LAYOUT_COLUMNS = 4
 AUTO_LAYOUT_HORIZONTAL_STEP = 420
 AUTO_LAYOUT_VERTICAL_STEP = 240
 FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
-    {"figma_source_id", "figma_parent_id", "figma_source_type"}
+    {
+        "figma_source_id",
+        "figma_parent_id",
+        "figma_source_type",
+        # Runtime-only canvas edit fields (not persisted to YAML).
+        "canvas_responsible",
+        "canvas_participants",
+        "canvas_approvers",
+        "canvas_note",
+    }
 )
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
     "process": (280, 72),
@@ -94,6 +103,7 @@ __all__ = [
     "is_flow_source_payload",
     "load_structured_payload",
     "create_flow_source_payload_edge",
+    "flow_source_has_directed_edge",
     "update_flow_source_payload_custom_layout",
     "update_flow_source_payload_edge",
     "update_flow_source_payload_layout",
@@ -696,6 +706,14 @@ def update_flow_source_payload_edge(
     if command.target not in document.nodes:
         raise ValueError(f"Unknown edge target node: {command.target}")
 
+    if flow_source_has_directed_edge(
+        document,
+        source=command.source,
+        target=command.target,
+        ignore_edge_id=command.edge_id,
+    ):
+        raise ValueError("Между этими карточками уже есть связь.")
+
     current_transition = updated.nodes[source_node_id].transitions[transition_index]
     replacement = current_transition.model_copy(
         update={
@@ -735,20 +753,26 @@ def create_flow_source_payload_edge(
         raise ValueError(f"Edge source node is deleted: {command.source}")
     if flow_source_node_deleted(document.nodes[command.target]):
         raise ValueError(f"Edge target node is deleted: {command.target}")
+    if flow_source_has_directed_edge(document, source=command.source, target=command.target):
+        raise ValueError("Между этими карточками уже есть связь.")
 
     updated = document.model_copy(deep=True)
     updated.version = expected_version + 1
     used_edge_ids = collect_used_edge_ids(updated)
     transition_index = len(updated.nodes[command.source].transitions)
-    edge_id = unique_edge_id(
-        None,
-        source=command.source,
-        target=command.target,
-        kind=command.kind,
-        label=command.label,
-        index=transition_index,
-        used_ids=used_edge_ids,
-    )
+    preferred_id = command.edge_id if isinstance(command.edge_id, str) and command.edge_id else None
+    if preferred_id and preferred_id not in used_edge_ids:
+        edge_id = preferred_id
+    else:
+        edge_id = unique_edge_id(
+            None,
+            source=command.source,
+            target=command.target,
+            kind=command.kind,
+            label=command.label,
+            index=transition_index,
+            used_ids=used_edge_ids,
+        )
     updated.nodes[command.source].transitions.append(
         FlowSourceTransition(
             to=command.target,
@@ -760,6 +784,26 @@ def create_flow_source_payload_edge(
         )
     )
     return updated.model_dump(mode="json")
+
+
+def flow_source_has_directed_edge(
+    document: FlowSourceDocument,
+    *,
+    source: str,
+    target: str,
+    ignore_edge_id: str | None = None,
+) -> bool:
+    """True if a non-deleted source node already has a transition to target."""
+    node = document.nodes.get(source)
+    if node is None or flow_source_node_deleted(node):
+        return False
+    for transition in node.transitions:
+        if transition.to != target:
+            continue
+        if ignore_edge_id is not None and transition.id == ignore_edge_id:
+            continue
+        return True
+    return False
 
 
 def dump_flow_source_payload(payload: object) -> str:

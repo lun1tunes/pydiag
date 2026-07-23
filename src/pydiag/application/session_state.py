@@ -26,6 +26,8 @@ class FlashMessage:
 class PersistenceResult:
     should_rerun: bool = False
     error_message: str | None = None
+    # True only when the write actually landed (not conflict/lock soft-fail).
+    saved: bool = False
 
 
 def load_app_data(
@@ -77,7 +79,7 @@ def persist_wells_update(
     try:
         session_state["wells_doc"] = save(updated)
         flash(session_state, success_message)
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=True)
     except VersionConflictError as exc:
         _try_reload(reload_data)
         flash(
@@ -85,16 +87,16 @@ def persist_wells_update(
             f"Данные уже изменились другим пользователем. Состояние перечитано: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except FileLockTimeoutError as exc:
         flash(
             session_state,
             f"Файл состояния сейчас занят другой операцией. Повторите действие: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except Exception as exc:
-        return PersistenceResult(error_message=str(exc))
+        return PersistenceResult(error_message=str(exc), saved=False)
 
 
 def persist_graph_positions_update(
@@ -103,7 +105,7 @@ def persist_graph_positions_update(
     save: Callable[[], FlowGraphDocument],
     reload_data: Callable[..., object],
     reset_position_edit_state: Callable[[], None],
-    success_message: str,
+    success_message: str | None,
 ) -> PersistenceResult:
     return persist_graph_document_update(
         session_state,
@@ -120,14 +122,15 @@ def persist_graph_document_update(
     save: Callable[[], FlowGraphDocument],
     reload_data: Callable[..., object],
     reset_state: Callable[[], None] | None = None,
-    success_message: str,
+    success_message: str | None,
 ) -> PersistenceResult:
     try:
         session_state["graph_doc"] = save()
         if reset_state is not None:
             reset_state()
-        flash(session_state, success_message)
-        return PersistenceResult(should_rerun=True)
+        if success_message:
+            flash(session_state, success_message)
+        return PersistenceResult(should_rerun=True, saved=True)
     except VersionConflictError as exc:
         _try_reload(reload_data)
         flash(
@@ -135,16 +138,16 @@ def persist_graph_document_update(
             f"Схема уже изменилась другим пользователем. Состояние перечитано: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except FileLockTimeoutError as exc:
         flash(
             session_state,
             f"Файл схемы сейчас занят другой операцией. Повторите действие: {exc}",
             "warning",
         )
-        return PersistenceResult(should_rerun=True)
+        return PersistenceResult(should_rerun=True, saved=False)
     except Exception as exc:
-        return PersistenceResult(error_message=str(exc))
+        return PersistenceResult(error_message=str(exc), saved=False)
 
 
 def _try_reload(reload_data: Callable[..., object]) -> None:

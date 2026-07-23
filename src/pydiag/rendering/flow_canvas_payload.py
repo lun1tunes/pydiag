@@ -31,7 +31,25 @@ from .flow_render_metrics import canvas_height_for_snapshot
 from .flow_render_snapshot import FlowRenderSnapshot, build_flow_render_snapshot
 from .flow_route_geometry import EdgeRoute, NodeGeometry, port_point
 
-__all__ = ["build_flow_canvas_payload"]
+__all__ = ["CANVAS_NODE_KIND_OPTIONS", "build_flow_canvas_payload"]
+
+CANVAS_EDITABLE_NODE_KINDS = frozenset(
+    {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }
+)
+
+CANVAS_NODE_KIND_OPTIONS = [
+    {"id": "process", "label": "Процесс"},
+    {"id": "decision_diamond", "label": "Решение"},
+    {"id": "database", "label": "База данных"},
+    {"id": "input_data", "label": "Входные данные"},
+    {"id": "event", "label": "Событие"},
+]
 
 
 def build_flow_canvas_payload(
@@ -45,6 +63,9 @@ def build_flow_canvas_payload(
     layout_mode: str = "snake",
     domain_nodes_draggable: bool = False,
     edge_edit_enabled: bool = False,
+    node_edit_enabled: bool = False,
+    can_undo: bool = False,
+    can_redo: bool = False,
     revision: int | None = None,
     snapshot: FlowRenderSnapshot | None = None,
     snapshot_cache: MutableMapping[Any, Any] | None = None,
@@ -74,6 +95,7 @@ def build_flow_canvas_payload(
         kind_filter=[],
         selected_id=selected_id,
         domain_nodes_draggable=domain_nodes_draggable,
+        node_edit_enabled=node_edit_enabled,
     )
     edges = build_flow_canvas_edges_from_snapshot(
         snapshot,
@@ -88,6 +110,9 @@ def build_flow_canvas_payload(
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
         "edge_edit_enabled": bool(edge_edit_enabled),
+        "node_edit_enabled": bool(node_edit_enabled),
+        "can_undo": bool(can_undo),
+        "can_redo": bool(can_redo),
         "search": search,
         "kind_filter": list(kind_filter or []),
         "layout_mode": snapshot.layout_mode,
@@ -113,6 +138,7 @@ def build_flow_canvas_nodes_from_snapshot(
     kind_filter: list[str] | None = None,
     selected_id: str | None = None,
     domain_nodes_draggable: bool = False,
+    node_edit_enabled: bool = False,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     responsible_filter = responsible_filter or []
     kind_filter = kind_filter or []
@@ -144,6 +170,7 @@ def build_flow_canvas_nodes_from_snapshot(
                 search=search,
                 active=is_active,
                 domain_nodes_draggable=domain_nodes_draggable,
+                node_edit_enabled=node_edit_enabled,
             )
         )
 
@@ -163,9 +190,10 @@ def build_flow_canvas_node(
     search: str,
     active: bool,
     domain_nodes_draggable: bool,
+    node_edit_enabled: bool = False,
 ) -> dict[str, Any]:
     source_position, target_position = node_ports(node_index, layout_mode)
-    return {
+    payload: dict[str, Any] = {
         "id": node.id,
         "kind": node.kind,
         "kind_label": KIND_LABELS[node.kind],
@@ -199,6 +227,79 @@ def build_flow_canvas_node(
             node_active=active,
         ),
     }
+    payload.update(build_node_edit_fields(graph, node, editable=node_edit_enabled))
+    return payload
+
+
+def build_node_edit_fields(
+    graph: FlowGraphDocument,
+    node: FlowNode,
+    *,
+    editable: bool,
+) -> dict[str, Any]:
+    if not editable or node.kind not in CANVAS_EDITABLE_NODE_KINDS:
+        return {"editable": False}
+
+    roles = canvas_node_roles(node)
+    return {
+        "editable": True,
+        "title": node.text,
+        "duration": node.time,
+        "note": roles["note"],
+        "responsible_id": roles["responsible"],
+        "participants": roles["participants"],
+        "approvers": roles["approvers"],
+        "kind_options": list(CANVAS_NODE_KIND_OPTIONS),
+        "responsible_options": [
+            {
+                "id": key,
+                "label": style.label,
+                "fill": style.fill,
+                "border": style.border,
+            }
+            for key, style in graph.responsibles.items()
+        ],
+    }
+
+
+def canvas_node_roles(node: FlowNode) -> dict[str, Any]:
+    meta = node.metadata
+    has_canvas_roles = any(
+        key in meta
+        for key in ("canvas_responsible", "canvas_participants", "canvas_approvers")
+    )
+    if has_canvas_roles:
+        raw_responsible = meta.get("canvas_responsible")
+        responsible = (
+            None
+            if raw_responsible in (None, "")
+            else str(raw_responsible)
+            if isinstance(raw_responsible, str)
+            else node.primary_responsible
+        )
+        participants = _csv_role_ids(meta.get("canvas_participants"))
+        approvers = _csv_role_ids(meta.get("canvas_approvers"))
+    else:
+        responsible = node.primary_responsible
+        participants = list(node.secondary_responsibles)
+        approvers = []
+
+    note_raw = meta.get("canvas_note")
+    if not isinstance(note_raw, str):
+        note_raw = meta.get("note")
+    note = note_raw.strip() if isinstance(note_raw, str) and note_raw.strip() else None
+    return {
+        "responsible": responsible,
+        "participants": participants,
+        "approvers": approvers,
+        "note": note,
+    }
+
+
+def _csv_role_ids(value: object) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    return [part for part in (item.strip() for item in value.split(",")) if part]
 
 
 def build_flow_canvas_edges_from_snapshot(

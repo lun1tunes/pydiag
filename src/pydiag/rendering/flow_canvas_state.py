@@ -72,6 +72,171 @@ def component_pending_edge_from_state(
     return result
 
 
+CANVAS_NODE_EDIT_KINDS = frozenset(
+    {
+        "process",
+        "decision_diamond",
+        "database",
+        "input_data",
+        "event",
+    }
+)
+
+
+def component_pending_node_edit_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated pending canvas node edit patch (+ request_id)."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_node_edit")
+    if not isinstance(raw, Mapping):
+        return None
+    node_id = raw.get("node_id")
+    if not isinstance(node_id, str) or not node_id:
+        return None
+    node_ids = {node.id for node in graph.nodes}
+    if node_id not in node_ids:
+        return None
+
+    patch: dict[str, Any] = {"node_id": node_id}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        patch["request_id"] = request_id.strip()
+
+    if raw.get("deleted") is True:
+        patch["deleted"] = True
+        return patch
+
+    if "title" in raw:
+        title = raw.get("title")
+        if not isinstance(title, str):
+            return None
+        patch["title"] = title
+
+    if "kind" in raw:
+        kind = raw.get("kind")
+        if kind not in CANVAS_NODE_EDIT_KINDS:
+            return None
+        patch["kind"] = kind
+
+    if "responsible" in raw:
+        responsible = raw.get("responsible")
+        if responsible is not None and not isinstance(responsible, str):
+            return None
+        if isinstance(responsible, str) and responsible not in graph.responsibles:
+            return None
+        patch["responsible"] = responsible
+
+    if "participants" in raw:
+        participants = _role_id_list(raw.get("participants"), graph)
+        if participants is None:
+            return None
+        patch["participants"] = participants
+
+    if "approvers" in raw:
+        approvers = _role_id_list(raw.get("approvers"), graph)
+        if approvers is None:
+            return None
+        patch["approvers"] = approvers
+
+    if "duration" in raw:
+        duration = raw.get("duration")
+        if duration is not None and not isinstance(duration, str):
+            return None
+        patch["duration"] = duration
+
+    if "note" in raw:
+        note = raw.get("note")
+        if note is not None and not isinstance(note, str):
+            return None
+        patch["note"] = note
+
+    editable_keys = {
+        "title",
+        "kind",
+        "responsible",
+        "participants",
+        "approvers",
+        "duration",
+        "note",
+    }
+    if not editable_keys.intersection(patch):
+        return None
+    return patch
+
+
+CANVAS_EDGE_EDIT_KINDS = frozenset({"default", "yes", "no", "dashed"})
+
+
+def component_pending_edge_edit_from_state(
+    graph: FlowGraphDocument,
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return validated pending canvas edge edit patch (+ request_id)."""
+    if component_state is None:
+        return None
+    raw = component_state.get("pending_edge_edit")
+    if not isinstance(raw, Mapping):
+        return None
+    edge_id = raw.get("edge_id")
+    if not isinstance(edge_id, str) or not edge_id:
+        return None
+    edge_ids = {edge.id for edge in graph.edges}
+    if edge_id not in edge_ids:
+        return None
+
+    patch: dict[str, Any] = {"edge_id": edge_id}
+    request_id = raw.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        patch["request_id"] = request_id.strip()
+
+    if raw.get("deleted") is True:
+        patch["deleted"] = True
+        return patch
+
+    if "kind" in raw:
+        kind = raw.get("kind")
+        if kind not in CANVAS_EDGE_EDIT_KINDS:
+            return None
+        patch["kind"] = kind
+
+    if "kind" not in patch:
+        return None
+    return patch
+
+
+def _role_id_list(value: object, graph: FlowGraphDocument) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    result: list[str] = []
+    known = set(graph.responsibles)
+    for item in value:
+        if not isinstance(item, str) or item not in known:
+            return None
+        result.append(item)
+    return result
+
+
+def component_history_action_from_state(
+    component_state: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """Return validated {action: undo|redo, request_id} from canvas state."""
+    if component_state is None:
+        return None
+    raw = component_state.get("history_action")
+    if not isinstance(raw, Mapping):
+        return None
+    action = raw.get("action")
+    if action not in {"undo", "redo"}:
+        return None
+    request_id = raw.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return None
+    return {"action": action, "request_id": request_id.strip()}
+
+
 def component_selected_id_from_state(
     graph: FlowGraphDocument,
     wells_doc: WellsDocument,

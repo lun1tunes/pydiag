@@ -188,7 +188,7 @@ def editable_flow_graph_to_runtime(
                     available_responsibles=available_responsibles,
                 ),
                 "time": node.duration,
-                "metadata": node.metadata,
+                "metadata": runtime_node_metadata(node),
             }
             for node in document.nodes
         ],
@@ -205,6 +205,16 @@ def editable_flow_graph_to_runtime(
         ],
     }
     return FlowGraphDocument.model_validate(runtime_payload, strict=True)
+
+
+def runtime_node_metadata(node: EditableFlowGraphNode) -> dict[str, MetaValue]:
+    """Copy metadata and attach canvas edit role/note fields (stripped on YAML write)."""
+    metadata = dict(node.metadata)
+    metadata["canvas_responsible"] = node.responsible or ""
+    metadata["canvas_participants"] = ",".join(node.participants)
+    metadata["canvas_approvers"] = ",".join(node.approvers)
+    metadata["canvas_note"] = node.note or ""
+    return metadata
 
 
 def runtime_node_responsibles(

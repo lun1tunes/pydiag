@@ -24,8 +24,9 @@ class FakeSession:
     def graph_source_edit_block_reason(self) -> str | None:
         return None if self.edit_available else "blocked"
 
-    def create_graph_source_edge(self, graph, command: CreateGraphSourceEdgeCommand) -> None:
+    def create_graph_source_edge(self, graph, command: CreateGraphSourceEdgeCommand, **kwargs) -> None:
         _ = graph
+        _ = kwargs
         self.created.append(command)
 
 
