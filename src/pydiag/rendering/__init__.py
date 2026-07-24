@@ -35,13 +35,37 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_node_edit_from_state",
     ),
+    "component_pending_node_edits_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_node_edits_from_state",
+    ),
     "component_pending_node_create_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_node_create_from_state",
     ),
+    "component_pending_node_creates_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_node_creates_from_state",
+    ),
+    "component_pending_process_create_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_process_create_from_state",
+    ),
+    "component_pending_process_edit_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_process_edit_from_state",
+    ),
+    "component_pending_process_delete_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_process_delete_from_state",
+    ),
     "component_pending_edge_edit_from_state": (
         "pydiag.rendering.flow_canvas_adapter",
         "component_pending_edge_edit_from_state",
+    ),
+    "component_pending_edge_edits_from_state": (
+        "pydiag.rendering.flow_canvas_adapter",
+        "component_pending_edge_edits_from_state",
     ),
     "component_positions_from_state": (
         "pydiag.rendering.flow_canvas_adapter",

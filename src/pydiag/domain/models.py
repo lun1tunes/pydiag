@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,7 +19,10 @@ NodeKind = Literal[
 
 EdgeKind = Literal["usual", "yes", "no", "dashed"]
 TimeUnit = Literal["minute", "hour", "day"]
-TIME_VALUE_RE = re.compile(r"^(?P<amount>\d+)\s+(?P<unit>minutes?|hours?|days?)$")
+TIME_VALUE_RE = re.compile(
+    r"^(?:(?P<lo>\d+)\s*-\s*(?P<hi>\d+)|(?P<amount>\d+))"
+    r"\s+(?P<unit>minutes?|hours?|days?)$"
+)
 TIME_UNIT_ALIASES: dict[str, TimeUnit] = {
     "minute": "minute",
     "minutes": "minute",
@@ -27,6 +30,11 @@ TIME_UNIT_ALIASES: dict[str, TimeUnit] = {
     "hours": "hour",
     "day": "day",
     "days": "day",
+}
+TIME_UNIT_CANONICAL: dict[TimeUnit, tuple[str, str]] = {
+    "minute": ("minute", "minutes"),
+    "hour": ("hour", "hours"),
+    "day": ("day", "days"),
 }
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 RESERVED_UI_ID_PREFIXES = (
@@ -63,6 +71,7 @@ class ResponsibleStyle(StrictModel):
     fill: str
     border: str
     text: str = "#172033"
+    abbr: str | None = None
 
     @field_validator("fill", "border", "text")
     @classmethod
@@ -72,6 +81,14 @@ class ResponsibleStyle(StrictModel):
                 "color values must use 6-digit hex format, for example '#dcecff'"
             )
         return value
+
+    @field_validator("abbr")
+    @classmethod
+    def normalize_abbr(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(str(value).split()).strip()
+        return cleaned or None
 
 
 class NodeBase(StrictModel):
@@ -89,13 +106,7 @@ class NodeBase(StrictModel):
     def validate_time(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = " ".join(value.strip().lower().split())
-        if not TIME_VALUE_RE.fullmatch(normalized):
-            raise ValueError(
-                "time must use '<number> minutes|hours|days', "
-                "for example '40 minutes', '10 hours' or '2 days'"
-            )
-        return normalized
+        return format_node_time(parse_node_time(value))
 
     @property
     def kind(self) -> NodeKind:
@@ -179,10 +190,16 @@ FlowEdge = Annotated[
 ]
 
 
+class FlowProcess(StrictModel):
+    title: str = Field(min_length=1)
+    node_ids: list[str] = Field(default_factory=list)
+
+
 class FlowGraphDocument(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     version: int = Field(ge=1)
     responsibles: dict[str, ResponsibleStyle]
+    processes: dict[str, FlowProcess] = Field(default_factory=dict)
     nodes: list[FlowNode]
     edges: list[FlowEdge]
 
@@ -229,6 +246,27 @@ class FlowGraphDocument(StrictModel):
                 raise ValueError(f"Edge {edge.id}: unknown source node {edge.source}")
             if edge.target not in node_set:
                 raise ValueError(f"Edge {edge.id}: unknown target node {edge.target}")
+
+        membership: dict[str, str] = {}
+        for process_id, process in self.processes.items():
+            seen_in_process: set[str] = set()
+            for member_id in process.node_ids:
+                if member_id not in node_set:
+                    raise ValueError(
+                        f"Process {process_id}: unknown node id {member_id}"
+                    )
+                if member_id in seen_in_process:
+                    raise ValueError(
+                        f"Process {process_id}: duplicate node id {member_id}"
+                    )
+                seen_in_process.add(member_id)
+                owner = membership.get(member_id)
+                if owner is not None:
+                    raise ValueError(
+                        f"Node {member_id} belongs to multiple processes: "
+                        f"{owner} and {process_id}"
+                    )
+                membership[member_id] = process_id
         return self
 
 
@@ -240,15 +278,48 @@ def validate_not_reserved_ui_id(entity: str, value: str) -> None:
             )
 
 
-def parse_node_time(value: str) -> tuple[int, TimeUnit]:
+class ParsedNodeTime(NamedTuple):
+    amount: int
+    unit: TimeUnit
+    amount_hi: int | None = None
+
+    @property
+    def is_range(self) -> bool:
+        return self.amount_hi is not None and self.amount_hi != self.amount
+
+
+def parse_node_time(value: str) -> ParsedNodeTime:
     normalized = " ".join(value.strip().lower().split())
     match = TIME_VALUE_RE.fullmatch(normalized)
     if not match:
         raise ValueError(
-            "time must use '<number> minutes|hours|days', "
-            "for example '40 minutes', '10 hours' or '2 days'"
+            "time must use '<number>[-<number>] minutes|hours|days', "
+            "for example '40 minutes', '1-2 hours' or '2 days'"
         )
-    return int(match.group("amount")), TIME_UNIT_ALIASES[match.group("unit")]
+    unit = TIME_UNIT_ALIASES[match.group("unit")]
+    if match.group("lo") is not None:
+        lo = int(match.group("lo"))
+        hi = int(match.group("hi"))
+        if lo <= 0 or hi <= 0:
+            raise ValueError("time amounts must be positive")
+        if lo > hi:
+            raise ValueError("time range start must be <= end")
+        if lo == hi:
+            return ParsedNodeTime(amount=lo, unit=unit)
+        return ParsedNodeTime(amount=lo, unit=unit, amount_hi=hi)
+    amount = int(match.group("amount"))
+    if amount <= 0:
+        raise ValueError("time amounts must be positive")
+    return ParsedNodeTime(amount=amount, unit=unit)
+
+
+def format_node_time(parsed: ParsedNodeTime) -> str:
+    singular, plural = TIME_UNIT_CANONICAL[parsed.unit]
+    if parsed.is_range and parsed.amount_hi is not None:
+        unit = plural
+        return f"{parsed.amount}-{parsed.amount_hi} {unit}"
+    unit = singular if parsed.amount == 1 else plural
+    return f"{parsed.amount} {unit}"
 
 
 class WellHistoryEntry(StrictModel):

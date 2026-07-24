@@ -21,8 +21,34 @@ def test_flow_canvas_payload_contains_only_domain_nodes_and_edges(documents) -> 
 
     assert {node["id"] for node in payload["nodes"]} == {node.id for node in graph.nodes}
     assert {edge["id"] for edge in payload["edges"]} == {edge.id for edge in graph.edges}
+    assert payload["processes"] == []
     assert not any(node["id"].startswith("route-anchor::") for node in payload["nodes"])
     assert not any(node["id"].startswith("edge-label::") for node in payload["nodes"])
+
+
+def test_flow_canvas_payload_includes_process_frames(documents) -> None:
+    from pydiag.domain.models import FlowProcess
+
+    graph, wells = documents
+    graph = graph.model_copy(
+        update={
+            "processes": {
+                "intake_block": FlowProcess(
+                    title="Подготовка",
+                    node_ids=["proc_initial_review"],
+                )
+            }
+        }
+    )
+
+    payload = build_flow_canvas_payload(graph, wells)
+    assert payload["processes"] == [
+        {
+            "id": "intake_block",
+            "title": "Подготовка",
+            "member_ids": ["proc_initial_review"],
+        }
+    ]
 
 
 def test_flow_canvas_payload_embeds_badges_and_well_tokens_into_domain_node(documents) -> None:

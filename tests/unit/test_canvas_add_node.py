@@ -108,6 +108,11 @@ def test_add_node_button_assets() -> None:
     assert 'textContent = "+ Карточка"' in js
     assert 'title: "Измени меня"' in js
     assert 'setStateValue("pending_node_create"' in js
+    assert 'setStateValue("pending_node_creates"' in js
+    assert "function copySelectedNodesToClipboard(state)" in js
+    assert "function pasteNodesFromClipboard(state)" in js
+    assert 'key === "c"' in js
+    assert 'key === "v"' in js
     assert ".flow-canvas-add-node" in css
     assert "left: 14px" in css
     assert "bottom: 14px" in css
@@ -136,6 +141,40 @@ def test_component_pending_node_create_from_state() -> None:
         "layout_w": 280,
         "layout_h": 72,
     }
+
+
+def test_component_pending_node_creates_clone_fields() -> None:
+    from pydiag.rendering.flow_canvas_state import component_pending_node_creates_from_state
+
+    pending = component_pending_node_creates_from_state(
+        {
+            "pending_node_creates": {
+                "request_id": "ncs-1",
+                "nodes": [
+                    {
+                        "title": "Клон",
+                        "kind": "process",
+                        "layout_x": 10,
+                        "layout_y": 20,
+                        "layout_w": 280,
+                        "layout_h": 72,
+                        "responsible": "planning",
+                        "participants": ["geology"],
+                        "duration": "1-2 hours",
+                        "duration_context": "после запроса",
+                        "note": "копия",
+                    }
+                ],
+            }
+        }
+    )
+    assert pending is not None
+    assert pending["request_id"] == "ncs-1"
+    assert pending["nodes"][0]["title"] == "Клон"
+    assert pending["nodes"][0]["responsible"] == "planning"
+    assert pending["nodes"][0]["participants"] == ["geology"]
+    assert pending["nodes"][0]["duration"] == "1-2 hours"
+    assert pending["nodes"][0]["note"] == "копия"
 
 
 def test_create_flow_source_payload_node_defaults(tmp_path: Path) -> None:

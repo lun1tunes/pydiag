@@ -81,4 +81,9 @@ def node_overlay_width(node_payload: Mapping[str, Any]) -> float:
             token_width,
             14 + visible_cols * WELL_TOKEN_WIDTH + max(0, visible_cols - 1) * WELL_TOKEN_COLUMN_GAP,
         )
-    return max(size_width, top_width, token_width)
+    note_width = size_width
+    note = node_payload.get("note")
+    if isinstance(note, str) and note.strip():
+        # Prefer placing the note to the right of the card.
+        note_width = size_width + 12 + min(200.0, max(72.0, len(note.strip()) * 6.5 + 20))
+    return max(size_width, top_width, token_width, note_width)

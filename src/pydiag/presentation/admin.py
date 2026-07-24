@@ -34,6 +34,7 @@ from pydiag.presentation.admin_models import (
     transition_ids_for_well,
     transition_option_label,
     validate_create_well_identity,
+    validate_graph_source_node_form,
 )
 from pydiag.presentation.html_utils import safe_text
 from pydiag.presentation.inspector_models import build_overview_rows
@@ -772,31 +773,6 @@ def render_create_graph_source_edge_form(
             note=normalized_optional_text(note),
         ),
     )
-
-
-def validate_graph_source_node_form(
-    *,
-    title: str,
-    kind: str,
-    responsible: str | None,
-    participants: list[str],
-    approvers: list[str],
-) -> str | None:
-    if not title.strip():
-        return "Заголовок карточки обязателен."
-
-    combined = [
-        value
-        for value in [responsible, *participants, *approvers]
-        if value is not None
-    ]
-    if len(combined) != len(set(combined)):
-        return "Один и тот же ответственный не должен повторяться в карточке."
-
-    if kind in {"process", "decision_diamond"} and not combined:
-        return "Для process/decision карточек нужно назначить хотя бы одного ответственного."
-
-    return None
 
 
 def coalesce_layout_field(

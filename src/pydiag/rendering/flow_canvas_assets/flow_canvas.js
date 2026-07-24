@@ -10,6 +10,7 @@ const FIT_VIEW_PADDING_TOP = 48;
 const FIT_VIEW_PADDING_BOTTOM = 64;
 const PAN_CLICK_SUPPRESS_DISTANCE_PX = 4;
 const NODE_DRAG_CLICK_SUPPRESS_DISTANCE_PX = 4;
+const MARQUEE_MIN_SIZE_PX = 4;
 const CANVAS_STATE_STORE_KEY = "__pydiagFlowCanvasStates";
 const CANVAS_STATE_KEY = "well_drilling_flow_canvas_v2";
 const IMMERSIVE_STORAGE_KEY = "pydiag-flow-canvas-immersive";
@@ -131,15 +132,22 @@ function createCanvasState(root, component, ownerDocument) {
     selectedId: null,
     pendingSelectedId: undefined,
     selectedNodeIds: new Set(),
+    selectedEdgeIds: new Set(),
+    selectedProcessId: null,
+    nodeClipboard: [],
+    clipboardPasteCount: 0,
     suppressNextNodeClick: false,
     editingTitleNodeId: null,
     activeEditPopover: null,
     editHud: null,
+    marqueeEl: null,
+    spacePanHeld: false,
     responsibleFilter: [],
     pendingResponsibleFilter: undefined,
     lastHostResponsibleFilter: [],
     sessionEpoch: null,
     isPanning: false,
+    isMarqueeSelecting: false,
     draggingNodeId: null,
     draggingNodeIds: [],
     connectMode: null,
@@ -154,16 +162,19 @@ function createCanvasState(root, component, ownerDocument) {
     edgeGeometryVersion: 0,
     renderedSelectedId: null,
     renderedSelectedNodeIds: new Set(),
+    renderedSelectedEdgeIds: new Set(),
     renderedPositionsVersion: -1,
     renderedEdgeGeometryVersion: -1,
     renderedDraggingNodeId: null,
     renderedDraggingNodeIds: [],
     resizeObserver: null,
     keydownHandler: null,
+    keyupHandler: null,
     ownerDocument,
     dom: null,
     edgeElements: new Map(),
     nodeElements: new Map(),
+    processElements: new Map(),
     tokenElements: new Map(),
     minimapNodeElements: new Map(),
     minimapBounds: null,
@@ -250,6 +261,7 @@ function initializeRootStructure(state) {
   svg.appendChild(connectPreview);
 
   const labelsLayer = createElement("div", "flow-canvas-labels", stage);
+  const processesLayer = createElement("div", "flow-canvas-processes", stage);
   const nodesLayer = createElement("div", "flow-canvas-nodes", stage);
 
   const minimap = createElement("div", "flow-canvas-minimap", root);
@@ -313,6 +325,7 @@ function initializeRootStructure(state) {
     edgeLayer,
     connectPreview,
     labelsLayer,
+    processesLayer,
     nodesLayer,
     minimap,
     minimapSvg,
@@ -326,6 +339,12 @@ function initializeRootStructure(state) {
 
   if (!state.keydownHandler) {
     state.keydownHandler = (event) => {
+      if (event.code === "Space" && !isEditableKeyboardTarget(event.target)) {
+        state.spacePanHeld = true;
+        if (!event.repeat) {
+          event.preventDefault();
+        }
+      }
       if (event.key === "Escape" && state.activeEditPopover) {
         closeActiveEditPopover(state);
         return;
@@ -342,11 +361,28 @@ function initializeRootStructure(state) {
       if (isEditableKeyboardTarget(event.target)) {
         return;
       }
+      if ((event.key === "Delete" || event.key === "Backspace") && canBulkDeleteSelection(state)) {
+        event.preventDefault();
+        requestBulkDeleteSelection(state);
+        return;
+      }
       const mod = event.ctrlKey || event.metaKey;
       if (!mod) {
         return;
       }
       const key = String(event.key || "").toLowerCase();
+      if (key === "c") {
+        if (copySelectedNodesToClipboard(state)) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (key === "v") {
+        if (pasteNodesFromClipboard(state)) {
+          event.preventDefault();
+        }
+        return;
+      }
       if (key === "z" && event.shiftKey) {
         event.preventDefault();
         requestHistoryAction(state, "redo");
@@ -362,7 +398,13 @@ function initializeRootStructure(state) {
         requestHistoryAction(state, "redo");
       }
     };
+    state.keyupHandler = (event) => {
+      if (event.code === "Space") {
+        state.spacePanHeld = false;
+      }
+    };
     state.ownerDocument.addEventListener("keydown", state.keydownHandler);
+    state.ownerDocument.addEventListener("keyup", state.keyupHandler);
   }
 }
 
@@ -391,8 +433,11 @@ function syncStateFromPayload(state) {
       state.selectedId = null;
       state.pendingSelectedId = undefined;
       state.selectedNodeIds = new Set();
+      state.selectedEdgeIds = new Set();
+      state.selectedProcessId = null;
       state.renderedSelectedId = null;
       state.renderedSelectedNodeIds = new Set();
+      state.renderedSelectedEdgeIds = new Set();
       state.responsibleFilter = [];
       state.pendingResponsibleFilter = undefined;
       state.lastHostResponsibleFilter = [];
@@ -431,6 +476,15 @@ function syncStateFromPayload(state) {
     }
     state.selectedNodeIds = retained;
   }
+  if (state.selectedEdgeIds.size) {
+    const retainedEdges = new Set();
+    for (const edgeId of state.selectedEdgeIds) {
+      if (state.edgePayloadsById.has(edgeId)) {
+        retainedEdges.add(edgeId);
+      }
+    }
+    state.selectedEdgeIds = retainedEdges;
+  }
 
   if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
     state.positions = nextPositions;
@@ -457,6 +511,7 @@ function syncStateFromPayload(state) {
       state.selectedId = payloadSelectedId;
       // External selection (inspector / Streamlit) replaces multi-select.
       state.selectedNodeIds = selectedNodeIdsForPrimary(state, payloadSelectedId);
+      state.selectedEdgeIds = selectedEdgeIdsForPrimary(state, payloadSelectedId);
     } else {
       state.selectedId = payloadSelectedId;
     }
@@ -523,6 +578,7 @@ function renderState(state) {
     state.hasRenderedScene = false;
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
+    state.renderedSelectedEdgeIds = new Set(state.selectedEdgeIds);
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
@@ -552,6 +608,7 @@ function renderState(state) {
     state.hasRenderedScene = true;
     state.renderedSelectedId = state.selectedId;
     state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
+    state.renderedSelectedEdgeIds = new Set(state.selectedEdgeIds);
     state.renderedPositionsVersion = state.positionsVersion;
     state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
     state.renderedDraggingNodeId = state.draggingNodeId;
@@ -577,6 +634,8 @@ function renderState(state) {
       }
       state.renderedPositionsVersion = state.positionsVersion;
       state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
+      layoutAllNodeNotes(state);
+      syncProcessFrames(state);
     } else if (edgeGeometryChanged) {
       // Same revision + same live positions, but host re-routed edges
       // (typical after drag echo). Apply the new points without a full rebuild.
@@ -594,6 +653,7 @@ function renderState(state) {
     if (
       state.renderedSelectedId !== state.selectedId
       || !sameIdSets(state.renderedSelectedNodeIds, state.selectedNodeIds)
+      || !sameIdSets(state.renderedSelectedEdgeIds, state.selectedEdgeIds)
     ) {
       updateSelectionState(
         state,
@@ -601,9 +661,12 @@ function renderState(state) {
         state.selectedId,
         state.renderedSelectedNodeIds,
         state.selectedNodeIds,
+        state.renderedSelectedEdgeIds,
+        state.selectedEdgeIds,
       );
       state.renderedSelectedId = state.selectedId;
       state.renderedSelectedNodeIds = new Set(state.selectedNodeIds);
+      state.renderedSelectedEdgeIds = new Set(state.selectedEdgeIds);
     }
   }
 
@@ -699,6 +762,104 @@ function requestCreateNode(state) {
     layout_w: layoutW,
     layout_h: layoutH,
   });
+}
+
+function selectedEditableNodeIds(state) {
+  const ids = state.selectedNodeIds.size
+    ? [...state.selectedNodeIds]
+    : (state.selectedId && state.nodePayloadsById.has(state.selectedId) ? [state.selectedId] : []);
+  return ids.filter((id) => {
+    const node = state.nodePayloadsById.get(id);
+    return node && node.editable === true;
+  });
+}
+
+function copySelectedNodesToClipboard(state) {
+  if (state.payload.node_edit_enabled !== true) {
+    return false;
+  }
+  const ids = selectedEditableNodeIds(state);
+  if (!ids.length) {
+    return false;
+  }
+  const snapshots = [];
+  for (const id of ids) {
+    const node = state.nodePayloadsById.get(id);
+    if (!node) {
+      continue;
+    }
+    const position = state.positions[id] || node.position || { x: 0, y: 0 };
+    const size = node.size || { w: 280, h: 72 };
+    snapshots.push({
+      title: String(node.title || node.text || "Измени меня").trim() || "Измени меня",
+      kind: typeof node.kind === "string" && node.kind ? node.kind : "process",
+      layout_w: Number(size.w) || 280,
+      layout_h: Number(size.h) || 72,
+      base_x: Number(position.x) || 0,
+      base_y: Number(position.y) || 0,
+      responsible: node.responsible_id ?? null,
+      participants: Array.isArray(node.participants) ? [...node.participants] : [],
+      approvers: Array.isArray(node.approvers) ? [...node.approvers] : [],
+      duration: typeof node.duration === "string" ? node.duration : "",
+      duration_context: typeof node.duration_context === "string" ? node.duration_context : "",
+      note: typeof node.note === "string" ? node.note : "",
+    });
+  }
+  if (!snapshots.length) {
+    return false;
+  }
+  state.nodeClipboard = snapshots;
+  state.clipboardPasteCount = 0;
+  return true;
+}
+
+function pasteNodesFromClipboard(state) {
+  if (state.payload.node_edit_enabled !== true) {
+    return false;
+  }
+  const clipboard = Array.isArray(state.nodeClipboard) ? state.nodeClipboard : [];
+  if (!clipboard.length) {
+    return false;
+  }
+  state.clipboardPasteCount = (state.clipboardPasteCount || 0) + 1;
+  const offset = 40 * state.clipboardPasteCount;
+  const nodes = clipboard.map((item) => {
+    const payload = {
+      title: item.title,
+      kind: item.kind,
+      layout_x: round(item.base_x + offset),
+      layout_y: round(item.base_y + offset),
+      layout_w: item.layout_w,
+      layout_h: item.layout_h,
+    };
+    if (item.responsible != null && item.responsible !== "") {
+      payload.responsible = item.responsible;
+    } else if (item.kind === "process" || item.kind === "decision_diamond") {
+      payload.responsible = "unassigned";
+    }
+    if (Array.isArray(item.participants) && item.participants.length) {
+      payload.participants = [...item.participants];
+    }
+    if (Array.isArray(item.approvers) && item.approvers.length) {
+      payload.approvers = [...item.approvers];
+    }
+    if (item.duration) {
+      payload.duration = item.duration;
+    }
+    if (item.duration_context) {
+      payload.duration_context = item.duration_context;
+    }
+    if (item.note) {
+      payload.note = item.note;
+    }
+    return payload;
+  });
+  const requestId = `ncs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  state.component.setStateValue("pending_node_creates", {
+    request_id: requestId,
+    nodes,
+  });
+  return true;
 }
 
 function isEditableKeyboardTarget(target) {
@@ -997,11 +1158,13 @@ function clearScene(state) {
   state.dom.defs.replaceChildren();
   state.dom.edgeLayer.replaceChildren();
   state.dom.labelsLayer.replaceChildren();
+  state.dom.processesLayer.replaceChildren();
   state.dom.nodesLayer.replaceChildren();
   state.dom.minimapEdgeLayer.replaceChildren();
   state.dom.minimapNodeLayer.replaceChildren();
   state.edgeElements = new Map();
   state.nodeElements = new Map();
+  state.processElements = new Map();
   state.tokenElements = new Map();
   state.minimapNodeElements = new Map();
 }
@@ -1019,14 +1182,21 @@ function rebuildGraphScene(state) {
     buildNodeElement(state, node);
     buildMinimapNodeElement(state, node);
   }
+  layoutAllNodeNotes(state);
+  syncProcessFrames(state);
 }
 
 function sceneTopologySignature(payload) {
   const nodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
   const edges = Array.isArray(payload?.edges) ? payload.edges : [];
+  const processes = Array.isArray(payload?.processes) ? payload.processes : [];
   const nodeIds = nodes.map((node) => String(node.id || "")).sort().join("\0");
   const edgeIds = edges.map((edge) => String(edge.id || "")).sort().join("\0");
-  return `${nodeIds}|${edgeIds}`;
+  const processSig = processes
+    .map((item) => `${item.id}:${(item.member_ids || []).join(",")}`)
+    .sort()
+    .join("\0");
+  return `${nodeIds}|${edgeIds}|${processSig}`;
 }
 
 function patchGraphScene(state) {
@@ -1038,6 +1208,8 @@ function patchGraphScene(state) {
   for (const edge of state.payload.edges || []) {
     patchEdgeElement(state, edge);
   }
+  layoutAllNodeNotes(state);
+  syncProcessFrames(state);
 }
 
 function patchNodeElement(state, node) {
@@ -1095,6 +1267,7 @@ function patchNodeElement(state, node) {
   if (minimap) {
     syncMinimapNodeShape(minimap, node, state.positions[node.id] || node.position);
   }
+  syncNodeNoteElement(state, node.id);
 }
 
 function patchEdgeElement(state, edge) {
@@ -1112,7 +1285,7 @@ function patchEdgeElement(state, edge) {
   }
   syncEdgeMarker(state, edge, stroke);
   syncEdgeLabelElement(state, elements, edge);
-  setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
+  setEdgeSelectedState(elements, edge, isEdgeSelected(state, edge.id));
 }
 
 function syncEdgeMarker(state, edge, color) {
@@ -1161,7 +1334,7 @@ function createEdgeLabelElement(state, edge) {
     if (state.connectMode) {
       cancelConnectMode(state);
     }
-    selectId(state, edge.id);
+    selectId(state, edge.id, { additive: isMultiSelectModifier(event) });
   });
   label.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1212,7 +1385,7 @@ function buildEdgeElement(state, edge) {
     if (state.connectMode) {
       cancelConnectMode(state);
     }
-    selectId(state, edge.id);
+    selectId(state, edge.id, { additive: isMultiSelectModifier(event) });
   });
   hitPath.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1222,7 +1395,7 @@ function buildEdgeElement(state, edge) {
   const label = edge.label ? createEdgeLabelElement(state, edge) : null;
 
   const elements = { visiblePath, hitPath, label };
-  setEdgeSelectedState(elements, edge, state.selectedId === edge.id);
+  setEdgeSelectedState(elements, edge, isEdgeSelected(state, edge.id));
   state.edgeElements.set(edge.id, elements);
 }
 
@@ -1290,6 +1463,9 @@ function buildNodeElement(state, node) {
       }
       startNodeDrag(event, state, node.id);
     });
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+    });
   }
 
   const content = createElement("span", "flow-node-content", card);
@@ -1326,11 +1502,13 @@ function buildNodeElement(state, node) {
     overlay: null,
     handles: [],
     textEl: text,
+    noteEl: null,
   };
   syncNodeShellPosition(shell, state.positions[node.id] || node.position);
   setNodeSelectedState(elements, node, isNodeSelected(state, node.id));
   state.nodeElements.set(node.id, elements);
   syncConnectionHandlesForNode(state, node.id);
+  syncNodeNoteElement(state, node.id);
 }
 
 function requestNodeEditId() {
@@ -1354,13 +1532,30 @@ function commitNodeEdit(state, nodeId, patch) {
     }
     payload.title = next;
   }
-  if ("duration" in patch) {
-    const next = String(patch.duration || "").trim();
-    const prev = String(node.duration || "").trim();
-    if (next === prev) {
+  if ("duration" in patch || "duration_context" in patch) {
+    let durationChanged = false;
+    if ("duration" in patch) {
+      const next = String(patch.duration || "").trim();
+      const prev = String(node.duration || "").trim();
+      if (next !== prev) {
+        durationChanged = true;
+      }
+      payload.duration = next;
+    }
+    if ("duration_context" in patch) {
+      const next = String(patch.duration_context || "").trim();
+      const prev = String(node.duration_context || "").trim();
+      if (next !== prev) {
+        durationChanged = true;
+      }
+      payload.duration_context = next;
+    }
+    const onlyDurationFields = Object.keys(patch).every(
+      (key) => key === "duration" || key === "duration_context",
+    );
+    if (!durationChanged && onlyDurationFields) {
       return;
     }
-    payload.duration = next;
   }
   if ("note" in patch) {
     const next = String(patch.note || "").trim();
@@ -1406,8 +1601,22 @@ function applyOptimisticNodeEdit(state, nodeId, payload) {
   if ("duration" in payload) {
     node.duration = payload.duration || "";
   }
+  if ("duration_context" in payload) {
+    node.duration_context = payload.duration_context || "";
+  }
   if ("note" in payload) {
     node.note = payload.note || "";
+    syncNodeNoteElement(state, nodeId);
+    layoutAllNodeNotes(state);
+  }
+  if ("approvers" in payload) {
+    node.approvers = Array.isArray(payload.approvers) ? [...payload.approvers] : [];
+  }
+  if ("responsible" in payload) {
+    node.responsible_id = payload.responsible ?? null;
+  }
+  if ("participants" in payload) {
+    node.participants = Array.isArray(payload.participants) ? [...payload.participants] : [];
   }
   if (typeof payload.kind === "string" && payload.kind && elements?.card) {
     const previous = node.kind;
@@ -1438,6 +1647,51 @@ function commitEdgeEdit(state, edgeId, patch) {
     edge_id: edgeId,
     request_id: requestEdgeEditId(),
     ...nextPatch,
+  });
+}
+
+function commitNodeEdits(state, nodeIds, patch) {
+  const ids = [...new Set(nodeIds)].filter((id) => {
+    const node = state.nodePayloadsById.get(id);
+    return node && node.editable === true;
+  });
+  if (!ids.length) {
+    return;
+  }
+  if (ids.length === 1) {
+    commitNodeEdit(state, ids[0], patch);
+    return;
+  }
+  closeActiveEditPopover(state);
+  state.suppressNextNodeClick = true;
+  for (const nodeId of ids) {
+    applyOptimisticNodeEdit(state, nodeId, patch);
+  }
+  state.component.setStateValue("pending_node_edits", {
+    request_id: requestNodeEditId(),
+    node_ids: ids,
+    patch,
+  });
+}
+
+function commitEdgeEdits(state, edgeIds, patch) {
+  const ids = [...new Set(edgeIds)].filter((id) => state.edgePayloadsById.has(id));
+  if (!ids.length || state.payload.edge_edit_enabled !== true) {
+    return;
+  }
+  if (ids.length === 1) {
+    commitEdgeEdit(state, ids[0], patch);
+    return;
+  }
+  const nextPatch = { ...patch };
+  if ("kind" in nextPatch) {
+    nextPatch.kind = sourceEdgeKind(nextPatch.kind);
+  }
+  closeActiveEditPopover(state);
+  state.component.setStateValue("pending_edge_edits", {
+    request_id: requestEdgeEditId(),
+    edge_ids: ids,
+    patch: nextPatch,
   });
 }
 
@@ -1569,10 +1823,96 @@ function destroyEditHud(state) {
 }
 
 function syncSelectionEditHud(state) {
-  if (state.draggingNodeId || state.connectMode) {
+  if (state.draggingNodeId || state.connectMode || state.isMarqueeSelecting) {
     destroyEditHud(state);
     return;
   }
+  if (state.selectedProcessId && state.payload.node_edit_enabled !== false) {
+    const process = (state.payload.processes || []).find(
+      (item) => item.id === state.selectedProcessId,
+    );
+    if (process) {
+      const targetKey = `process:${process.id}`;
+      if (state.editHud && state.editHud.dataset.targetKey === targetKey) {
+        positionEditHud(state);
+        return;
+      }
+      destroyEditHud(state);
+      const hud = createElement("div", "flow-edit-hud", state.root);
+      hud.dataset.targetKey = targetKey;
+      hud.dataset.processId = process.id;
+      const trigger = createElement("button", "flow-edit-hud__trigger", hud);
+      trigger.type = "button";
+      trigger.textContent = "⋯";
+      trigger.title = "Редактировать процесс";
+      trigger.setAttribute("aria-label", "Редактировать процесс");
+      trigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        openProcessEditActionMenu(state, process.id, trigger);
+      });
+      hud.addEventListener("pointerdown", (event) => event.stopPropagation());
+      state.editHud = hud;
+      positionEditHud(state);
+      return;
+    }
+  }
+  const multiNodes = [...state.selectedNodeIds].filter((id) => {
+    const node = state.nodePayloadsById.get(id);
+    return node && node.editable === true;
+  });
+  const multiEdges = [...state.selectedEdgeIds].filter((id) => state.edgePayloadsById.has(id));
+  if (multiNodes.length > 1 && state.payload.node_edit_enabled !== false) {
+    const targetKey = `nodes:${multiNodes.slice().sort().join(",")}`;
+    if (state.editHud && state.editHud.dataset.targetKey === targetKey) {
+      positionEditHud(state);
+      return;
+    }
+    destroyEditHud(state);
+    const hud = createElement("div", "flow-edit-hud", state.root);
+    hud.dataset.targetKey = targetKey;
+    hud.dataset.multiNodeIds = multiNodes.join(",");
+    const trigger = createElement("button", "flow-edit-hud__trigger", hud);
+    trigger.type = "button";
+    trigger.textContent = "⋯";
+    trigger.title = `Редактировать ${multiNodes.length}`;
+    trigger.setAttribute("aria-label", `Редактировать ${multiNodes.length}`);
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      openMultiNodeEditActionMenu(state, multiNodes, trigger);
+    });
+    hud.addEventListener("pointerdown", (event) => event.stopPropagation());
+    state.editHud = hud;
+    positionEditHud(state);
+    return;
+  }
+  if (multiEdges.length > 1 && state.payload.edge_edit_enabled === true) {
+    const targetKey = `edges:${multiEdges.slice().sort().join(",")}`;
+    if (state.editHud && state.editHud.dataset.targetKey === targetKey) {
+      positionEditHud(state);
+      return;
+    }
+    destroyEditHud(state);
+    const hud = createElement("div", "flow-edit-hud", state.root);
+    hud.dataset.targetKey = targetKey;
+    hud.dataset.multiEdgeIds = multiEdges.join(",");
+    const trigger = createElement("button", "flow-edit-hud__trigger", hud);
+    trigger.type = "button";
+    trigger.textContent = "⋯";
+    trigger.title = `Редактировать ${multiEdges.length}`;
+    trigger.setAttribute("aria-label", `Редактировать ${multiEdges.length}`);
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      openMultiEdgeEditActionMenu(state, multiEdges, trigger);
+    });
+    hud.addEventListener("pointerdown", (event) => event.stopPropagation());
+    state.editHud = hud;
+    positionEditHud(state);
+    return;
+  }
+
   const selectedId = state.selectedId;
   const node = selectedId ? state.nodePayloadsById.get(selectedId) : null;
   const edge = selectedId ? state.edgePayloadsById.get(selectedId) : null;
@@ -1580,13 +1920,15 @@ function syncSelectionEditHud(state) {
     node
     && node.editable === true
     && state.selectedNodeIds.size <= 1
+    && state.selectedEdgeIds.size === 0
     && isNodeSelected(state, selectedId),
   );
   const singleEdge = Boolean(
     edge
     && state.payload.edge_edit_enabled === true
     && state.selectedNodeIds.size === 0
-    && state.selectedId === edge.id,
+    && state.selectedEdgeIds.size <= 1
+    && isEdgeSelected(state, edge.id),
   );
   if (!singleNode && !singleEdge) {
     destroyEditHud(state);
@@ -1633,6 +1975,48 @@ function positionEditHud(state) {
     if (elements?.shell) {
       anchorRect = elements.shell.getBoundingClientRect();
     }
+  } else if (targetKey.startsWith("nodes:")) {
+    const nodeIds = (hud.dataset.multiNodeIds || "").split(",").filter(Boolean);
+    for (const nodeId of nodeIds) {
+      const elements = state.nodeElements.get(nodeId);
+      if (!elements?.shell) {
+        continue;
+      }
+      const rect = elements.shell.getBoundingClientRect();
+      if (!anchorRect) {
+        anchorRect = {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+        };
+      } else {
+        anchorRect.left = Math.min(anchorRect.left, rect.left);
+        anchorRect.right = Math.max(anchorRect.right, rect.right);
+        anchorRect.top = Math.min(anchorRect.top, rect.top);
+        anchorRect.bottom = Math.max(anchorRect.bottom, rect.bottom);
+      }
+    }
+  } else if (targetKey.startsWith("edges:")) {
+    const edgeIds = (hud.dataset.multiEdgeIds || "").split(",").filter(Boolean);
+    const first = edgeIds[0];
+    const elements = first ? state.edgeElements.get(first) : null;
+    const edge = first ? state.edgePayloadsById.get(first) : null;
+    if (elements?.label) {
+      anchorRect = elements.label.getBoundingClientRect();
+    } else if (edge?.points?.length) {
+      const mid = edge.points[Math.floor(edge.points.length / 2)];
+      const sx = state.view.x + mid.x * state.view.scale;
+      const sy = state.view.y + mid.y * state.view.scale;
+      anchorRect = {
+        left: rootRect.left + sx,
+        right: rootRect.left + sx,
+        top: rootRect.top + sy,
+        bottom: rootRect.top + sy,
+        width: 0,
+        height: 0,
+      };
+    }
   } else if (targetKey.startsWith("edge:")) {
     const edgeId = targetKey.slice(5);
     const elements = state.edgeElements.get(edgeId);
@@ -1651,6 +2035,14 @@ function positionEditHud(state) {
         width: 0,
         height: 0,
       };
+    }
+  } else if (targetKey.startsWith("process:")) {
+    const processId = targetKey.slice(8);
+    const frame = state.processElements?.get(processId);
+    if (frame?.titleEl) {
+      anchorRect = frame.titleEl.getBoundingClientRect();
+    } else if (frame) {
+      anchorRect = frame.getBoundingClientRect();
     }
   }
   if (!anchorRect) {
@@ -1681,6 +2073,8 @@ function openNodeEditActionMenu(state, nodeId, anchor) {
     { id: "title", label: "Заголовок" },
     { id: "kind", label: "Тип" },
     { id: "roles", label: "Роли" },
+    { id: "approvers", label: "Согласующие" },
+    { id: "process", label: "В процесс…" },
     { id: "duration", label: "Длительность" },
     { id: "note", label: "Заметка" },
     { id: "delete", label: "Удалить", danger: true },
@@ -1728,6 +2122,246 @@ function openEdgeEditActionMenu(state, edgeId, anchor) {
   positionEditPopover(state, menu, anchor);
 }
 
+function openMultiNodeEditActionMenu(state, nodeIds, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const actions = [
+    { id: "kind", label: "Тип" },
+    { id: "roles", label: "Роли" },
+    { id: "approvers", label: "Согласующие" },
+    { id: "process", label: "В процесс…" },
+    { id: "duration", label: "Длительность" },
+    { id: "delete", label: `Удалить ${nodeIds.length}`, danger: true },
+  ];
+  for (const action of actions) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = action.label;
+    if (action.danger) {
+      item.classList.add("is-danger");
+    }
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      if (action.id === "delete") {
+        openDeleteConfirmPopover(state, {
+          message: `Удалить ${nodeIds.length} карточек?`,
+          anchor,
+          onConfirm: () => commitNodeEdits(state, nodeIds, { deleted: true }),
+        });
+        return;
+      }
+      if (action.id === "kind") {
+        openMultiKindMenu(state, nodeIds, anchor);
+        return;
+      }
+      if (action.id === "roles") {
+        openMultiRolesPopover(state, nodeIds, anchor);
+        return;
+      }
+      if (action.id === "approvers") {
+        openMultiApproversPopover(state, nodeIds, anchor);
+        return;
+      }
+      if (action.id === "process") {
+        openAssignToProcessPopover(state, nodeIds, anchor);
+        return;
+      }
+      if (action.id === "duration") {
+        openDurationPopover(state, nodeIds[0], anchor, nodeIds);
+      }
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openMultiEdgeEditActionMenu(state, edgeIds, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const kindItem = createElement("button", "flow-edit-menu__item", menu);
+  kindItem.type = "button";
+  kindItem.textContent = "Тип связи";
+  kindItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openMultiEdgeKindEditor(state, edgeIds, anchor);
+  });
+  const deleteItem = createElement("button", "flow-edit-menu__item is-danger", menu);
+  deleteItem.type = "button";
+  deleteItem.textContent = `Удалить ${edgeIds.length}`;
+  deleteItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openDeleteConfirmPopover(state, {
+      message: `Удалить ${edgeIds.length} связей?`,
+      anchor,
+      onConfirm: () => commitEdgeEdits(state, edgeIds, { deleted: true }),
+    });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openMultiKindMenu(state, nodeIds, anchor) {
+  const sample = state.nodePayloadsById.get(nodeIds[0]);
+  if (!sample?.editable || !Array.isArray(sample.kind_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  for (const option of sample.kind_options) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label || option.id;
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitNodeEdits(state, nodeIds, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function openMultiRolesPopover(state, nodeIds, anchor) {
+  const sample = state.nodePayloadsById.get(nodeIds[0]);
+  if (!sample?.editable || !Array.isArray(sample.responsible_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-node-roles-menu", state.root);
+  state.activeEditPopover = menu;
+  let responsible = sample.responsible_id ?? null;
+  let participants = [...(sample.participants || [])];
+  const responsibleRow = createElement("div", "flow-node-roles-menu__section", menu);
+  createElement("div", "flow-node-roles-menu__label", responsibleRow).textContent = "Ответственный";
+  const responsibleSelect = createElement("select", "flow-node-roles-menu__select", responsibleRow);
+  const noneOption = createElement("option", "", responsibleSelect);
+  noneOption.value = "";
+  noneOption.textContent = "—";
+  for (const option of sample.responsible_options) {
+    const opt = createElement("option", "", responsibleSelect);
+    opt.value = option.id;
+    opt.textContent = option.label || option.id;
+  }
+  responsibleSelect.value = responsible || "";
+  const participantsBox = createRoleChecklist(
+    menu,
+    "Участники",
+    sample.responsible_options,
+    participants,
+  );
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    responsible = responsibleSelect.value || null;
+    participants = participantsBox.getSelected().filter((id) => id !== responsible);
+    closeActiveEditPopover(state);
+    commitNodeEdits(state, nodeIds, { responsible, participants });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openMultiApproversPopover(state, nodeIds, anchor) {
+  const sample = state.nodePayloadsById.get(nodeIds[0]);
+  if (!sample?.editable || !Array.isArray(sample.responsible_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-node-roles-menu", state.root);
+  state.activeEditPopover = menu;
+  const responsible = sample.responsible_id ?? null;
+  const participants = new Set(sample.participants || []);
+  const approversBox = createRoleChecklist(
+    menu,
+    "Согласующие",
+    sample.responsible_options,
+    [...(sample.approvers || [])],
+  );
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const approvers = approversBox.getSelected().filter(
+      (id) => id !== responsible && !participants.has(id),
+    );
+    closeActiveEditPopover(state);
+    commitNodeEdits(state, nodeIds, { approvers });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openMultiEdgeKindEditor(state, edgeIds, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  for (const option of EDGE_KIND_MENU_OPTIONS) {
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = option.label;
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      commitEdgeEdits(state, edgeIds, { kind: option.id });
+    });
+  }
+  positionEditPopover(state, menu, anchor);
+}
+
+function canBulkDeleteSelection(state) {
+  if (state.payload.node_edit_enabled === false && state.payload.edge_edit_enabled !== true) {
+    return false;
+  }
+  const editableNodes = [...state.selectedNodeIds].filter((id) => {
+    const node = state.nodePayloadsById.get(id);
+    return node && node.editable === true;
+  });
+  const edges = [...state.selectedEdgeIds].filter((id) => state.edgePayloadsById.has(id));
+  return editableNodes.length > 0 || (state.payload.edge_edit_enabled === true && edges.length > 0);
+}
+
+function requestBulkDeleteSelection(state) {
+  const editableNodes = [...state.selectedNodeIds].filter((id) => {
+    const node = state.nodePayloadsById.get(id);
+    return node && node.editable === true;
+  });
+  const edges = [...state.selectedEdgeIds].filter((id) => state.edgePayloadsById.has(id));
+  const anchor = state.editHud || state.root;
+  if (editableNodes.length) {
+    openDeleteConfirmPopover(state, {
+      message: editableNodes.length === 1
+        ? "Удалить карточку?"
+        : `Удалить ${editableNodes.length} карточек?`,
+      anchor,
+      onConfirm: () => {
+        if (editableNodes.length === 1) {
+          commitNodeEdit(state, editableNodes[0], { deleted: true });
+        } else {
+          commitNodeEdits(state, editableNodes, { deleted: true });
+        }
+      },
+    });
+    return;
+  }
+  if (edges.length && state.payload.edge_edit_enabled === true) {
+    openDeleteConfirmPopover(state, {
+      message: edges.length === 1 ? "Удалить связь?" : `Удалить ${edges.length} связей?`,
+      anchor,
+      onConfirm: () => {
+        if (edges.length === 1) {
+          commitEdgeEdit(state, edges[0], { deleted: true });
+        } else {
+          commitEdgeEdits(state, edges, { deleted: true });
+        }
+      },
+    });
+  }
+}
+
 function openNodeFieldEditor(state, nodeId, field, anchor) {
   const node = state.nodePayloadsById.get(nodeId);
   if (!node?.editable) {
@@ -1743,6 +2377,14 @@ function openNodeFieldEditor(state, nodeId, field, anchor) {
   }
   if (field === "roles") {
     openRolesPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "approvers") {
+    openApproversPopover(state, nodeId, anchor);
+    return;
+  }
+  if (field === "process") {
+    openAssignToProcessPopover(state, [nodeId], anchor);
     return;
   }
   if (field === "delete") {
@@ -1838,12 +2480,14 @@ function parseDurationParts(raw) {
   if (!text) {
     return { amount: "", unit: "hours" };
   }
-  const match = text.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/);
+  const match = text.match(
+    /^(?:(\d+)\s*-\s*(\d+)|(\d+))\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/,
+  );
   if (!match) {
     return { amount: "", unit: "hours" };
   }
-  const amount = match[1];
-  const token = match[2];
+  const amount = match[1] && match[2] ? `${match[1]}-${match[2]}` : match[3];
+  const token = match[4];
   let unit = "hours";
   if (token === "m" || token.startsWith("min")) {
     unit = "minutes";
@@ -1854,24 +2498,42 @@ function parseDurationParts(raw) {
 }
 
 function formatDurationValue(amountRaw, unitId) {
-  const amount = Number.parseInt(String(amountRaw || "").trim(), 10);
+  const text = String(amountRaw || "").trim();
+  if (!text) {
+    return "";
+  }
+  const rangeMatch = text.match(/^(\d+)\s*-\s*(\d+)$/);
+  const option = DURATION_UNIT_OPTIONS.find((item) => item.id === unitId)
+    || DURATION_UNIT_OPTIONS[1];
+  if (rangeMatch) {
+    const lo = Number.parseInt(rangeMatch[1], 10);
+    const hi = Number.parseInt(rangeMatch[2], 10);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo <= 0 || hi <= 0 || lo > hi) {
+      return "";
+    }
+    if (lo === hi) {
+      const unit = lo === 1 ? option.singular : option.plural;
+      return `${lo} ${unit}`;
+    }
+    return `${lo}-${hi} ${option.plural}`;
+  }
+  const amount = Number.parseInt(text, 10);
   if (!Number.isFinite(amount) || amount < 0) {
     return "";
   }
   if (amount === 0) {
     return "";
   }
-  const option = DURATION_UNIT_OPTIONS.find((item) => item.id === unitId)
-    || DURATION_UNIT_OPTIONS[1];
   const unit = amount === 1 ? option.singular : option.plural;
   return `${amount} ${unit}`;
 }
 
-function openDurationPopover(state, nodeId, anchor) {
+function openDurationPopover(state, nodeId, anchor, nodeIds = null) {
   const node = state.nodePayloadsById.get(nodeId);
   if (!node?.editable) {
     return;
   }
+  const targets = Array.isArray(nodeIds) && nodeIds.length ? nodeIds : [nodeId];
   closeActiveEditPopover(state);
   const parsed = parseDurationParts(node.duration);
   const pop = createElement("div", "flow-edit-field-popover flow-edit-duration", state.root);
@@ -1880,11 +2542,9 @@ function openDurationPopover(state, nodeId, anchor) {
   label.textContent = "Длительность";
   const row = createElement("div", "flow-edit-duration__row", pop);
   const input = createElement("input", "flow-edit-field-popover__input flow-edit-duration__amount", row);
-  input.type = "number";
-  input.min = "0";
-  input.step = "1";
+  input.type = "text";
   input.inputMode = "numeric";
-  input.placeholder = "0";
+  input.placeholder = "1 или 1-2";
   input.value = parsed.amount;
   const unitSelect = createElement("select", "flow-edit-duration__unit", row);
   for (const option of DURATION_UNIT_OPTIONS) {
@@ -1893,20 +2553,41 @@ function openDurationPopover(state, nodeId, anchor) {
     opt.textContent = option.label;
   }
   unitSelect.value = parsed.unit;
+  const contextLabel = createElement("div", "flow-edit-field-popover__label", pop);
+  contextLabel.textContent = "Уточнение";
+  const contextInput = createElement("input", "flow-edit-field-popover__input", pop);
+  contextInput.type = "text";
+  contextInput.placeholder = "после запроса, до глубины…";
+  contextInput.value = node.duration_context || "";
   const apply = createElement("button", "flow-edit-menu__item is-apply", pop);
   apply.type = "button";
   apply.textContent = "Применить";
   const commit = () => {
     closeActiveEditPopover(state);
-    commitNodeEdit(state, nodeId, {
+    const patch = {
       duration: formatDurationValue(input.value, unitSelect.value),
-    });
+      duration_context: String(contextInput.value || "").trim(),
+    };
+    if (targets.length === 1) {
+      commitNodeEdit(state, targets[0], patch);
+    } else {
+      commitNodeEdits(state, targets, patch);
+    }
   };
   apply.addEventListener("click", (event) => {
     event.stopPropagation();
     commit();
   });
   input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveEditPopover(state);
+    }
+  });
+  contextInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       commit();
@@ -2009,8 +2690,6 @@ function openRolesPopover(state, nodeId, anchor) {
     responsible = responsibleSelect.value || null;
     participants = participantsBox.getSelected().filter((id) => id !== responsible);
     closeActiveEditPopover(state);
-    // Approvers stay editable only in the admin form — canvas roles UI is
-    // responsible + participants so the checklist has room to breathe.
     commitNodeEdit(state, nodeId, {
       responsible,
       participants,
@@ -2018,6 +2697,194 @@ function openRolesPopover(state, nodeId, anchor) {
   });
 
   positionEditPopover(state, menu, anchor);
+}
+
+function openApproversPopover(state, nodeId, anchor) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node?.editable || !Array.isArray(node.responsible_options)) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-node-roles-menu", state.root);
+  state.activeEditPopover = menu;
+  const responsible = node.responsible_id ?? null;
+  const participants = new Set(node.participants || []);
+  const approversBox = createRoleChecklist(
+    menu,
+    "Согласующие",
+    node.responsible_options,
+    [...(node.approvers || [])],
+  );
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const approvers = approversBox.getSelected().filter(
+      (id) => id !== responsible && !participants.has(id),
+    );
+    closeActiveEditPopover(state);
+    commitNodeEdit(state, nodeId, { approvers });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openAssignToProcessPopover(state, nodeIds, anchor) {
+  if (!nodeIds?.length || state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const membership = processMembershipByNodeId(state);
+  const current = membership.get(nodeIds[0]);
+  const sameCurrent = nodeIds.every((id) => membership.get(id)?.id === current?.id);
+
+  if (sameCurrent && current) {
+    const removeItem = createElement("button", "flow-edit-menu__item", menu);
+    removeItem.type = "button";
+    removeItem.textContent = `Убрать из «${current.title || "Процесс"}»`;
+    removeItem.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      const nextMembers = (current.member_ids || []).filter(
+        (id) => !nodeIds.includes(id),
+      );
+      commitProcessEdit(state, current.id, { member_ids: nextMembers });
+    });
+  }
+
+  for (const process of state.payload.processes || []) {
+    if (sameCurrent && current && process.id === current.id) {
+      continue;
+    }
+    const item = createElement("button", "flow-edit-menu__item", menu);
+    item.type = "button";
+    item.textContent = process.title || "Процесс";
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveEditPopover(state);
+      const merged = [
+        ...new Set([...(process.member_ids || []), ...nodeIds]),
+      ];
+      commitProcessEdit(state, process.id, { member_ids: merged });
+    });
+  }
+
+  const createItem = createElement("button", "flow-edit-menu__item", menu);
+  createItem.type = "button";
+  createItem.textContent = "Новый процесс…";
+  createItem.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openCreateProcessTitlePopover(state, nodeIds, anchor);
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openCreateProcessTitlePopover(state, nodeIds, anchor) {
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-edit-process-title", state.root);
+  state.activeEditPopover = menu;
+  const input = createElement("input", "", menu);
+  input.type = "text";
+  input.placeholder = "Название процесса";
+  input.value = "Процесс";
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Создать";
+  const submit = () => {
+    const title = String(input.value || "").trim();
+    if (!title) {
+      return;
+    }
+    closeActiveEditPopover(state);
+    commitProcessCreate(state, title, nodeIds);
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    submit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  positionEditPopover(state, menu, anchor);
+  input.focus();
+  input.select();
+}
+
+function openProcessEditActionMenu(state, processId, anchor) {
+  const process = (state.payload.processes || []).find((item) => item.id === processId);
+  if (!process) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu", state.root);
+  state.activeEditPopover = menu;
+  const rename = createElement("button", "flow-edit-menu__item", menu);
+  rename.type = "button";
+  rename.textContent = "Название";
+  rename.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openRenameProcessPopover(state, processId, anchor);
+  });
+  const remove = createElement("button", "flow-edit-menu__item is-danger", menu);
+  remove.type = "button";
+  remove.textContent = "Удалить процесс";
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeActiveEditPopover(state);
+    openDeleteConfirmPopover(state, {
+      message: "Удалить рамку процесса? Карточки останутся.",
+      anchor,
+      onConfirm: () => commitProcessDelete(state, processId),
+    });
+  });
+  positionEditPopover(state, menu, anchor);
+}
+
+function openRenameProcessPopover(state, processId, anchor) {
+  const process = (state.payload.processes || []).find((item) => item.id === processId);
+  if (!process) {
+    return;
+  }
+  closeActiveEditPopover(state);
+  const menu = createElement("div", "flow-edit-menu flow-edit-process-title", state.root);
+  state.activeEditPopover = menu;
+  const input = createElement("input", "", menu);
+  input.type = "text";
+  input.value = process.title || "";
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  const apply = createElement("button", "flow-edit-menu__item is-apply", menu);
+  apply.type = "button";
+  apply.textContent = "Применить";
+  const submit = () => {
+    const title = String(input.value || "").trim();
+    if (!title || title === process.title) {
+      closeActiveEditPopover(state);
+      return;
+    }
+    closeActiveEditPopover(state);
+    commitProcessEdit(state, processId, { title });
+  };
+  apply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    submit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  positionEditPopover(state, menu, anchor);
+  input.focus();
+  input.select();
 }
 
 function createRoleChecklist(parent, label, options, selectedIds) {
@@ -2110,6 +2977,7 @@ function updateNodePositions(state) {
     }
     syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
   }
+  syncProcessFrames(state);
 }
 
 function updateEdgeGeometry(state) {
@@ -2246,9 +3114,21 @@ function updateSelectionState(
   nextSelectedId,
   previousSelectedNodeIds = null,
   nextSelectedNodeIds = null,
+  previousSelectedEdgeIds = null,
+  nextSelectedEdgeIds = null,
 ) {
-  syncEdgeSelectionById(state, previousSelectedId);
-  syncEdgeSelectionById(state, nextSelectedId);
+  const previousEdges = previousSelectedEdgeIds || selectedEdgeIdsForPrimary(state, previousSelectedId);
+  const nextEdges = nextSelectedEdgeIds || state.selectedEdgeIds;
+  const touchedEdgeIds = new Set([...previousEdges, ...nextEdges]);
+  if (previousSelectedId) {
+    touchedEdgeIds.add(previousSelectedId);
+  }
+  if (nextSelectedId) {
+    touchedEdgeIds.add(nextSelectedId);
+  }
+  for (const edgeId of touchedEdgeIds) {
+    syncEdgeSelectionById(state, edgeId);
+  }
   const previousNodes = previousSelectedNodeIds || selectedNodeIdsForPrimary(state, previousSelectedId);
   const nextNodes = nextSelectedNodeIds || state.selectedNodeIds;
   const touchedNodeIds = new Set([...previousNodes, ...nextNodes]);
@@ -2277,7 +3157,7 @@ function syncEdgeSelectionById(state, selectedId) {
   if (!edge || !elements) {
     return;
   }
-  setEdgeSelectedState(elements, edge, state.selectedId === selectedId);
+  setEdgeSelectedState(elements, edge, isEdgeSelected(state, selectedId));
 }
 
 function syncNodeSelectionById(state, selectedId) {
@@ -2384,6 +3264,348 @@ function syncNodeShellPosition(shell, position) {
   shell.style.top = `${position.y}px`;
 }
 
+const NOTE_GAP_PX = 10;
+const NOTE_MAX_WIDTH_PX = 200;
+
+function nodeNoteText(node) {
+  const raw = node?.note;
+  if (typeof raw !== "string") {
+    return "";
+  }
+  return raw.trim();
+}
+
+function syncNodeNoteElement(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  const elements = state.nodeElements.get(nodeId);
+  if (!node || !elements?.shell) {
+    return;
+  }
+  const text = nodeNoteText(node);
+  if (!text) {
+    if (elements.noteEl) {
+      elements.noteEl.remove();
+      elements.noteEl = null;
+    }
+    return;
+  }
+  let noteEl = elements.noteEl;
+  if (!noteEl) {
+    noteEl = createElement("div", "flow-node-note", elements.shell);
+    noteEl.setAttribute("aria-hidden", "true");
+    elements.noteEl = noteEl;
+  }
+  if (noteEl.textContent !== text) {
+    noteEl.textContent = text;
+    noteEl.title = text;
+  }
+  noteEl.hidden = false;
+}
+
+function estimateNoteSize(text) {
+  const maxInner = NOTE_MAX_WIDTH_PX - 18;
+  const charWidth = 6.6;
+  const lineHeight = 16;
+  const charsPerLine = Math.max(8, Math.floor(maxInner / charWidth));
+  const lines = Math.max(1, Math.ceil(String(text).length / charsPerLine));
+  const width = Math.min(
+    NOTE_MAX_WIDTH_PX,
+    Math.max(72, Math.ceil(Math.min(String(text).length, charsPerLine) * charWidth + 18)),
+  );
+  const height = 12 + lines * lineHeight;
+  return { width, height };
+}
+
+function nodeWorldRect(state, nodeId) {
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!node) {
+    return null;
+  }
+  const position = state.positions[nodeId] || node.position || { x: 0, y: 0 };
+  const size = node.size || { w: 280, h: 72 };
+  const wellRows = Array.isArray(node.well_tokens) && node.well_tokens.length
+    ? Math.ceil(Math.min(node.well_tokens.length, 5) / 2)
+    : 0;
+  const wellsExtra = wellRows ? 12 + wellRows * 50 : 0;
+  const hasTopBadges = Boolean(node.time_badge)
+    || (Array.isArray(node.responsible_badges) && node.responsible_badges.length > 0);
+  return {
+    left: position.x,
+    top: position.y - (hasTopBadges ? 30 : 0),
+    right: position.x + (size.w || 0),
+    bottom: position.y + (size.h || 0) + wellsExtra,
+    cardTop: position.y,
+    cardBottom: position.y + (size.h || 0),
+  };
+}
+
+const PROCESS_FRAME_PAD = 24;
+const PROCESS_FRAME_TITLE_GAP = 22;
+
+function processFrameRect(state, memberIds) {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  let found = false;
+  for (const id of memberIds || []) {
+    const rect = nodeWorldRect(state, id);
+    if (!rect) {
+      continue;
+    }
+    found = true;
+    left = Math.min(left, rect.left);
+    top = Math.min(top, rect.top);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  if (!found) {
+    return null;
+  }
+  return {
+    x: left - PROCESS_FRAME_PAD,
+    y: top - PROCESS_FRAME_PAD - PROCESS_FRAME_TITLE_GAP,
+    w: (right - left) + PROCESS_FRAME_PAD * 2,
+    h: (bottom - top) + PROCESS_FRAME_PAD * 2 + PROCESS_FRAME_TITLE_GAP,
+  };
+}
+
+function processMembershipByNodeId(state) {
+  const map = new Map();
+  for (const process of state.payload.processes || []) {
+    for (const memberId of process.member_ids || []) {
+      map.set(memberId, process);
+    }
+  }
+  return map;
+}
+
+function syncProcessFrames(state) {
+  if (!state.dom?.processesLayer) {
+    return;
+  }
+  if (!state.processElements) {
+    state.processElements = new Map();
+  }
+  const processes = Array.isArray(state.payload.processes) ? state.payload.processes : [];
+  const keep = new Set();
+  for (const process of processes) {
+    if (!process?.id || !(process.member_ids || []).length) {
+      continue;
+    }
+    keep.add(process.id);
+    let frame = state.processElements.get(process.id);
+    if (!frame) {
+      frame = createElement("div", "flow-process-frame", state.dom.processesLayer);
+      frame.dataset.processId = process.id;
+      const title = createElement("div", "flow-process-frame__title", frame);
+      title.addEventListener("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        selectProcessFrame(state, process.id);
+      });
+      title.addEventListener("pointerdown", (event) => event.stopPropagation());
+      frame.titleEl = title;
+      state.processElements.set(process.id, frame);
+    }
+    frame.titleEl.textContent = process.title || "Процесс";
+    frame.titleEl.title = process.title || "Процесс";
+    frame.classList.toggle("is-selected", state.selectedProcessId === process.id);
+    const rect = processFrameRect(state, process.member_ids);
+    if (!rect) {
+      frame.hidden = true;
+      continue;
+    }
+    frame.hidden = false;
+    frame.style.left = `${rect.x}px`;
+    frame.style.top = `${rect.y}px`;
+    frame.style.width = `${rect.w}px`;
+    frame.style.height = `${rect.h}px`;
+  }
+  for (const [processId, frame] of [...state.processElements.entries()]) {
+    if (!keep.has(processId)) {
+      frame.remove();
+      state.processElements.delete(processId);
+    }
+  }
+}
+
+function selectProcessFrame(state, processId) {
+  state.selectedProcessId = processId;
+  state.selectedNodeIds = new Set();
+  state.selectedEdgeIds = new Set();
+  state.selectedId = null;
+  state.pendingSelectedId = null;
+  for (const [nodeId, elements] of state.nodeElements) {
+    const node = state.nodePayloadsById.get(nodeId);
+    if (node) {
+      setNodeSelectedState(elements, node, false);
+    }
+  }
+  syncProcessFrames(state);
+  syncSelectionEditHud(state);
+}
+
+function requestProcessEditId() {
+  return `pe-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function commitProcessCreate(state, title, memberIds) {
+  const cleaned = String(title || "").trim();
+  if (!cleaned || !memberIds?.length || state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  state.component.setStateValue("pending_process_create", {
+    request_id: requestProcessEditId(),
+    title: cleaned,
+    member_ids: [...memberIds],
+  });
+}
+
+function commitProcessEdit(state, processId, patch) {
+  if (!processId || state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  state.component.setStateValue("pending_process_edit", {
+    request_id: requestProcessEditId(),
+    process_id: processId,
+    ...patch,
+  });
+}
+
+function commitProcessDelete(state, processId) {
+  if (!processId || state.payload.node_edit_enabled !== true) {
+    return;
+  }
+  state.component.setStateValue("pending_process_delete", {
+    request_id: requestProcessEditId(),
+    process_id: processId,
+  });
+  if (state.selectedProcessId === processId) {
+    state.selectedProcessId = null;
+  }
+}
+
+function noteCandidateRects(nodeRect, noteSize) {
+  const midY = nodeRect.cardTop
+    + Math.max(0, (nodeRect.cardBottom - nodeRect.cardTop - noteSize.height) / 2);
+  return [
+    {
+      left: nodeRect.right + NOTE_GAP_PX,
+      top: midY,
+      right: nodeRect.right + NOTE_GAP_PX + noteSize.width,
+      bottom: midY + noteSize.height,
+      side: "right",
+    },
+    {
+      left: nodeRect.left - NOTE_GAP_PX - noteSize.width,
+      top: midY,
+      right: nodeRect.left - NOTE_GAP_PX,
+      bottom: midY + noteSize.height,
+      side: "left",
+    },
+    {
+      left: nodeRect.left,
+      top: nodeRect.bottom + NOTE_GAP_PX,
+      right: nodeRect.left + noteSize.width,
+      bottom: nodeRect.bottom + NOTE_GAP_PX + noteSize.height,
+      side: "bottom",
+    },
+    {
+      left: nodeRect.left,
+      top: nodeRect.top - NOTE_GAP_PX - noteSize.height,
+      right: nodeRect.left + noteSize.width,
+      bottom: nodeRect.top - NOTE_GAP_PX,
+      side: "top",
+    },
+  ];
+}
+
+function rectsOverlap(a, b, pad = 4) {
+  return !(
+    a.right + pad <= b.left
+    || a.left - pad >= b.right
+    || a.bottom + pad <= b.top
+    || a.top - pad >= b.bottom
+  );
+}
+
+function layoutAllNodeNotes(state) {
+  const obstacles = [];
+  for (const node of state.payload.nodes || []) {
+    const rect = nodeWorldRect(state, node.id);
+    if (rect) {
+      obstacles.push({ id: node.id, rect });
+    }
+  }
+  const placedNotes = [];
+  for (const node of state.payload.nodes || []) {
+    const elements = state.nodeElements.get(node.id);
+    const text = nodeNoteText(node);
+    if (!elements?.noteEl || !text) {
+      continue;
+    }
+    const hostRect = nodeWorldRect(state, node.id);
+    if (!hostRect) {
+      continue;
+    }
+    const noteSize = estimateNoteSize(text);
+    const candidates = noteCandidateRects(hostRect, noteSize);
+    let chosen = candidates[0];
+    let bestOverlap = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      let overlapArea = 0;
+      let hits = false;
+      for (const obstacle of obstacles) {
+        if (obstacle.id === node.id) {
+          continue;
+        }
+        if (rectsOverlap(candidate, obstacle.rect)) {
+          hits = true;
+          const w = Math.max(
+            0,
+            Math.min(candidate.right, obstacle.rect.right) - Math.max(candidate.left, obstacle.rect.left),
+          );
+          const h = Math.max(
+            0,
+            Math.min(candidate.bottom, obstacle.rect.bottom) - Math.max(candidate.top, obstacle.rect.top),
+          );
+          overlapArea += w * h;
+        }
+      }
+      for (const placed of placedNotes) {
+        if (rectsOverlap(candidate, placed)) {
+          hits = true;
+          const w = Math.max(
+            0,
+            Math.min(candidate.right, placed.right) - Math.max(candidate.left, placed.left),
+          );
+          const h = Math.max(
+            0,
+            Math.min(candidate.bottom, placed.bottom) - Math.max(candidate.top, placed.top),
+          );
+          overlapArea += w * h;
+        }
+      }
+      if (!hits) {
+        chosen = candidate;
+        bestOverlap = 0;
+        break;
+      }
+      if (overlapArea < bestOverlap) {
+        bestOverlap = overlapArea;
+        chosen = candidate;
+      }
+    }
+    const shellX = (state.positions[node.id] || node.position || { x: 0 }).x;
+    const shellY = (state.positions[node.id] || node.position || { y: 0 }).y;
+    elements.noteEl.style.left = `${Math.round(chosen.left - shellX)}px`;
+    elements.noteEl.style.top = `${Math.round(chosen.top - shellY)}px`;
+    elements.noteEl.style.width = `${noteSize.width}px`;
+    placedNotes.push(chosen);
+  }
+}
+
 function buildNodeSelectionOverlay(node) {
   const overlay = createElement("span", "flow-node-selection");
   overlay.setAttribute("aria-hidden", "true");
@@ -2461,96 +3683,343 @@ function attachViewportHandlers(viewport, state) {
   );
 
   viewport.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || isCanvasInteractiveTarget(event.target)) {
+    const wantPan = event.button === 1
+      || event.button === 2
+      || (event.button === 0 && state.spacePanHeld);
+    if (wantPan) {
+      event.preventDefault();
+      startViewportPan(event, state, viewport);
       return;
     }
-    event.preventDefault();
-    clearSelection(state.ownerDocument);
-    state.isPanning = true;
-    state.userMovedView = true;
-    let panDidMove = false;
-    let panFinished = false;
-    const ownerDocument = state.ownerDocument;
-    const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
-    if (ownerDocument.body) {
-      ownerDocument.body.style.userSelect = "none";
+    if (isCanvasInteractiveTarget(event.target)) {
+      return;
     }
-    if (typeof viewport.setPointerCapture === "function") {
-      try {
-        viewport.setPointerCapture(event.pointerId);
-      } catch (_error) {
-        // Ignore capture failures; document listeners remain as fallback.
-      }
+    if (event.button === 0) {
+      event.preventDefault();
+      startMarqueeSelect(event, state, viewport);
     }
-    const start = {
-      x: event.clientX,
-      y: event.clientY,
-      viewX: state.view.x,
-      viewY: state.view.y,
-    };
-    const move = (moveEvent) => {
-      if (panFinished) {
-        return;
-      }
-      moveEvent.preventDefault();
-      const dx = moveEvent.clientX - start.x;
-      const dy = moveEvent.clientY - start.y;
-      if (
-        !panDidMove
-        && (Math.abs(dx) >= PAN_CLICK_SUPPRESS_DISTANCE_PX
-          || Math.abs(dy) >= PAN_CLICK_SUPPRESS_DISTANCE_PX)
-      ) {
-        panDidMove = true;
-      }
-      state.view.x = start.viewX + dx;
-      state.view.y = start.viewY + dy;
-      queueRender(state);
-    };
-    const stop = (stopEvent) => {
-      if (panFinished) {
-        return;
-      }
-      panFinished = true;
-      state.isPanning = false;
-      // Deselect only on a true background tap. A pan must not clear selection.
-      if (!panDidMove) {
-        if (state.connectMode) {
-          cancelConnectMode(state);
-        } else if (state.selectedId !== null || state.selectedNodeIds.size > 0) {
-          selectId(state, null);
-        }
-      }
-      if (
-        stopEvent
-        && typeof viewport.releasePointerCapture === "function"
-        && typeof viewport.hasPointerCapture === "function"
-        && viewport.hasPointerCapture(stopEvent.pointerId)
-      ) {
-        try {
-          viewport.releasePointerCapture(stopEvent.pointerId);
-        } catch (_error) {
-          // no-op
-        }
-      }
-      if (ownerDocument.body) {
-        ownerDocument.body.style.userSelect = previousUserSelect;
-      }
-      viewport.removeEventListener("pointermove", move);
-      viewport.removeEventListener("pointerup", stop);
-      viewport.removeEventListener("pointercancel", stop);
-      ownerDocument.removeEventListener("pointermove", move);
-      ownerDocument.removeEventListener("pointerup", stop);
-      ownerDocument.removeEventListener("pointercancel", stop);
-      queueRender(state);
-    };
-    viewport.addEventListener("pointermove", move, { passive: false });
-    viewport.addEventListener("pointerup", stop);
-    viewport.addEventListener("pointercancel", stop);
-    ownerDocument.addEventListener("pointermove", move, { passive: false });
-    ownerDocument.addEventListener("pointerup", stop);
-    ownerDocument.addEventListener("pointercancel", stop);
-    queueRender(state);
   });
+
+  viewport.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+}
+
+function startViewportPan(event, state, viewport) {
+  clearSelection(state.ownerDocument);
+  state.isPanning = true;
+  state.userMovedView = true;
+  viewport.classList.add("is-panning");
+  let panDidMove = false;
+  let panFinished = false;
+  const ownerDocument = state.ownerDocument;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+    ownerDocument.body.style.cursor = "grabbing";
+  }
+  if (typeof viewport.setPointerCapture === "function") {
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch (_error) {
+      // Ignore capture failures; document listeners remain as fallback.
+    }
+  }
+  const start = {
+    x: event.clientX,
+    y: event.clientY,
+    viewX: state.view.x,
+    viewY: state.view.y,
+  };
+  const move = (moveEvent) => {
+    if (panFinished) {
+      return;
+    }
+    moveEvent.preventDefault();
+    const dx = moveEvent.clientX - start.x;
+    const dy = moveEvent.clientY - start.y;
+    if (
+      !panDidMove
+      && (Math.abs(dx) >= PAN_CLICK_SUPPRESS_DISTANCE_PX
+        || Math.abs(dy) >= PAN_CLICK_SUPPRESS_DISTANCE_PX)
+    ) {
+      panDidMove = true;
+    }
+    state.view.x = start.viewX + dx;
+    state.view.y = start.viewY + dy;
+    queueRender(state);
+  };
+  const stop = (stopEvent) => {
+    if (panFinished) {
+      return;
+    }
+    panFinished = true;
+    state.isPanning = false;
+    viewport.classList.remove("is-panning");
+    if (!panDidMove) {
+      if (state.connectMode) {
+        cancelConnectMode(state);
+      } else if (
+        state.selectedId !== null
+        || state.selectedNodeIds.size > 0
+        || state.selectedEdgeIds.size > 0
+      ) {
+        selectId(state, null);
+      }
+    }
+    if (
+      stopEvent
+      && typeof viewport.releasePointerCapture === "function"
+      && typeof viewport.hasPointerCapture === "function"
+      && viewport.hasPointerCapture(stopEvent.pointerId)
+    ) {
+      try {
+        viewport.releasePointerCapture(stopEvent.pointerId);
+      } catch (_error) {
+        // no-op
+      }
+    }
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+      ownerDocument.body.style.cursor = previousCursor;
+    }
+    viewport.removeEventListener("pointermove", move);
+    viewport.removeEventListener("pointerup", stop);
+    viewport.removeEventListener("pointercancel", stop);
+    ownerDocument.removeEventListener("pointermove", move);
+    ownerDocument.removeEventListener("pointerup", stop);
+    ownerDocument.removeEventListener("pointercancel", stop);
+    queueRender(state);
+  };
+  viewport.addEventListener("pointermove", move, { passive: false });
+  viewport.addEventListener("pointerup", stop);
+  viewport.addEventListener("pointercancel", stop);
+  ownerDocument.addEventListener("pointermove", move, { passive: false });
+  ownerDocument.addEventListener("pointerup", stop);
+  ownerDocument.addEventListener("pointercancel", stop);
+  queueRender(state);
+}
+
+function startMarqueeSelect(event, state, viewport) {
+  clearSelection(state.ownerDocument);
+  state.isMarqueeSelecting = true;
+  let finished = false;
+  let didDrag = false;
+  const ownerDocument = state.ownerDocument;
+  const rootRect = state.root.getBoundingClientRect();
+  const startClient = { x: event.clientX, y: event.clientY };
+  const startWorld = clientToWorld(state, event.clientX, event.clientY, viewport);
+  destroyMarquee(state);
+  const marquee = createElement("div", "flow-canvas-marquee", state.root);
+  state.marqueeEl = marquee;
+  const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
+  if (ownerDocument.body) {
+    ownerDocument.body.style.userSelect = "none";
+  }
+  if (typeof viewport.setPointerCapture === "function") {
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch (_error) {
+      // no-op
+    }
+  }
+  const updateBox = (clientX, clientY) => {
+    const left = Math.min(startClient.x, clientX) - rootRect.left;
+    const top = Math.min(startClient.y, clientY) - rootRect.top;
+    const width = Math.abs(clientX - startClient.x);
+    const height = Math.abs(clientY - startClient.y);
+    marquee.style.left = `${left}px`;
+    marquee.style.top = `${top}px`;
+    marquee.style.width = `${width}px`;
+    marquee.style.height = `${height}px`;
+  };
+  updateBox(event.clientX, event.clientY);
+  const move = (moveEvent) => {
+    if (finished) {
+      return;
+    }
+    moveEvent.preventDefault();
+    const dx = moveEvent.clientX - startClient.x;
+    const dy = moveEvent.clientY - startClient.y;
+    if (!didDrag && (Math.abs(dx) >= MARQUEE_MIN_SIZE_PX || Math.abs(dy) >= MARQUEE_MIN_SIZE_PX)) {
+      didDrag = true;
+    }
+    updateBox(moveEvent.clientX, moveEvent.clientY);
+  };
+  const stop = (stopEvent) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    state.isMarqueeSelecting = false;
+    const endX = stopEvent?.clientX ?? startClient.x;
+    const endY = stopEvent?.clientY ?? startClient.y;
+    destroyMarquee(state);
+    if (
+      stopEvent
+      && typeof viewport.releasePointerCapture === "function"
+      && typeof viewport.hasPointerCapture === "function"
+      && viewport.hasPointerCapture(stopEvent.pointerId)
+    ) {
+      try {
+        viewport.releasePointerCapture(stopEvent.pointerId);
+      } catch (_error) {
+        // no-op
+      }
+    }
+    if (ownerDocument.body) {
+      ownerDocument.body.style.userSelect = previousUserSelect;
+    }
+    viewport.removeEventListener("pointermove", move);
+    viewport.removeEventListener("pointerup", stop);
+    viewport.removeEventListener("pointercancel", stop);
+    ownerDocument.removeEventListener("pointermove", move);
+    ownerDocument.removeEventListener("pointerup", stop);
+    ownerDocument.removeEventListener("pointercancel", stop);
+    if (!didDrag) {
+      if (state.connectMode) {
+        cancelConnectMode(state);
+      } else {
+        selectId(state, null);
+      }
+      queueRender(state);
+      return;
+    }
+    const endWorld = clientToWorld(state, endX, endY, viewport);
+    const rect = normalizeWorldRect(startWorld, endWorld);
+    applyMarqueeSelection(state, rect, isMultiSelectModifier(event));
+    queueRender(state);
+  };
+  viewport.addEventListener("pointermove", move, { passive: false });
+  viewport.addEventListener("pointerup", stop);
+  viewport.addEventListener("pointercancel", stop);
+  ownerDocument.addEventListener("pointermove", move, { passive: false });
+  ownerDocument.addEventListener("pointerup", stop);
+  ownerDocument.addEventListener("pointercancel", stop);
+}
+
+function destroyMarquee(state) {
+  if (state.marqueeEl) {
+    state.marqueeEl.remove();
+    state.marqueeEl = null;
+  }
+}
+
+function clientToWorld(state, clientX, clientY, viewport) {
+  const rect = viewport.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left - state.view.x) / state.view.scale,
+    y: (clientY - rect.top - state.view.y) / state.view.scale,
+  };
+}
+
+function normalizeWorldRect(a, b) {
+  return {
+    left: Math.min(a.x, b.x),
+    top: Math.min(a.y, b.y),
+    right: Math.max(a.x, b.x),
+    bottom: Math.max(a.y, b.y),
+  };
+}
+
+function applyMarqueeSelection(state, rect, additive) {
+  const nextNodes = additive ? new Set(state.selectedNodeIds) : new Set();
+  const nextEdges = additive ? new Set(state.selectedEdgeIds) : new Set();
+  for (const node of state.payload.nodes || []) {
+    const position = state.positions[node.id] || node.position;
+    const size = node.size || { w: 280, h: 72 };
+    const nodeRect = {
+      left: position.x,
+      top: position.y,
+      right: position.x + (size.w || 0),
+      bottom: position.y + (size.h || 0),
+    };
+    if (rectsIntersect(rect, nodeRect)) {
+      nextNodes.add(node.id);
+    }
+  }
+  for (const edge of state.payload.edges || []) {
+    if (edgeIntersectsRect(edge, rect)) {
+      nextEdges.add(edge.id);
+    }
+  }
+  // Prefer nodes over edges when both are hit; keep edges only if no nodes.
+  if (nextNodes.size > 0) {
+    nextEdges.clear();
+  } else if (nextEdges.size > 0) {
+    nextNodes.clear();
+  }
+  const primary = nextNodes.size
+    ? [...nextNodes][nextNodes.size - 1]
+    : nextEdges.size
+      ? [...nextEdges][nextEdges.size - 1]
+      : null;
+  setSelectionSets(state, primary, nextNodes, nextEdges);
+}
+
+function rectsIntersect(a, b) {
+  return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
+}
+
+function edgeIntersectsRect(edge, rect) {
+  const points = Array.isArray(edge.points) ? edge.points : [];
+  if (!points.length) {
+    return false;
+  }
+  for (const point of points) {
+    if (
+      point.x >= rect.left
+      && point.x <= rect.right
+      && point.y >= rect.top
+      && point.y <= rect.bottom
+    ) {
+      return true;
+    }
+  }
+  for (let index = 0; index < points.length - 1; index += 1) {
+    if (segmentIntersectsRect(points[index], points[index + 1], rect)) {
+      return true;
+    }
+  }
+  if (edge.label?.position) {
+    const lx = edge.label.position.x;
+    const ly = edge.label.position.y;
+    const lw = edge.label.width || 40;
+    const lh = edge.label.height || 20;
+    return rectsIntersect(rect, {
+      left: lx,
+      top: ly,
+      right: lx + lw,
+      bottom: ly + lh,
+    });
+  }
+  return false;
+}
+
+function segmentIntersectsRect(a, b, rect) {
+  if (
+    (a.x >= rect.left && a.x <= rect.right && a.y >= rect.top && a.y <= rect.bottom)
+    || (b.x >= rect.left && b.x <= rect.right && b.y >= rect.top && b.y <= rect.bottom)
+  ) {
+    return true;
+  }
+  const edges = [
+    [{ x: rect.left, y: rect.top }, { x: rect.right, y: rect.top }],
+    [{ x: rect.right, y: rect.top }, { x: rect.right, y: rect.bottom }],
+    [{ x: rect.right, y: rect.bottom }, { x: rect.left, y: rect.bottom }],
+    [{ x: rect.left, y: rect.bottom }, { x: rect.left, y: rect.top }],
+  ];
+  return edges.some(([p, q]) => segmentsIntersect(a, b, p, q));
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const orient = (p, q, r) => Math.sign((q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y));
+  const o1 = orient(a, b, c);
+  const o2 = orient(a, b, d);
+  const o3 = orient(c, d, a);
+  const o4 = orient(c, d, b);
+  return o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0 && o1 !== o2 && o3 !== o4;
 }
 
 function isCanvasInteractiveTarget(target) {
@@ -2572,7 +4041,7 @@ function clearSelection(ownerDocument) {
 }
 
 function startNodeDrag(event, state, nodeId) {
-  if (event.button !== 0) {
+  if (event.button !== 0 || state.spacePanHeld) {
     return;
   }
   event.preventDefault();
@@ -2676,8 +4145,19 @@ function isNodeSelected(state, nodeId) {
   return state.selectedNodeIds.has(nodeId);
 }
 
+function isEdgeSelected(state, edgeId) {
+  return state.selectedEdgeIds.has(edgeId) || state.selectedId === edgeId;
+}
+
 function selectedNodeIdsForPrimary(state, selectedId) {
   if (selectedId && state.nodePayloadsById.has(selectedId)) {
+    return new Set([selectedId]);
+  }
+  return new Set();
+}
+
+function selectedEdgeIdsForPrimary(state, selectedId) {
+  if (selectedId && state.edgePayloadsById.has(selectedId)) {
     return new Set([selectedId]);
   }
   return new Set();
@@ -3212,14 +4692,22 @@ function flashConnectHint(state, message) {
 
 function selectId(state, value, options = {}) {
   const additive = options.additive === true;
+  if (state.selectedProcessId) {
+    state.selectedProcessId = null;
+    syncProcessFrames(state);
+  }
   const previousSelectedId = state.selectedId;
   const previousSelectedNodeIds = new Set(state.selectedNodeIds);
+  const previousSelectedEdgeIds = new Set(state.selectedEdgeIds);
   let nextSelectedId = value;
   let nextSelectedNodeIds = new Set(state.selectedNodeIds);
+  let nextSelectedEdgeIds = new Set(state.selectedEdgeIds);
 
   if (value === null) {
     nextSelectedNodeIds = new Set();
+    nextSelectedEdgeIds = new Set();
   } else if (state.nodePayloadsById.has(value)) {
+    nextSelectedEdgeIds = new Set();
     if (additive) {
       if (nextSelectedNodeIds.has(value)) {
         nextSelectedNodeIds.delete(value);
@@ -3234,14 +4722,32 @@ function selectId(state, value, options = {}) {
       nextSelectedNodeIds = new Set([value]);
       nextSelectedId = value;
     }
-  } else {
-    // Edges / well tokens stay single-select and clear node multi-select.
+  } else if (state.edgePayloadsById.has(value)) {
     nextSelectedNodeIds = new Set();
+    if (additive) {
+      if (nextSelectedEdgeIds.has(value)) {
+        nextSelectedEdgeIds.delete(value);
+        nextSelectedId = nextSelectedEdgeIds.size
+          ? [...nextSelectedEdgeIds][nextSelectedEdgeIds.size - 1]
+          : null;
+      } else {
+        nextSelectedEdgeIds.add(value);
+        nextSelectedId = value;
+      }
+    } else {
+      nextSelectedEdgeIds = new Set([value]);
+      nextSelectedId = value;
+    }
+  } else {
+    // Well tokens stay single-select and clear multi-select sets.
+    nextSelectedNodeIds = new Set();
+    nextSelectedEdgeIds = new Set();
   }
 
   if (
     state.selectedId === nextSelectedId
     && sameIdSets(state.selectedNodeIds, nextSelectedNodeIds)
+    && sameIdSets(state.selectedEdgeIds, nextSelectedEdgeIds)
     && state.pendingSelectedId === undefined
   ) {
     return;
@@ -3249,6 +4755,7 @@ function selectId(state, value, options = {}) {
 
   state.selectedId = nextSelectedId;
   state.selectedNodeIds = nextSelectedNodeIds;
+  state.selectedEdgeIds = nextSelectedEdgeIds;
   state.pendingSelectedId = nextSelectedId;
   state.component.setStateValue("selected_id", nextSelectedId);
   if (
@@ -3256,6 +4763,7 @@ function selectId(state, value, options = {}) {
     && (
       state.renderedSelectedId !== nextSelectedId
       || !sameIdSets(state.renderedSelectedNodeIds, nextSelectedNodeIds)
+      || !sameIdSets(state.renderedSelectedEdgeIds, nextSelectedEdgeIds)
     )
   ) {
     updateSelectionState(
@@ -3264,11 +4772,40 @@ function selectId(state, value, options = {}) {
       nextSelectedId,
       previousSelectedNodeIds,
       nextSelectedNodeIds,
+      previousSelectedEdgeIds,
+      nextSelectedEdgeIds,
     );
     state.renderedSelectedId = nextSelectedId;
     state.renderedSelectedNodeIds = new Set(nextSelectedNodeIds);
+    state.renderedSelectedEdgeIds = new Set(nextSelectedEdgeIds);
   }
   queueRender(state);
+}
+
+function setSelectionSets(state, primaryId, nextNodeIds, nextEdgeIds) {
+  const previousSelectedId = state.selectedId;
+  const previousSelectedNodeIds = new Set(state.selectedNodeIds);
+  const previousSelectedEdgeIds = new Set(state.selectedEdgeIds);
+  state.selectedId = primaryId;
+  state.selectedNodeIds = nextNodeIds;
+  state.selectedEdgeIds = nextEdgeIds;
+  state.pendingSelectedId = primaryId;
+  state.component.setStateValue("selected_id", primaryId);
+  if (state.hasRenderedScene) {
+    updateSelectionState(
+      state,
+      previousSelectedId,
+      primaryId,
+      previousSelectedNodeIds,
+      nextNodeIds,
+      previousSelectedEdgeIds,
+      nextEdgeIds,
+    );
+    state.renderedSelectedId = primaryId;
+    state.renderedSelectedNodeIds = new Set(nextNodeIds);
+    state.renderedSelectedEdgeIds = new Set(nextEdgeIds);
+  }
+  syncSelectionEditHud(state);
 }
 
 function zoomAtCenter(state, scaleFactor) {

@@ -7,12 +7,15 @@ from typing import Any
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
     CreateGraphSourceNodeCommand,
+    CreateGraphSourceProcessCommand,
+    DeleteGraphSourceProcessCommand,
     DocumentsGateway,
     FLOW_SELECTION_RERUN_REQUEST_KEY,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
+    UpdateGraphSourceProcessCommand,
     ensure_position_edit_positions,
     pop_flash,
     persist_graph_document_update,
@@ -397,10 +400,10 @@ class StreamlitSessionCoordinator:
         record_history: bool = True,
         rerun: bool = True,
     ) -> bool:
-        from pydiag.presentation.admin import validate_graph_source_node_form
         from pydiag.presentation.admin_models import (
             graph_source_node_delete_block_reason,
             normalized_optional_text,
+            validate_graph_source_node_form,
         )
 
         node_id = patch.get("node_id")
@@ -433,6 +436,7 @@ class StreamlitSessionCoordinator:
                     approvers=draft.approvers,
                     duration=draft.duration,
                     note=draft.note,
+                    duration_context=draft.duration_context,
                     deleted=True,
                 ),
                 quiet=quiet,
@@ -456,6 +460,12 @@ class StreamlitSessionCoordinator:
             duration = normalized_optional_text(str(patch["duration"] or ""))
         else:
             duration = draft.duration
+        if "duration_context" in patch:
+            duration_context = normalized_optional_text(
+                str(patch["duration_context"] or "")
+            )
+        else:
+            duration_context = draft.duration_context
         if "note" in patch:
             note = normalized_optional_text(str(patch["note"] or ""))
         else:
@@ -517,6 +527,7 @@ class StreamlitSessionCoordinator:
                 approvers=tuple(approvers),
                 duration=duration,
                 note=note,
+                duration_context=duration_context,
                 deleted=None,
             ),
             quiet=quiet,
@@ -711,6 +722,114 @@ class StreamlitSessionCoordinator:
             rerun=rerun,
         )
         return created_node_id if result.saved else None
+
+    def create_graph_source_process(
+        self,
+        graph: FlowGraphDocument,
+        command: CreateGraphSourceProcessCommand,
+        *,
+        quiet: bool = False,
+        rerun: bool = True,
+    ) -> bool:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return False
+
+        def save() -> FlowGraphDocument:
+            return self.documents_gateway.create_graph_source_process(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            )
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
+            reload_data=self.load_app_data,
+            success_message=None if quiet else "Процесс создан",
+        )
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+            rerun=rerun,
+        )
+        return result.saved
+
+    def update_graph_source_process(
+        self,
+        graph: FlowGraphDocument,
+        command: UpdateGraphSourceProcessCommand,
+        *,
+        quiet: bool = False,
+        rerun: bool = True,
+    ) -> bool:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return False
+
+        def save() -> FlowGraphDocument:
+            return self.documents_gateway.update_graph_source_process(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            )
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
+            reload_data=self.load_app_data,
+            success_message=None if quiet else "Процесс обновлён",
+        )
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+            rerun=rerun,
+        )
+        return result.saved
+
+    def delete_graph_source_process(
+        self,
+        graph: FlowGraphDocument,
+        command: DeleteGraphSourceProcessCommand,
+        *,
+        quiet: bool = False,
+        rerun: bool = True,
+    ) -> bool:
+        if not self.graph_source_edit_available():
+            self.st_module.error(
+                self.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return False
+
+        def save() -> FlowGraphDocument:
+            return self.documents_gateway.delete_graph_source_process(
+                command,
+                expected_version=graph.version,
+                graph_version_id=self.editable_graph_version_id(),
+            )
+
+        result = persist_graph_document_update(
+            self.session_state,
+            save=save,
+            reload_data=self.load_app_data,
+            success_message=None if quiet else "Процесс удалён",
+        )
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+            rerun=rerun,
+        )
+        return result.saved
 
     def can_undo_edit(self) -> bool:
         return can_undo(self.session_state)
@@ -1010,6 +1129,7 @@ def node_snapshot_from_draft(draft: GraphSourceNodeDraft) -> dict[str, Any]:
         "approvers": list(draft.approvers),
         "duration": draft.duration,
         "note": draft.note,
+        "duration_context": draft.duration_context,
     }
 
 
@@ -1026,6 +1146,7 @@ def node_snapshot_from_command(command: UpdateGraphSourceNodeCommand) -> dict[st
         "approvers": list(command.approvers),
         "duration": command.duration,
         "note": command.note,
+        "duration_context": command.duration_context,
     }
 
 
@@ -1042,6 +1163,7 @@ def node_snapshot_from_create_command(command: CreateGraphSourceNodeCommand) -> 
         "approvers": list(command.approvers),
         "duration": command.duration,
         "note": command.note,
+        "duration_context": command.duration_context,
     }
 
 
@@ -1088,6 +1210,7 @@ def update_command_from_node_snapshot(
         approvers=tuple(approvers) if isinstance(approvers, list) else (),
         duration=snapshot.get("duration"),
         note=snapshot.get("note"),
+        duration_context=snapshot.get("duration_context"),
         deleted=deleted,
     )
 
@@ -1120,6 +1243,7 @@ def create_command_from_node_snapshot(
         approvers=tuple(approvers) if isinstance(approvers, list) else (),
         duration=snapshot.get("duration"),
         note=snapshot.get("note"),
+        duration_context=snapshot.get("duration_context"),
     )
 
 

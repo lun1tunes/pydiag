@@ -78,6 +78,30 @@ class DocumentsGateway(Protocol):
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument: ...
 
+    def create_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
+    def update_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
+    def delete_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument: ...
+
     def list_graph_versions(self) -> list[GraphVersionInfo]: ...
 
     def live_graph_source_exists(self) -> bool: ...

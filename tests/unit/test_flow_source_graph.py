@@ -121,11 +121,20 @@ def test_flow_source_payload_materializes_rich_editable_graph() -> None:
     assert review_node["metadata"]["source_section"] == "intake"
     assert review_node["metadata"]["source_tags"] == "critical, intake"
     assert review_node["metadata"]["source_ref:figma_text_id"] == "text_review"
-    assert decision_node["size"] == {"w": 360, "h": 220}
+    assert decision_node["size"] == {"w": 280, "h": 96}
     assert yes_edge["label"] == "Да"
     assert yes_edge["metadata"]["condition"] == "dataset complete"
     assert no_edge["label"] == "Нет"
     assert no_edge["metadata"]["note"] == "вернуть на доработку"
+
+
+def test_flow_source_duration_range_shorthand() -> None:
+    payload = valid_flow_source_payload()
+    payload["nodes"]["review_data"]["duration"] = "1-2h"
+    payload["nodes"]["review_data"]["duration_context"] = "после запроса"
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    assert document.nodes["review_data"].duration == "1-2 hours"
+    assert document.nodes["review_data"].duration_context == "после запроса"
 
 
 def test_flow_source_payload_omits_deleted_nodes_and_their_edges() -> None:
@@ -285,3 +294,101 @@ def test_flow_source_document_rejects_duplicate_responsibles_within_node() -> No
 
     with pytest.raises(ValidationError, match="duplicate responsibles are not allowed"):
         FlowSourceDocument.model_validate(payload, strict=True)
+
+
+def test_flow_source_document_accepts_missing_processes() -> None:
+    payload = valid_flow_source_payload()
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    assert document.processes == {}
+
+
+def test_flow_source_document_accepts_processes_and_rejects_overlap() -> None:
+    payload = valid_flow_source_payload()
+    payload["processes"] = {
+        "intake_block": {
+            "title": "Подготовка",
+            "node_ids": ["review_data", "data_complete"],
+        }
+    }
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    assert document.processes["intake_block"].title == "Подготовка"
+    assert document.processes["intake_block"].node_ids == ["review_data", "data_complete"]
+
+    payload["processes"]["other"] = {
+        "title": "Другой",
+        "node_ids": ["review_data"],
+    }
+    with pytest.raises(ValidationError, match="belongs to multiple processes"):
+        FlowSourceDocument.model_validate(payload, strict=True)
+
+
+def test_flow_source_document_rejects_unknown_process_member() -> None:
+    payload = valid_flow_source_payload()
+    payload["processes"] = {
+        "intake_block": {
+            "title": "Подготовка",
+            "node_ids": ["missing_node"],
+        }
+    }
+    with pytest.raises(ValidationError, match="unknown node id missing_node"):
+        FlowSourceDocument.model_validate(payload, strict=True)
+
+
+def test_flow_source_processes_roundtrip_through_editable() -> None:
+    payload = valid_flow_source_payload()
+    payload["processes"] = {
+        "intake_block": {
+            "title": "Подготовка",
+            "node_ids": ["review_data", "data_complete"],
+        }
+    }
+    editable = editable_flow_graph_payload_from_source_payload(payload)
+    assert editable["processes"]["intake_block"]["node_ids"] == [
+        "review_data",
+        "data_complete",
+    ]
+    restored = flow_source_payload_from_editable_payload(
+        editable,
+        graph_id="pilot-drilling",
+        title="Pilot drilling flow",
+    )
+    assert restored["processes"]["intake_block"]["title"] == "Подготовка"
+    assert restored["processes"]["intake_block"]["node_ids"] == [
+        "review_data",
+        "data_complete",
+    ]
+
+
+def test_create_and_delete_flow_source_process() -> None:
+    from pydiag.common.graph_source_admin import (
+        CreateGraphSourceProcessCommand,
+        DeleteGraphSourceProcessCommand,
+    )
+    from pydiag.infrastructure.flow_source_graph import (
+        create_flow_source_payload_process,
+        delete_flow_source_payload_process,
+    )
+
+    payload = valid_flow_source_payload()
+    created = create_flow_source_payload_process(
+        payload,
+        command=CreateGraphSourceProcessCommand(
+            title="Подготовка",
+            node_ids=("review_data", "data_complete"),
+        ),
+        expected_version=7,
+    )
+    assert created["version"] == 8
+    assert "block_podgotovka" in created["processes"]
+    assert created["processes"]["block_podgotovka"]["node_ids"] == [
+        "review_data",
+        "data_complete",
+    ]
+
+    deleted = delete_flow_source_payload_process(
+        created,
+        command=DeleteGraphSourceProcessCommand(process_id="block_podgotovka"),
+        expected_version=8,
+    )
+    assert deleted["version"] == 9
+    assert "block_podgotovka" not in deleted.get("processes", {})

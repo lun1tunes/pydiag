@@ -15,12 +15,15 @@ GraphSourceEdgeKind = Literal["default", "yes", "no", "dashed"]
 __all__ = [
     "CreateGraphSourceEdgeCommand",
     "CreateGraphSourceNodeCommand",
+    "CreateGraphSourceProcessCommand",
+    "DeleteGraphSourceProcessCommand",
     "GraphSourceEdgeDraft",
     "GraphSourceEdgeKind",
     "GraphSourceNodeDraft",
     "GraphSourceNodeKind",
     "UpdateGraphSourceEdgeCommand",
     "UpdateGraphSourceNodeCommand",
+    "UpdateGraphSourceProcessCommand",
 ]
 
 
@@ -38,6 +41,7 @@ class GraphSourceNodeDraft:
     approvers: tuple[str, ...]
     duration: str | None
     note: str | None
+    duration_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,7 @@ class UpdateGraphSourceNodeCommand:
     approvers: tuple[str, ...]
     duration: str | None
     note: str | None
+    duration_context: str | None = None
     deleted: bool | None = None
 
 
@@ -104,4 +109,24 @@ class CreateGraphSourceNodeCommand:
     approvers: tuple[str, ...] = ()
     duration: str | None = None
     note: str | None = None
+    duration_context: str | None = None
     node_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CreateGraphSourceProcessCommand:
+    title: str
+    node_ids: tuple[str, ...]
+    process_id: str | None = None
+
+
+@dataclass(frozen=True)
+class UpdateGraphSourceProcessCommand:
+    process_id: str
+    title: str | None = None
+    node_ids: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class DeleteGraphSourceProcessCommand:
+    process_id: str

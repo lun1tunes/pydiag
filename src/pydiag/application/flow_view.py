@@ -6,15 +6,19 @@ from typing import Any
 from pydiag.domain.models import FlowGraphDocument, WellsDocument
 from pydiag.rendering import (
     build_flow_canvas_payload,
-    component_pending_edge_from_state,
-    component_responsible_filter_from_state,
-)
-from pydiag.rendering.flow_canvas_state import (
     component_history_action_from_state,
     component_pending_edge_edit_from_state,
+    component_pending_edge_edits_from_state,
+    component_pending_edge_from_state,
     component_pending_node_create_from_state,
+    component_pending_node_creates_from_state,
     component_pending_node_edit_from_state,
+    component_pending_node_edits_from_state,
+    component_pending_process_create_from_state,
+    component_pending_process_delete_from_state,
+    component_pending_process_edit_from_state,
     component_positions_from_state,
+    component_responsible_filter_from_state,
 )
 
 from .edit_history import HISTORY_ACTION_REQUEST_KEY
@@ -30,8 +34,14 @@ from .flow_view_state import flow_state_timestamp
 FLOW_CANVAS_COMPONENT_KEY = "well_drilling_flow_canvas"
 FLOW_CANVAS_PENDING_EDGE_REQUEST_KEY = "_flow_canvas_pending_edge_request_id"
 FLOW_CANVAS_PENDING_NODE_EDIT_REQUEST_KEY = "_flow_canvas_pending_node_edit_request_id"
+FLOW_CANVAS_PENDING_NODE_EDITS_REQUEST_KEY = "_flow_canvas_pending_node_edits_request_id"
 FLOW_CANVAS_PENDING_NODE_CREATE_REQUEST_KEY = "_flow_canvas_pending_node_create_request_id"
+FLOW_CANVAS_PENDING_NODE_CREATES_REQUEST_KEY = "_flow_canvas_pending_node_creates_request_id"
 FLOW_CANVAS_PENDING_EDGE_EDIT_REQUEST_KEY = "_flow_canvas_pending_edge_edit_request_id"
+FLOW_CANVAS_PENDING_EDGE_EDITS_REQUEST_KEY = "_flow_canvas_pending_edge_edits_request_id"
+FLOW_CANVAS_PENDING_PROCESS_CREATE_REQUEST_KEY = "_flow_canvas_pending_process_create_request_id"
+FLOW_CANVAS_PENDING_PROCESS_EDIT_REQUEST_KEY = "_flow_canvas_pending_process_edit_request_id"
+FLOW_CANVAS_PENDING_PROCESS_DELETE_REQUEST_KEY = "_flow_canvas_pending_process_delete_request_id"
 FLOW_SELECTION_RERUN_REQUEST_KEY = "_flow_selection_rerun_requested"
 FLOW_RESPONSIBLE_FILTER_RERUN_REQUEST_KEY = "_flow_responsible_filter_rerun_requested"
 FLOW_RENDER_SNAPSHOT_CACHE_KEY = "_flow_render_snapshot_cache"
@@ -68,6 +78,9 @@ __all__ = [
     "consume_pending_canvas_edge_edit",
     "consume_pending_canvas_node_create",
     "consume_pending_canvas_node_edit",
+    "consume_pending_canvas_process_create",
+    "consume_pending_canvas_process_edit",
+    "consume_pending_canvas_process_delete",
     "consume_responsible_filter_rerun_request",
     "detect_canvas_position_autosave",
     "flow_state_timestamp",
@@ -319,6 +332,31 @@ def consume_pending_canvas_node_edit(
     return result
 
 
+def consume_pending_canvas_node_edits(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending bulk canvas node edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_edits_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_EDITS_REQUEST_KEY) == request_id:
+            _clear_pending_node_edits_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_EDITS_REQUEST_KEY] = request_id
+
+    _clear_pending_node_edits_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
 def _clear_pending_node_edit_component_state(
     session_state: MutableMapping[str, Any],
     component_key: str,
@@ -327,6 +365,17 @@ def _clear_pending_node_edit_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_node_edit"] = None
+        session_state[component_key] = updated
+
+
+def _clear_pending_node_edits_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_edits"] = None
         session_state[component_key] = updated
 
 
@@ -354,6 +403,30 @@ def consume_pending_canvas_node_create(
     return result
 
 
+def consume_pending_canvas_node_creates(
+    session_state: MutableMapping[str, Any],
+    *,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending bulk canvas node create once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_node_creates_from_state(component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_NODE_CREATES_REQUEST_KEY) == request_id:
+            _clear_pending_node_creates_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_NODE_CREATES_REQUEST_KEY] = request_id
+
+    _clear_pending_node_creates_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
 def _clear_pending_node_create_component_state(
     session_state: MutableMapping[str, Any],
     component_key: str,
@@ -362,6 +435,17 @@ def _clear_pending_node_create_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_node_create"] = None
+        session_state[component_key] = updated
+
+
+def _clear_pending_node_creates_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_node_creates"] = None
         session_state[component_key] = updated
 
 
@@ -390,6 +474,31 @@ def consume_pending_canvas_edge_edit(
     return result
 
 
+def consume_pending_canvas_edge_edits(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    """Take a pending bulk canvas edge edit once. Must run before canvas mount."""
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_edge_edits_from_state(graph, component_state)
+    if pending is None:
+        return None
+
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_EDGE_EDITS_REQUEST_KEY) == request_id:
+            _clear_pending_edge_edits_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_EDGE_EDITS_REQUEST_KEY] = request_id
+
+    _clear_pending_edge_edits_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
 def _clear_pending_edge_edit_component_state(
     session_state: MutableMapping[str, Any],
     component_key: str,
@@ -398,6 +507,116 @@ def _clear_pending_edge_edit_component_state(
     if isinstance(current, dict):
         updated = dict(current)
         updated["pending_edge_edit"] = None
+        session_state[component_key] = updated
+
+
+def _clear_pending_edge_edits_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_edge_edits"] = None
+        session_state[component_key] = updated
+
+
+def consume_pending_canvas_process_create(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_process_create_from_state(graph, component_state)
+    if pending is None:
+        return None
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_PROCESS_CREATE_REQUEST_KEY) == request_id:
+            _clear_pending_process_create_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_PROCESS_CREATE_REQUEST_KEY] = request_id
+    _clear_pending_process_create_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def consume_pending_canvas_process_edit(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_process_edit_from_state(graph, component_state)
+    if pending is None:
+        return None
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_PROCESS_EDIT_REQUEST_KEY) == request_id:
+            _clear_pending_process_edit_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_PROCESS_EDIT_REQUEST_KEY] = request_id
+    _clear_pending_process_edit_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def consume_pending_canvas_process_delete(
+    session_state: MutableMapping[str, Any],
+    *,
+    graph: FlowGraphDocument,
+    component_key: str = FLOW_CANVAS_COMPONENT_KEY,
+) -> dict[str, Any] | None:
+    component_state = component_state_from_session(session_state, component_key)
+    pending = component_pending_process_delete_from_state(graph, component_state)
+    if pending is None:
+        return None
+    request_id = pending.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        if session_state.get(FLOW_CANVAS_PENDING_PROCESS_DELETE_REQUEST_KEY) == request_id:
+            _clear_pending_process_delete_component_state(session_state, component_key)
+            return None
+        session_state[FLOW_CANVAS_PENDING_PROCESS_DELETE_REQUEST_KEY] = request_id
+    _clear_pending_process_delete_component_state(session_state, component_key)
+    result = dict(pending)
+    result.pop("request_id", None)
+    return result
+
+
+def _clear_pending_process_create_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_process_create"] = None
+        session_state[component_key] = updated
+
+
+def _clear_pending_process_edit_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_process_edit"] = None
+        session_state[component_key] = updated
+
+
+def _clear_pending_process_delete_component_state(
+    session_state: MutableMapping[str, Any],
+    component_key: str,
+) -> None:
+    current = session_state.get(component_key)
+    if isinstance(current, dict):
+        updated = dict(current)
+        updated["pending_process_delete"] = None
         session_state[component_key] = updated
 
 

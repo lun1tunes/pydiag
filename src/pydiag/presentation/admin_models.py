@@ -103,6 +103,31 @@ def suggest_well_id(wells: WellsDocument) -> str:
     return f"well_{max_number + 1}"
 
 
+def validate_graph_source_node_form(
+    *,
+    title: str,
+    kind: str,
+    responsible: str | None,
+    participants: list[str],
+    approvers: list[str],
+) -> str | None:
+    if not title.strip():
+        return "Заголовок карточки обязателен."
+
+    combined = [
+        value
+        for value in [responsible, *participants, *approvers]
+        if value is not None
+    ]
+    if len(combined) != len(set(combined)):
+        return "Один и тот же ответственный не должен повторяться в карточке."
+
+    if kind in {"process", "decision_diamond"} and not combined:
+        return "Для process/decision карточек нужно назначить хотя бы одного ответственного."
+
+    return None
+
+
 def graph_source_node_delete_block_reason(
     node_id: str,
     wells: WellsDocument,

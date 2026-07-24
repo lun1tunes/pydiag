@@ -127,16 +127,34 @@ def test_canvas_edit_menu_js_covers_every_action() -> None:
     css = _asset_text("flow_canvas.css")
 
     # Node menu actions
-    for label in ("Заголовок", "Тип", "Роли", "Длительность", "Заметка", "Удалить"):
+    for label in (
+        "Заголовок",
+        "Тип",
+        "Роли",
+        "Согласующие",
+        "В процесс…",
+        "Длительность",
+        "Заметка",
+        "Удалить",
+    ):
         assert f'label: "{label}"' in js or f'textContent = "{label}"' in js
-    assert "function openDurationPopover(state, nodeId, anchor)" in js
+    assert "function openDurationPopover(state, nodeId, anchor, nodeIds = null)" in js
     assert "function openDeleteConfirmPopover(state," in js
     assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert "function openApproversPopover(state, nodeId, anchor)" in js
+    assert "function openAssignToProcessPopover(state, nodeIds, anchor)" in js
+    assert "function syncProcessFrames(state)" in js
+    assert "flow-canvas-processes" in js
+    assert ".flow-process-frame" in css
     assert '"Участники"' in js
-    assert "Согласующие" not in js
+    assert 'label: "Согласующие"' in js
     assert "function openKindMenu(state, nodeId, anchor)" in js
     assert "function beginTitleEdit(state, nodeId)" in js
     assert "function applyOptimisticNodeEdit(state, nodeId, payload)" in js
+    assert "pending_node_edits" in js
+    assert "pending_process_create" in js
+    assert "selectedEdgeIds" in js
+    assert "startMarqueeSelect" in js
 
     # Edge menu
     assert 'textContent = "Тип связи"' in js

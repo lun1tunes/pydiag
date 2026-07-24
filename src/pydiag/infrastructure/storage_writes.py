@@ -5,8 +5,11 @@ from pathlib import Path
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
     CreateGraphSourceNodeCommand,
+    CreateGraphSourceProcessCommand,
+    DeleteGraphSourceProcessCommand,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
+    UpdateGraphSourceProcessCommand,
 )
 from pydiag.common.errors import VersionConflictError
 from pydiag.domain.models import FlowGraphDocument, WellsDocument, validate_wells_against_graph
@@ -23,6 +26,8 @@ from .figma_import import (
 from .flow_source_graph import (
     create_flow_source_payload_edge,
     create_flow_source_payload_node,
+    create_flow_source_payload_process,
+    delete_flow_source_payload_process,
     dump_flow_source_payload,
     editable_flow_graph_payload_from_source_payload,
     graph_source_edge_draft_from_payload,
@@ -34,6 +39,7 @@ from .flow_source_graph import (
     update_flow_source_payload_edge,
     update_flow_source_payload_layout,
     update_flow_source_payload_node,
+    update_flow_source_payload_process,
 )
 from .storage_io import json_file_lock, save_json_atomic, save_text_atomic
 from .storage_loading import load_graph_doc, load_wells_doc
@@ -42,12 +48,15 @@ from .storage_paths import graph_path, source_graph_path, wells_path
 __all__ = [
     "create_graph_source_edge_with_version_check",
     "create_graph_source_node_with_version_check",
+    "create_graph_source_process_with_version_check",
+    "delete_graph_source_process_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",
     "save_graph_source_edge_with_version_check",
     "save_graph_source_node_with_version_check",
     "save_wells_with_version_check",
+    "update_graph_source_process_with_version_check",
 ]
 
 
@@ -256,6 +265,72 @@ def create_graph_source_node_with_version_check(
             raise ValueError(f"Graph source editing requires source YAML: {target}")
         try:
             updated_payload = create_flow_source_payload_node(
+                payload,
+                command=command,
+                expected_version=expected_version,
+            )
+        except RuntimeError as exc:
+            raise VersionConflictError(str(exc)) from exc
+        return save_flow_source_payload(target, updated_payload)
+
+
+def create_graph_source_process_with_version_check(
+    command: CreateGraphSourceProcessCommand,
+    *,
+    expected_version: int,
+    path: str | Path,
+) -> FlowGraphDocument:
+    target = Path(path)
+    with json_file_lock(target):
+        payload = load_structured_payload(target.read_bytes())
+        if not is_flow_source_payload(payload):
+            raise ValueError(f"Graph source editing requires source YAML: {target}")
+        try:
+            updated_payload = create_flow_source_payload_process(
+                payload,
+                command=command,
+                expected_version=expected_version,
+            )
+        except RuntimeError as exc:
+            raise VersionConflictError(str(exc)) from exc
+        return save_flow_source_payload(target, updated_payload)
+
+
+def update_graph_source_process_with_version_check(
+    command: UpdateGraphSourceProcessCommand,
+    *,
+    expected_version: int,
+    path: str | Path,
+) -> FlowGraphDocument:
+    target = Path(path)
+    with json_file_lock(target):
+        payload = load_structured_payload(target.read_bytes())
+        if not is_flow_source_payload(payload):
+            raise ValueError(f"Graph source editing requires source YAML: {target}")
+        try:
+            updated_payload = update_flow_source_payload_process(
+                payload,
+                command=command,
+                expected_version=expected_version,
+            )
+        except RuntimeError as exc:
+            raise VersionConflictError(str(exc)) from exc
+        return save_flow_source_payload(target, updated_payload)
+
+
+def delete_graph_source_process_with_version_check(
+    command: DeleteGraphSourceProcessCommand,
+    *,
+    expected_version: int,
+    path: str | Path,
+) -> FlowGraphDocument:
+    target = Path(path)
+    with json_file_lock(target):
+        payload = load_structured_payload(target.read_bytes())
+        if not is_flow_source_payload(payload):
+            raise ValueError(f"Graph source editing requires source YAML: {target}")
+        try:
+            updated_payload = delete_flow_source_payload_process(
                 payload,
                 command=command,
                 expected_version=expected_version,

@@ -51,7 +51,11 @@ def short_well_name(well: Well) -> str:
     return name[:16]
 
 
-def responsible_abbreviation(label: str) -> str:
+def responsible_abbreviation(label: str, abbr: str | None = None) -> str:
+    if abbr:
+        cleaned = " ".join(str(abbr).split()).strip()
+        if cleaned:
+            return cleaned
     words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", label)
     if not words:
         return label[:4].upper()
@@ -64,13 +68,15 @@ def responsible_abbreviation(label: str) -> str:
 
 
 def duration_label(time_value: str) -> str:
-    amount, unit = parse_node_time(time_value)
+    parsed = parse_node_time(time_value)
     unit_label = {
         "minute": "мин",
         "hour": "ч",
         "day": "д",
-    }[unit]
-    return f"{amount} {unit_label}"
+    }[parsed.unit]
+    if parsed.is_range and parsed.amount_hi is not None:
+        return f"{parsed.amount}–{parsed.amount_hi} {unit_label}"
+    return f"{parsed.amount} {unit_label}"
 
 
 def duration_badge_width(time_value: str) -> int:

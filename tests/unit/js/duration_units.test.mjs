@@ -45,6 +45,7 @@ assert.equal(JSON.stringify(api.parseDurationParts("1 hour")), JSON.stringify({ 
 assert.equal(JSON.stringify(api.parseDurationParts("40 minutes")), JSON.stringify({ amount: "40", unit: "minutes" }));
 assert.equal(JSON.stringify(api.parseDurationParts("2 days")), JSON.stringify({ amount: "2", unit: "days" }));
 assert.equal(JSON.stringify(api.parseDurationParts("3h")), JSON.stringify({ amount: "3", unit: "hours" }));
+assert.equal(JSON.stringify(api.parseDurationParts("1-2 hours")), JSON.stringify({ amount: "1-2", unit: "hours" }));
 assert.equal(JSON.stringify(api.parseDurationParts("")), JSON.stringify({ amount: "", unit: "hours" }));
 
 assert.equal(api.formatDurationValue("16", "hours"), "16 hours");
@@ -53,8 +54,11 @@ assert.equal(api.formatDurationValue("40", "minutes"), "40 minutes");
 assert.equal(api.formatDurationValue("1", "minutes"), "1 minute");
 assert.equal(api.formatDurationValue("2", "days"), "2 days");
 assert.equal(api.formatDurationValue("1", "days"), "1 day");
+assert.equal(api.formatDurationValue("1-2", "hours"), "1-2 hours");
+assert.equal(api.formatDurationValue("2-2", "hours"), "2 hours");
 assert.equal(api.formatDurationValue("0", "hours"), "");
 assert.equal(api.formatDurationValue("", "hours"), "");
+assert.equal(api.formatDurationValue("3-1", "hours"), "");
 
 assert.equal(
   JSON.stringify(api.DURATION_UNIT_OPTIONS.map((item) => item.label)),

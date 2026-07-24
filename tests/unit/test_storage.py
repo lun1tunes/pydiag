@@ -677,7 +677,8 @@ def test_load_graph_doc_reads_yaml_source_document(tmp_path) -> None:
     design_node = next(node for node in graph.nodes if node.id == "well_design")
 
     assert review_node.time == "40 minutes"
-    assert review_node.responsible == ["planning", "geology", "hse"]
+    assert review_node.responsible == ["planning", "geology"]
+    assert review_node.metadata.get("canvas_approvers") == "hse"
     assert design_node.time == "2 days"
 
 

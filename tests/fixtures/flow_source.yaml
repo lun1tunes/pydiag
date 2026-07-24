@@ -52,6 +52,30 @@ responsibles:
     border: "#64748b"
     text: "#253041"
     active: true
+  seismic:
+    label: "Сейсмик"
+    type: "team"
+    abbr: "Сейс"
+    fill: "#ccfbf1"
+    border: "#0F766E"
+    text: "#134e4a"
+    active: true
+  well_completion:
+    label: "Специалист по освоению скважин"
+    type: "team"
+    abbr: "СОС"
+    fill: "#ede9fe"
+    border: "#7C3AED"
+    text: "#2e1065"
+    active: true
+  b:
+    label: "Б"
+    type: "team"
+    abbr: "Б"
+    fill: "#ffedd5"
+    border: "#B45309"
+    text: "#7c2d12"
+    active: true
 nodes:
   input_geo_license:
     title: "Лицензия и исходные геоданные"

@@ -413,6 +413,8 @@ def test_application_flow_view_stays_a_thin_canvas_coordinator() -> None:
         "typing",
         "pydiag.domain.models",
         "pydiag.rendering",
+        "pydiag.application.edit_history",
+        "pydiag.application.flow_position_edit",
         "pydiag.application.flow_view_context",
         "pydiag.application.flow_view_selection",
         "pydiag.application.flow_view_state",

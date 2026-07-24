@@ -60,6 +60,10 @@ ALLOWED_ACTOR_ABBREVIATIONS = {
     "ЗАМДД": ("zamdd", "ЗамДД"),
     "ДСС НТЦ": ("dss_ntc", "ДСС НТЦ"),
     "ПРОЕКТНАЯ ГРУППА": ("project_group", "Проектная группа"),
+    "СЕЙС": ("seismic", "Сейсмик"),
+    "СЕЙСМИК": ("seismic", "Сейсмик"),
+    "СОС": ("well_completion", "Специалист по освоению скважин"),
+    "Б": ("b", "Б"),
 }
 NON_RESPONSIBLE_ABBREVIATIONS = {
     "ТС",

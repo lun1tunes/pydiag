@@ -108,6 +108,14 @@ def build_flow_canvas_payload(
     payload = {
         "nodes": nodes,
         "edges": edges,
+        "processes": [
+            {
+                "id": process_id,
+                "title": process.title,
+                "member_ids": list(process.node_ids),
+            }
+            for process_id, process in snapshot.graph.processes.items()
+        ],
         "selected_id": selected_id,
         "position_edit_enabled": domain_nodes_draggable,
         "edge_edit_enabled": bool(edge_edit_enabled),
@@ -221,6 +229,7 @@ def build_flow_canvas_node(
         ),
         "time_badge": build_time_badge(node, active),
         "responsible_badges": build_responsible_badges(graph, node, active),
+        "note": canvas_node_roles(node)["note"],
         "well_tokens": build_well_tokens(
             node_id=node.id,
             wells_here=wells_here,
@@ -247,6 +256,7 @@ def build_node_edit_fields(
         "editable": True,
         "title": node.text,
         "duration": node.time,
+        "duration_context": roles["duration_context"],
         "note": roles["note"],
         "responsible_id": roles["responsible"],
         "participants": roles["participants"],
@@ -290,11 +300,16 @@ def canvas_node_roles(node: FlowNode) -> dict[str, Any]:
     if not isinstance(note_raw, str):
         note_raw = meta.get("note")
     note = note_raw.strip() if isinstance(note_raw, str) and note_raw.strip() else None
+    ctx_raw = meta.get("canvas_duration_context")
+    duration_context = (
+        ctx_raw.strip() if isinstance(ctx_raw, str) and ctx_raw.strip() else None
+    )
     return {
         "responsible": responsible,
         "participants": participants,
         "approvers": approvers,
         "note": note,
+        "duration_context": duration_context,
     }
 
 
@@ -368,10 +383,14 @@ def build_flow_canvas_edge(
 def build_time_badge(node: FlowNode, active: bool) -> dict[str, Any] | None:
     if node.time is None:
         return None
+    roles = canvas_node_roles(node)
+    title = node.time
+    if roles.get("duration_context"):
+        title = f"{node.time} — {roles['duration_context']}"
     return {
         "text": duration_label(node.time),
         "style": component_style(duration_badge_style(active, node.time)),
-        "title": node.time,
+        "title": title,
     }
 
 
@@ -401,7 +420,7 @@ def build_responsible_badges(
             {
                 "id": f"responsible::{node.id}::{responsible}",
                 "text": style.label,
-                "abbr": responsible_abbreviation(style.label),
+                "abbr": responsible_abbreviation(style.label, getattr(style, "abbr", None)),
                 "style": component_style(
                     responsible_badge_style(
                         active=active,

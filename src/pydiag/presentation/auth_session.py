@@ -90,8 +90,14 @@ def clear_workspace_ui_state(session_state: MutableMapping[str, Any]) -> None:
         "_flow_inspector_collapsed",
         "_flow_canvas_pending_edge_request_id",
         "_flow_canvas_pending_node_edit_request_id",
+        "_flow_canvas_pending_node_edits_request_id",
         "_flow_canvas_pending_node_create_request_id",
+        "_flow_canvas_pending_node_creates_request_id",
         "_flow_canvas_pending_edge_edit_request_id",
+        "_flow_canvas_pending_edge_edits_request_id",
+        "_flow_canvas_pending_process_create_request_id",
+        "_flow_canvas_pending_process_edit_request_id",
+        "_flow_canvas_pending_process_delete_request_id",
     ):
         session_state.pop(key, None)
     for key in list(session_state):

@@ -11,16 +11,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydiag.common.graph_source_admin import (
     CreateGraphSourceEdgeCommand,
     CreateGraphSourceNodeCommand,
+    CreateGraphSourceProcessCommand,
+    DeleteGraphSourceProcessCommand,
     GraphSourceEdgeDraft,
     GraphSourceNodeDraft,
     UpdateGraphSourceEdgeCommand,
     UpdateGraphSourceNodeCommand,
+    UpdateGraphSourceProcessCommand,
 )
 from pydiag.common.layout_metadata import (
     CUSTOM_LAYOUT_X_META,
     CUSTOM_LAYOUT_Y_META,
 )
-from pydiag.domain.models import HEX_COLOR_RE, FlowGraphDocument, MetaValue, parse_node_time
+from pydiag.domain.models import (
+    HEX_COLOR_RE,
+    FlowGraphDocument,
+    MetaValue,
+    format_node_time,
+    parse_node_time,
+)
 from pydiag.infrastructure.editable_flow_graph import (
     EDITABLE_FLOW_GRAPH_SCHEMA_VERSION,
     EditableEdgeKind,
@@ -30,7 +39,9 @@ from pydiag.infrastructure.editable_flow_graph import (
 )
 
 FLOW_SOURCE_SCHEMA_VERSION = "flow-source/1.0"
-SHORT_DURATION_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>[mhd])$")
+SHORT_DURATION_RE = re.compile(
+    r"^(?:(?P<lo>\d+)\s*-\s*(?P<hi>\d+)|(?P<amount>\d+))\s*(?P<unit>[mhd])$"
+)
 AUTO_LAYOUT_COLUMNS = 4
 AUTO_LAYOUT_HORIZONTAL_STEP = 420
 AUTO_LAYOUT_VERTICAL_STEP = 240
@@ -44,6 +55,7 @@ FLOW_SOURCE_STRIPPED_METADATA_KEYS = frozenset(
         "canvas_participants",
         "canvas_approvers",
         "canvas_note",
+        "canvas_duration_context",
     }
 )
 DEFAULT_NODE_SIZES: dict[EditableNodeKind, tuple[int, int]] = {
@@ -94,6 +106,7 @@ SourceResponsibleType = Literal["team", "role", "system", "external"]
 __all__ = [
     "FLOW_SOURCE_SCHEMA_VERSION",
     "FlowSourceDocument",
+    "FlowSourceProcess",
     "dump_structured_yaml_payload",
     "dump_flow_source_payload",
     "flow_source_payload_from_editable_payload",
@@ -105,11 +118,14 @@ __all__ = [
     "load_structured_payload",
     "create_flow_source_payload_edge",
     "create_flow_source_payload_node",
+    "create_flow_source_payload_process",
+    "delete_flow_source_payload_process",
     "flow_source_has_directed_edge",
     "update_flow_source_payload_custom_layout",
     "update_flow_source_payload_edge",
     "update_flow_source_payload_layout",
     "update_flow_source_payload_node",
+    "update_flow_source_payload_process",
 ]
 
 
@@ -155,6 +171,13 @@ class FlowSourceSection(FlowSourceStrictModel):
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
 
 
+class FlowSourceProcess(FlowSourceStrictModel):
+    """Grouping frame around cards (not the card kind ``process``)."""
+
+    title: str = Field(min_length=1)
+    node_ids: list[str] = Field(default_factory=list)
+
+
 class FlowSourceTransition(FlowSourceStrictModel):
     to: str = Field(min_length=1)
     kind: EditableEdgeKind = "default"
@@ -174,6 +197,7 @@ class FlowSourceNode(FlowSourceStrictModel):
     participants: list[str] = Field(default_factory=list)
     approvers: list[str] = Field(default_factory=list)
     duration: str | None = None
+    duration_context: str | None = None
     note: str | None = None
     tags: list[str] = Field(default_factory=list)
     source_ref: dict[str, MetaValue] = Field(default_factory=dict)
@@ -187,6 +211,14 @@ class FlowSourceNode(FlowSourceStrictModel):
             return "process"
         return value
 
+    @field_validator("duration_context")
+    @classmethod
+    def normalize_duration_context(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(str(value).split()).strip()
+        return cleaned or None
+
     @field_validator("duration")
     @classmethod
     def normalize_duration(cls, value: str | None) -> str | None:
@@ -195,15 +227,34 @@ class FlowSourceNode(FlowSourceStrictModel):
         normalized = " ".join(value.strip().lower().split())
         shorthand = SHORT_DURATION_RE.fullmatch(normalized)
         if shorthand is not None:
-            amount = int(shorthand.group("amount"))
-            unit = {
-                "m": "minute" if amount == 1 else "minutes",
-                "h": "hour" if amount == 1 else "hours",
-                "d": "day" if amount == 1 else "days",
-            }[shorthand.group("unit")]
-            normalized = f"{amount} {unit}"
-        parse_node_time(normalized)
-        return normalized
+            unit_key = shorthand.group("unit")
+            if shorthand.group("lo") is not None:
+                lo = int(shorthand.group("lo"))
+                hi = int(shorthand.group("hi"))
+                unit = {
+                    "m": "minutes",
+                    "h": "hours",
+                    "d": "days",
+                }[unit_key]
+                if lo == hi:
+                    amount = lo
+                    unit = {
+                        "m": "minute" if amount == 1 else "minutes",
+                        "h": "hour" if amount == 1 else "hours",
+                        "d": "day" if amount == 1 else "days",
+                    }[unit_key]
+                    normalized = f"{amount} {unit}"
+                else:
+                    normalized = f"{lo}-{hi} {unit}"
+            else:
+                amount = int(shorthand.group("amount"))
+                unit = {
+                    "m": "minute" if amount == 1 else "minutes",
+                    "h": "hour" if amount == 1 else "hours",
+                    "d": "day" if amount == 1 else "days",
+                }[unit_key]
+                normalized = f"{amount} {unit}"
+        return format_node_time(parse_node_time(normalized))
 
 
 class FlowSourceLayoutEntry(FlowSourceStrictModel):
@@ -221,6 +272,7 @@ class FlowSourceDocument(FlowSourceStrictModel):
     description: str | None = None
     responsibles: dict[str, FlowSourceResponsible]
     sections: dict[str, FlowSourceSection] = Field(default_factory=dict)
+    processes: dict[str, FlowSourceProcess] = Field(default_factory=dict)
     nodes: dict[str, FlowSourceNode]
     layout: dict[str, FlowSourceLayoutEntry] = Field(default_factory=dict)
     custom_layout: dict[str, FlowSourceLayoutEntry] = Field(default_factory=dict)
@@ -268,6 +320,31 @@ class FlowSourceDocument(FlowSourceStrictModel):
 
         if len(explicit_transition_ids) != len(set(explicit_transition_ids)):
             raise ValueError("Duplicate transition ids are not allowed")
+
+        membership: dict[str, str] = {}
+        for process_id, process in self.processes.items():
+            seen_in_process: set[str] = set()
+            for member_id in process.node_ids:
+                if member_id not in node_ids:
+                    raise ValueError(
+                        f"Process {process_id}: unknown node id {member_id}"
+                    )
+                if flow_source_node_deleted(self.nodes[member_id]):
+                    raise ValueError(
+                        f"Process {process_id}: node {member_id} is deleted"
+                    )
+                if member_id in seen_in_process:
+                    raise ValueError(
+                        f"Process {process_id}: duplicate node id {member_id}"
+                    )
+                seen_in_process.add(member_id)
+                owner = membership.get(member_id)
+                if owner is not None:
+                    raise ValueError(
+                        f"Node {member_id} belongs to multiple processes: "
+                        f"{owner} and {process_id}"
+                    )
+                membership[member_id] = process_id
         return self
 
 
@@ -322,6 +399,7 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
                 "approvers": node.approvers,
                 "note": node.note,
                 "duration": node.duration,
+                "duration_context": node.duration_context,
                 "metadata": editable_node_metadata(
                     node,
                     custom_layout=custom_layout,
@@ -361,8 +439,20 @@ def editable_flow_graph_payload_from_source_payload(payload: object) -> dict[str
                 "fill": responsible.fill,
                 "border": responsible.border,
                 "text": responsible.text,
+                **({"abbr": responsible.abbr} if responsible.abbr else {}),
             }
             for responsible_id, responsible in document.responsibles.items()
+        },
+        "processes": {
+            process_id: {
+                "title": process.title,
+                "node_ids": [
+                    node_id
+                    for node_id in process.node_ids
+                    if node_id in active_node_id_set
+                ],
+            }
+            for process_id, process in document.processes.items()
         },
         "nodes": nodes_payload,
         "edges": edges_payload,
@@ -413,12 +503,16 @@ def flow_source_payload_from_runtime_payload(
         )
         if custom_layout_entry is not None:
             custom_layout[node.id] = custom_layout_entry
+        duration_context = _metadata_optional_text(
+            node.metadata, "canvas_duration_context"
+        )
         nodes_payload[node.id] = {
             "title": node.text,
             "kind": node.kind,
             "responsible": node.primary_responsible,
             "participants": node.secondary_responsibles,
             "duration": node.time,
+            "duration_context": duration_context,
             "transitions": transitions_by_source[node.id],
             "metadata": metadata,
         }
@@ -435,8 +529,16 @@ def flow_source_payload_from_runtime_payload(
                 "fill": style.fill,
                 "border": style.border,
                 "text": style.text,
+                **({"abbr": style.abbr} if getattr(style, "abbr", None) else {}),
             }
             for responsible_id, style in document.responsibles.items()
+        },
+        "processes": {
+            process_id: {
+                "title": process.title,
+                "node_ids": list(process.node_ids),
+            }
+            for process_id, process in document.processes.items()
         },
         "nodes": nodes_payload,
         "layout": {
@@ -506,10 +608,18 @@ def flow_source_payload_from_editable_payload(
                 "fill": style.fill,
                 "border": style.border,
                 "text": style.text,
+                **({"abbr": style.abbr} if getattr(style, "abbr", None) else {}),
             }
             for responsible_id, style in document.responsibles.items()
         },
         "sections": sections,
+        "processes": {
+            process_id: {
+                "title": process.title,
+                "node_ids": list(process.node_ids),
+            }
+            for process_id, process in document.processes.items()
+        },
         "nodes": nodes_payload,
         "layout": {
             node.id: {
@@ -614,6 +724,7 @@ def graph_source_node_draft_from_payload(payload: object, node_id: str) -> Graph
         approvers=tuple(node.approvers),
         duration=node.duration,
         note=node.note,
+        duration_context=node.duration_context,
     )
 
 
@@ -666,6 +777,7 @@ def update_flow_source_payload_node(
             "approvers": list(command.approvers),
             "duration": command.duration,
             "note": command.note,
+            "duration_context": command.duration_context,
             "deleted": current.deleted if command.deleted is None else command.deleted,
             "metadata": metadata,
         }
@@ -676,6 +788,8 @@ def update_flow_source_payload_node(
         w=int(command.layout_w),
         h=int(command.layout_h),
     )
+    if updated.nodes[command.node_id].deleted is True:
+        remove_nodes_from_processes(updated, {command.node_id})
     return updated.model_dump(mode="json")
 
 
@@ -845,6 +959,7 @@ def create_flow_source_payload_node(
                 "approvers": list(command.approvers),
                 "duration": command.duration,
                 "note": command.note,
+                "duration_context": command.duration_context,
                 "deleted": False,
                 "transitions": [],
                 "metadata": {"manual_layout_size": True},
@@ -859,11 +974,152 @@ def create_flow_source_payload_node(
             approvers=list(command.approvers),
             duration=command.duration,
             note=command.note,
+            duration_context=command.duration_context,
             deleted=False,
             transitions=[],
             metadata={"manual_layout_size": True},
         )
     updated.layout[node_id] = layout_entry
+    return updated.model_dump(mode="json")
+
+
+def remove_nodes_from_processes(
+    document: FlowSourceDocument,
+    node_ids: set[str],
+) -> None:
+    if not node_ids or not document.processes:
+        return
+    for process_id, process in list(document.processes.items()):
+        filtered = [node_id for node_id in process.node_ids if node_id not in node_ids]
+        if filtered != process.node_ids:
+            document.processes[process_id] = process.model_copy(update={"node_ids": filtered})
+
+
+def claim_nodes_for_process(
+    document: FlowSourceDocument,
+    *,
+    process_id: str,
+    node_ids: list[str],
+) -> list[str]:
+    """Assign exclusive membership; returns deduplicated ordered node ids."""
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for node_id in node_ids:
+        if not node_id or node_id in seen:
+            continue
+        if node_id not in document.nodes:
+            raise ValueError(f"Unknown graph node: {node_id}")
+        if flow_source_node_deleted(document.nodes[node_id]):
+            raise ValueError(f"Node is deleted: {node_id}")
+        seen.add(node_id)
+        unique_ids.append(node_id)
+    remove_nodes_from_processes(document, set(unique_ids))
+    return unique_ids
+
+
+def unique_process_id(*, title: str, used_ids: set[str]) -> str:
+    slug = slugify(title) or "process"
+    base = f"block_{slug}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def create_flow_source_payload_process(
+    payload: object,
+    *,
+    command: CreateGraphSourceProcessCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    title = " ".join(str(command.title or "").split()).strip()
+    if not title:
+        raise ValueError("Название процесса обязательно.")
+    if not command.node_ids:
+        raise ValueError("Выберите хотя бы одну карточку для процесса.")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    used_ids = set(updated.processes)
+    preferred_id = (
+        command.process_id.strip()
+        if isinstance(command.process_id, str) and command.process_id.strip()
+        else None
+    )
+    if preferred_id and preferred_id not in used_ids:
+        process_id = preferred_id
+    else:
+        process_id = unique_process_id(title=title, used_ids=used_ids)
+
+    node_ids = claim_nodes_for_process(
+        updated,
+        process_id=process_id,
+        node_ids=list(command.node_ids),
+    )
+    updated.processes[process_id] = FlowSourceProcess(title=title, node_ids=node_ids)
+    return updated.model_dump(mode="json")
+
+
+def update_flow_source_payload_process(
+    payload: object,
+    *,
+    command: UpdateGraphSourceProcessCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    if command.process_id not in document.processes:
+        raise ValueError(f"Unknown process: {command.process_id}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    current = updated.processes[command.process_id]
+    title = current.title
+    if command.title is not None:
+        title = " ".join(str(command.title or "").split()).strip()
+        if not title:
+            raise ValueError("Название процесса обязательно.")
+    node_ids = list(current.node_ids)
+    if command.node_ids is not None:
+        node_ids = claim_nodes_for_process(
+            updated,
+            process_id=command.process_id,
+            node_ids=list(command.node_ids),
+        )
+    updated.processes[command.process_id] = FlowSourceProcess(
+        title=title,
+        node_ids=node_ids,
+    )
+    return updated.model_dump(mode="json")
+
+
+def delete_flow_source_payload_process(
+    payload: object,
+    *,
+    command: DeleteGraphSourceProcessCommand,
+    expected_version: int,
+) -> dict[str, Any]:
+    document = FlowSourceDocument.model_validate(payload, strict=True)
+    if document.version != expected_version:
+        raise RuntimeError(
+            f"Conflict: expected graph version {expected_version}, actual version is {document.version}"
+        )
+    if command.process_id not in document.processes:
+        raise ValueError(f"Unknown process: {command.process_id}")
+
+    updated = document.model_copy(deep=True)
+    updated.version = expected_version + 1
+    del updated.processes[command.process_id]
     return updated.model_dump(mode="json")
 
 
@@ -1124,6 +1380,7 @@ def editable_node_source_payload(
             "participants": list(node.participants),
             "approvers": list(node.approvers),
             "duration": node.duration,
+            "duration_context": node.duration_context,
             "note": node.note,
             "tags": tags,
             "source_ref": source_ref,
@@ -1165,6 +1422,17 @@ def source_tags_from_metadata(value: MetaValue) -> list[str]:
     if not isinstance(value, str):
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _metadata_optional_text(
+    metadata: dict[str, MetaValue],
+    key: str,
+) -> str | None:
+    raw = metadata.get(key)
+    if not isinstance(raw, str):
+        return None
+    cleaned = " ".join(raw.split()).strip()
+    return cleaned or None
 
 
 def sanitize_flow_source_metadata(

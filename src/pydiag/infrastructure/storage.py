@@ -55,12 +55,15 @@ from .storage_paths import (
 from .storage_writes import (
     create_graph_source_edge_with_version_check,
     create_graph_source_node_with_version_check,
+    create_graph_source_process_with_version_check,
+    delete_graph_source_process_with_version_check,
     load_graph_source_edge_draft,
     load_graph_source_node_draft,
     save_graph_positions_with_version_check,
     save_graph_source_edge_with_version_check,
     save_graph_source_node_with_version_check,
     save_wells_with_version_check,
+    update_graph_source_process_with_version_check,
 )
 
 __all__ = [
@@ -104,6 +107,8 @@ __all__ = [
     "resolve_graph_version_path",
     "create_graph_source_edge_with_version_check",
     "create_graph_source_node_with_version_check",
+    "create_graph_source_process_with_version_check",
+    "delete_graph_source_process_with_version_check",
     "load_graph_source_edge_draft",
     "load_graph_source_node_draft",
     "save_graph_positions_with_version_check",
@@ -113,5 +118,6 @@ __all__ = [
     "source_graph_path",
     "save_wells_with_version_check",
     "try_acquire_file_lock",
+    "update_graph_source_process_with_version_check",
     "wells_path",
 ]

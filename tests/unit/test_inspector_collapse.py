@@ -52,4 +52,5 @@ def test_inspector_toggle_and_immersive_assets() -> None:
     assert "Скрыть инспектор" in js
     assert "Показать инспектор" in js
     assert ".flow-canvas-inspector-toggle" in css
-    assert "Согласующие" not in js
+    assert "function openApproversPopover(state, nodeId, anchor)" in js
+    assert 'label: "Согласующие"' in js

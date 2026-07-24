@@ -22,6 +22,7 @@ __all__ = [
     "EditableFlowGraphDocument",
     "EditableFlowGraphEdge",
     "EditableFlowGraphNode",
+    "EditableFlowGraphProcess",
     "EditableNodeKind",
     "editable_flow_graph_to_runtime",
     "is_editable_flow_graph_payload",
@@ -52,6 +53,12 @@ class EditableResponsibleStyle(EditableStrictModel):
     fill: str
     border: str
     text: str = "#172033"
+    abbr: str | None = None
+
+
+class EditableFlowGraphProcess(EditableStrictModel):
+    title: str = Field(min_length=1)
+    node_ids: list[str] = Field(default_factory=list)
 
 
 class EditableFlowGraphNode(EditableStrictModel):
@@ -65,6 +72,7 @@ class EditableFlowGraphNode(EditableStrictModel):
     approvers: list[str] = Field(default_factory=list)
     note: str | None = None
     duration: str | None = None
+    duration_context: str | None = None
     metadata: dict[str, MetaValue] = Field(default_factory=dict)
 
     @model_validator(mode="before")
@@ -112,6 +120,7 @@ class EditableFlowGraphDocument(EditableStrictModel):
     )
     version: int = Field(ge=1)
     responsibles: dict[str, EditableResponsibleStyle]
+    processes: dict[str, EditableFlowGraphProcess] = Field(default_factory=dict)
     nodes: list[EditableFlowGraphNode]
     edges: list[EditableFlowGraphEdge]
 
@@ -155,6 +164,27 @@ class EditableFlowGraphDocument(EditableStrictModel):
                 raise ValueError(f"Edge {edge.id}: unknown source node {edge.source}")
             if edge.target not in node_set:
                 raise ValueError(f"Edge {edge.id}: unknown target node {edge.target}")
+
+        membership: dict[str, str] = {}
+        for process_id, process in self.processes.items():
+            seen_in_process: set[str] = set()
+            for member_id in process.node_ids:
+                if member_id not in node_set:
+                    raise ValueError(
+                        f"Process {process_id}: unknown node id {member_id}"
+                    )
+                if member_id in seen_in_process:
+                    raise ValueError(
+                        f"Process {process_id}: duplicate node id {member_id}"
+                    )
+                seen_in_process.add(member_id)
+                owner = membership.get(member_id)
+                if owner is not None:
+                    raise ValueError(
+                        f"Node {member_id} belongs to multiple processes: "
+                        f"{owner} and {process_id}"
+                    )
+                membership[member_id] = process_id
         return self
 
 
@@ -175,6 +205,13 @@ def editable_flow_graph_to_runtime(
         "responsibles": {
             responsible_id: style.model_dump(mode="json")
             for responsible_id, style in document.responsibles.items()
+        },
+        "processes": {
+            process_id: {
+                "title": process.title,
+                "node_ids": list(process.node_ids),
+            }
+            for process_id, process in document.processes.items()
         },
         "nodes": [
             {
@@ -214,6 +251,7 @@ def runtime_node_metadata(node: EditableFlowGraphNode) -> dict[str, MetaValue]:
     metadata["canvas_participants"] = ",".join(node.participants)
     metadata["canvas_approvers"] = ",".join(node.approvers)
     metadata["canvas_note"] = node.note or ""
+    metadata["canvas_duration_context"] = node.duration_context or ""
     return metadata
 
 
@@ -222,9 +260,10 @@ def runtime_node_responsibles(
     *,
     available_responsibles: set[str],
 ) -> list[str]:
+    # Approvers are editable on the canvas but not shown as card badges.
     ordered = [
         responsible
-        for responsible in [node.responsible, *node.participants, *node.approvers]
+        for responsible in [node.responsible, *node.participants]
         if responsible
     ]
     deduplicated = list(dict.fromkeys(ordered))

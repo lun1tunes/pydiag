@@ -153,7 +153,7 @@ def test_flow_canvas_edges_are_clickable_through_node_layer() -> None:
     css = _asset_text("flow_canvas.css")
 
     assert "flow-edge-hit" in js
-    assert "selectId(state, edge.id)" in js
+    assert "selectId(state, edge.id, { additive: isMultiSelectModifier(event) })" in js
     assert ".flow-canvas-nodes" in css
     assert "pointer-events: none;" in css
     assert ".flow-node-shell" in css
@@ -228,11 +228,18 @@ def test_flow_canvas_supports_selection_edit_hud() -> None:
     assert 'setStateValue("pending_edge_edit"' in js
     assert "function openKindMenu(state, nodeId, anchor)" in js
     assert "function openRolesPopover(state, nodeId, anchor)" in js
+    assert "function openApproversPopover(state, nodeId, anchor)" in js
     assert '"Участники"' in js
-    assert "Согласующие" not in js
+    assert 'label: "Согласующие"' in js
+    assert 'label: "В процесс…"' in js
+    assert "function syncProcessFrames(state)" in js
+    assert "function openAssignToProcessPopover(state, nodeIds, anchor)" in js
+    assert "pending_process_create" in js
+    assert "flow-canvas-processes" in js
+    assert ".flow-process-frame" in css
     assert "function applyOptimisticNodeEdit(state, nodeId, payload)" in js
     assert "function openDeleteConfirmPopover(state," in js
-    assert "function openDurationPopover(state, nodeId, anchor)" in js
+    assert "function openDurationPopover(state, nodeId, anchor, nodeIds = null)" in js
     assert "function parseDurationParts(raw)" in js
     assert "function formatDurationValue(amountRaw, unitId)" in js
     assert 'label: "минут"' in js
@@ -240,6 +247,22 @@ def test_flow_canvas_supports_selection_edit_hud() -> None:
     assert 'label: "день"' in js
     assert "flow-edit-duration__unit" in js
     assert ".flow-edit-duration__unit" in css
+    assert "duration_context" in js
+    assert "pending_node_edits" in js
+    assert "pending_edge_edits" in js
+    assert "selectedEdgeIds" in js
+    assert "startMarqueeSelect" in js
+    assert "event.button !== 0 || state.spacePanHeld" in js
+    assert "event.button === 2" in js
+    assert "cursor: default" in css
+    assert "cursor: grabbing" in css
+    assert ".flow-node-card" in css and "cursor: pointer" in css
+    assert "flow-canvas-marquee" in js
+    assert ".flow-canvas-marquee" in css
+    assert "function syncNodeNoteElement(state, nodeId)" in js
+    assert "function layoutAllNodeNotes(state)" in js
+    assert "flow-node-note" in js
+    assert ".flow-node-note" in css
     assert "flow-edit-confirm" in js
     assert "Удалить карточку?" in js
     assert "Удалить связь?" in js

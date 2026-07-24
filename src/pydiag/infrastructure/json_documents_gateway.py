@@ -26,11 +26,14 @@ from .storage import (
     preferred_graph_source_path,
     create_graph_source_edge_with_version_check,
     create_graph_source_node_with_version_check,
+    create_graph_source_process_with_version_check,
+    delete_graph_source_process_with_version_check,
     save_graph_source_edge_with_version_check,
     save_graph_source_node_with_version_check,
     save_graph_positions_with_version_check,
     save_wells_with_version_check,
     source_graph_path,
+    update_graph_source_process_with_version_check,
     wells_path,
 )
 
@@ -73,6 +76,15 @@ class JsonDocumentsGateway:
     )
     create_graph_source_node_fn: Callable[..., FlowGraphDocument] = (
         create_graph_source_node_with_version_check
+    )
+    create_graph_source_process_fn: Callable[..., FlowGraphDocument] = (
+        create_graph_source_process_with_version_check
+    )
+    update_graph_source_process_fn: Callable[..., FlowGraphDocument] = (
+        update_graph_source_process_with_version_check
+    )
+    delete_graph_source_process_fn: Callable[..., FlowGraphDocument] = (
+        delete_graph_source_process_with_version_check
     )
     save_wells_fn: Callable[..., WellsDocument] = save_wells_with_version_check
 
@@ -196,6 +208,45 @@ class JsonDocumentsGateway:
         graph_version_id: str | None = None,
     ) -> FlowGraphDocument:
         return self.create_graph_source_node_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
+        )
+
+    def create_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.create_graph_source_process_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
+        )
+
+    def update_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.update_graph_source_process_fn(
+            command,
+            expected_version=expected_version,
+            path=self._graph_source_path(graph_version_id),
+        )
+
+    def delete_graph_source_process(
+        self,
+        command: object,
+        *,
+        expected_version: int,
+        graph_version_id: str | None = None,
+    ) -> FlowGraphDocument:
+        return self.delete_graph_source_process_fn(
             command,
             expected_version=expected_version,
             path=self._graph_source_path(graph_version_id),

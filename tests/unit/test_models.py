@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from pydiag.domain import FlowGraphDocument
+from pydiag.domain.models import format_node_time, parse_node_time
 from pydiag.infrastructure import load_documents
 from pydiag.infrastructure.flow_source_graph import (
     dump_structured_yaml_payload,
@@ -104,6 +105,33 @@ def test_graph_validation_rejects_invalid_time_value(graph_payload) -> None:
 
     with pytest.raises(ValidationError, match="time must use"):
         FlowGraphDocument.model_validate(payload, strict=True)
+
+
+def test_parse_node_time_supports_ranges() -> None:
+    single = parse_node_time("2 hours")
+    assert single.amount == 2
+    assert single.unit == "hour"
+    assert single.amount_hi is None
+    assert format_node_time(single) == "2 hours"
+
+    ranged = parse_node_time("1-2 hours")
+    assert ranged.amount == 1
+    assert ranged.amount_hi == 2
+    assert ranged.unit == "hour"
+    assert ranged.is_range
+    assert format_node_time(ranged) == "1-2 hours"
+
+    with pytest.raises(ValueError, match="time range start"):
+        parse_node_time("3-1 hours")
+    with pytest.raises(ValueError, match="positive"):
+        parse_node_time("0 hours")
+
+
+def test_graph_validation_accepts_time_range(graph_payload) -> None:
+    payload = json.loads(json.dumps(graph_payload))
+    payload["nodes"][0]["time"] = "1-2 hours"
+    graph = FlowGraphDocument.model_validate(payload, strict=True)
+    assert graph.nodes[0].time == "1-2 hours"
 
 
 def test_graph_validation_rejects_process_without_responsible(graph_payload) -> None:

@@ -7,14 +7,23 @@ from typing import Any
 from pydiag.application import (
     CreateGraphSourceEdgeCommand,
     CreateGraphSourceNodeCommand,
+    CreateGraphSourceProcessCommand,
+    DeleteGraphSourceProcessCommand,
     FLOW_CANVAS_COMPONENT_KEY,
     DocumentsGateway,
     UpdateGraphSourceEdgeCommand,
+    UpdateGraphSourceProcessCommand,
     consume_history_action,
     consume_pending_canvas_edge,
     consume_pending_canvas_edge_edit,
+    consume_pending_canvas_edge_edits,
     consume_pending_canvas_node_create,
+    consume_pending_canvas_node_creates,
     consume_pending_canvas_node_edit,
+    consume_pending_canvas_node_edits,
+    consume_pending_canvas_process_create,
+    consume_pending_canvas_process_delete,
+    consume_pending_canvas_process_edit,
     detect_canvas_position_autosave,
 )
 from pydiag.application import (
@@ -357,6 +366,41 @@ class StreamlitAppRuntime:
             rerun=False,
         )
 
+    def _consume_pending_canvas_node_edits(
+        self,
+        graph: FlowGraphDocument,
+        wells: WellsDocument,
+    ) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_edits(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование карточек доступно только администратору.")
+            return
+        node_ids = pending.get("node_ids") or []
+        patch = dict(pending.get("patch") or {})
+        for node_id in node_ids:
+            current_graph, current_wells = session.load_app_data()
+            session.apply_canvas_node_edit(
+                current_graph,
+                current_wells,
+                {"node_id": node_id, **patch},
+                quiet=True,
+                record_history=True,
+                rerun=False,
+            )
+
     def _consume_pending_canvas_node_create(self, graph: FlowGraphDocument) -> None:
         session = self.session
         pending = consume_pending_canvas_node_create(
@@ -380,6 +424,8 @@ class StreamlitAppRuntime:
             if pending["kind"] in {"process", "decision_diamond"}
             else None
         )
+        if "responsible" in pending:
+            default_responsible = pending.get("responsible")
         session.create_graph_source_node(
             graph,
             CreateGraphSourceNodeCommand(
@@ -390,11 +436,81 @@ class StreamlitAppRuntime:
                 layout_w=pending["layout_w"],
                 layout_h=pending["layout_h"],
                 responsible=default_responsible,
+                participants=tuple(pending.get("participants") or ()),
+                duration=pending.get("duration"),
+                note=pending.get("note"),
+                duration_context=pending.get("duration_context"),
             ),
             quiet=True,
             record_history=True,
             rerun=False,
         )
+
+    def _consume_pending_canvas_node_creates(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_node_creates(
+            session.session_state,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Добавление карточек доступно только администратору.")
+            return
+        for item in pending.get("nodes") or []:
+            current_graph, _wells = session.load_app_data()
+            known = set(current_graph.responsibles)
+            kind = item["kind"]
+            responsible = item.get("responsible")
+            if responsible is not None and responsible not in known:
+                responsible = None
+            if responsible is None and kind in {"process", "decision_diamond"}:
+                responsible = "unassigned"
+            participants = tuple(
+                role
+                for role in (item.get("participants") or [])
+                if isinstance(role, str) and role in known and role != responsible
+            )
+            duration = item.get("duration")
+            if isinstance(duration, str):
+                duration = duration.strip() or None
+            else:
+                duration = None
+            note = item.get("note")
+            if isinstance(note, str):
+                note = note.strip() or None
+            else:
+                note = None
+            duration_context = item.get("duration_context")
+            if isinstance(duration_context, str):
+                duration_context = duration_context.strip() or None
+            else:
+                duration_context = None
+            session.create_graph_source_node(
+                current_graph,
+                CreateGraphSourceNodeCommand(
+                    title=item["title"],
+                    kind=kind,  # type: ignore[arg-type]
+                    layout_x=item["layout_x"],
+                    layout_y=item["layout_y"],
+                    layout_w=item["layout_w"],
+                    layout_h=item["layout_h"],
+                    responsible=responsible,
+                    participants=participants,
+                    duration=duration,
+                    note=note,
+                    duration_context=duration_context,
+                ),
+                quiet=True,
+                record_history=True,
+                rerun=False,
+            )
 
     def _consume_pending_canvas_edge_edit(self, graph: FlowGraphDocument) -> None:
         session = self.session
@@ -440,6 +556,153 @@ class StreamlitAppRuntime:
             quiet=True,
             record_history=True,
             before_snapshot=before,
+            rerun=False,
+        )
+
+    def _consume_pending_canvas_edge_edits(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_edge_edits(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование связей доступно только администратору.")
+            return
+        edge_ids = pending.get("edge_ids") or []
+        patch = dict(pending.get("patch") or {})
+        from pydiag.presentation.runtime_session import edge_snapshot_from_draft
+
+        for edge_id in edge_ids:
+            current_graph, _wells = session.load_app_data()
+            try:
+                draft = session.load_graph_source_edge(edge_id)
+            except Exception as exc:
+                self.st_module.error(f"Не удалось загрузить связь: {exc}")
+                continue
+            kind = patch.get("kind", draft.kind)
+            if kind not in {"default", "yes", "no", "dashed"}:
+                kind = draft.kind
+            before = edge_snapshot_from_draft(draft)
+            session.save_graph_source_edge(
+                current_graph,
+                UpdateGraphSourceEdgeCommand(
+                    edge_id=draft.edge_id,
+                    source=draft.source,
+                    target=draft.target,
+                    kind=kind,  # type: ignore[arg-type]
+                    label=draft.label,
+                    condition=draft.condition,
+                    note=draft.note,
+                    deleted=True if patch.get("deleted") is True else None,
+                ),
+                quiet=True,
+                record_history=True,
+                before_snapshot=before,
+                rerun=False,
+            )
+
+    def _consume_pending_canvas_process_create(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_process_create(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование процессов доступно только администратору.")
+            return
+        member_ids = pending.get("member_ids") or []
+        title = pending.get("title") or "Процесс"
+        session.create_graph_source_process(
+            graph,
+            CreateGraphSourceProcessCommand(
+                title=str(title),
+                node_ids=tuple(str(item) for item in member_ids),
+            ),
+            quiet=True,
+            rerun=False,
+        )
+
+    def _consume_pending_canvas_process_edit(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_process_edit(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование процессов доступно только администратору.")
+            return
+        process_id = pending.get("process_id")
+        if not isinstance(process_id, str) or not process_id:
+            return
+        title = pending.get("title")
+        member_ids = pending.get("member_ids")
+        session.update_graph_source_process(
+            graph,
+            UpdateGraphSourceProcessCommand(
+                process_id=process_id,
+                title=str(title) if isinstance(title, str) else None,
+                node_ids=(
+                    tuple(str(item) for item in member_ids)
+                    if isinstance(member_ids, list)
+                    else None
+                ),
+            ),
+            quiet=True,
+            rerun=False,
+        )
+
+    def _consume_pending_canvas_process_delete(self, graph: FlowGraphDocument) -> None:
+        session = self.session
+        pending = consume_pending_canvas_process_delete(
+            session.session_state,
+            graph=graph,
+            component_key=FLOW_CANVAS_COMPONENT_KEY,
+        )
+        if pending is None:
+            return
+        if not session.graph_source_edit_available():
+            self.st_module.error(
+                session.graph_source_edit_block_reason()
+                or "Редактирование схемы сейчас недоступно."
+            )
+            return
+        if not self.auth_context().current_user_is_admin():
+            self.st_module.error("Редактирование процессов доступно только администратору.")
+            return
+        process_id = pending.get("process_id")
+        if not isinstance(process_id, str) or not process_id:
+            return
+        session.delete_graph_source_process(
+            graph,
+            DeleteGraphSourceProcessCommand(process_id=process_id),
+            quiet=True,
             rerun=False,
         )
 
@@ -532,8 +795,14 @@ class StreamlitAppRuntime:
                     self._consume_history_action(graph)
                     self._consume_pending_canvas_edge(graph)
                     self._consume_pending_canvas_node_create(graph)
+                    self._consume_pending_canvas_node_creates(graph)
                     self._consume_pending_canvas_node_edit(graph, wells)
+                    self._consume_pending_canvas_node_edits(graph, wells)
                     self._consume_pending_canvas_edge_edit(graph)
+                    self._consume_pending_canvas_edge_edits(graph)
+                    self._consume_pending_canvas_process_create(graph)
+                    self._consume_pending_canvas_process_edit(graph)
+                    self._consume_pending_canvas_process_delete(graph)
                     # Consumes may have bumped graph.version — refresh before autosave.
                     graph, wells = session.load_app_data()
                     self._autosave_canvas_positions(
