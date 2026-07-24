@@ -103,6 +103,46 @@ def test_flow_canvas_supports_ctrl_multiselect_and_group_drag() -> None:
     assert "for (const id of state.draggingNodeIds)" in js
 
 
+def test_flow_canvas_keeps_node_drag_alive_when_position_edit_is_toggled() -> None:
+    js = _asset_text("flow_canvas.js")
+
+    patch_start = js.index("function patchNodeElement(state, node)")
+    patch_fn = js[patch_start : js.index("function patchEdgeElement", patch_start)]
+    build_start = js.index("function buildNodeElement(state, node)")
+    build_fn = js[build_start : js.index("function requestNodeEditId", build_start)]
+    drag_sync_start = js.index("function syncNodeDragInteraction(state, node, card)")
+    drag_sync_fn = js[
+        drag_sync_start : js.index("function buildNodeElement(state, node)", drag_sync_start)
+    ]
+    drag_start = js.index("function startNodeDrag(event, state, nodeId)")
+    drag_fn = js[drag_start : js.index("function resolveDragNodeIds", drag_start)]
+
+    assert "syncNodeDragInteraction(state, node, elements.card);" in patch_fn
+    assert "syncNodeDragInteraction(state, node, card);" in build_fn
+    assert "card.classList.toggle(\"is-draggable\", draggable);" in drag_sync_fn
+    assert "card.dataset.dragHandlersAttached" in drag_sync_fn
+    assert "const currentNode = state.nodePayloadsById.get(node.id);" in drag_sync_fn
+    assert "if (!canDragNode(state, currentNode))" in drag_sync_fn
+    assert "const node = state.nodePayloadsById.get(nodeId);" in drag_fn
+    assert "if (!canDragNode(state, node))" in drag_fn
+
+
+def test_flow_canvas_commits_positions_only_after_real_node_drag() -> None:
+    js = _asset_text("flow_canvas.js")
+    drag_start = js.index("function startNodeDrag(event, state, nodeId)")
+    drag_fn = js[drag_start : js.index("function resolveDragNodeIds", drag_start)]
+
+    assert "let positionsChanged = false;" in drag_fn
+    assert "positionsChanged = true;" in drag_fn
+    assert "pointerCaptureTarget.setPointerCapture(event.pointerId);" in drag_fn
+    assert "pointerCaptureTarget.releasePointerCapture(stopEvent?.pointerId);" in drag_fn
+    assert (
+        "positionsChanged\n"
+        "      && state.component\n"
+        "      && typeof state.component.setStateValue === \"function\""
+    ) in drag_fn
+
+
 def test_flow_canvas_resets_positions_version_on_session_epoch_change() -> None:
     js = _asset_text("flow_canvas.js")
 

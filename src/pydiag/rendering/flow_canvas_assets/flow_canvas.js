@@ -1261,6 +1261,7 @@ function patchNodeElement(state, node) {
   if (node.style) {
     applyStyles(elements.card, node.style);
   }
+  syncNodeDragInteraction(state, node, elements.card);
   let rail = elements.shell.querySelector(".flow-node-top-rail");
   const hasBadges = Boolean(node.time_badge)
     || (Array.isArray(node.responsible_badges) && node.responsible_badges.length > 0);
@@ -1424,6 +1425,38 @@ function buildEdgeElement(state, edge) {
   state.edgeElements.set(edge.id, elements);
 }
 
+function canDragNode(state, node) {
+  return Boolean(node && node.draggable && state.payload?.position_edit_enabled);
+}
+
+function syncNodeDragInteraction(state, node, card) {
+  const draggable = canDragNode(state, node);
+  card.classList.toggle("is-draggable", draggable);
+  if (card.dataset.dragHandlersAttached === "true") {
+    return;
+  }
+  card.dataset.dragHandlersAttached = "true";
+  card.addEventListener("pointerdown", (event) => {
+    const currentNode = state.nodePayloadsById.get(node.id);
+    if (!canDragNode(state, currentNode)) {
+      return;
+    }
+    if (state.editingTitleNodeId === node.id) {
+      return;
+    }
+    if (event.target?.closest?.(".flow-node-text.is-editing")) {
+      return;
+    }
+    startNodeDrag(event, state, node.id);
+  });
+  card.addEventListener("contextmenu", (event) => {
+    const currentNode = state.nodePayloadsById.get(node.id);
+    if (canDragNode(state, currentNode)) {
+      event.preventDefault();
+    }
+  });
+}
+
 function buildNodeElement(state, node) {
   const shell = createElement("div", "flow-node-shell", state.dom.nodesLayer);
   shell.style.width = `${node.size.w}px`;
@@ -1450,14 +1483,12 @@ function buildNodeElement(state, node) {
   if (typeof node.kind === "string" && node.kind) {
     card.classList.add(`is-${node.kind.replaceAll("_", "-")}`);
   }
-  if (node.draggable && state.payload.position_edit_enabled) {
-    card.classList.add("is-draggable");
-  }
   if (state.draggingNodeIds.includes(node.id) || state.draggingNodeId === node.id) {
     card.classList.add("is-dragging");
   }
   applyStyles(card, node.style);
   card.dataset.nodeId = node.id;
+  syncNodeDragInteraction(state, node, card);
   card.addEventListener("click", (event) => {
     event.stopPropagation();
     if (state.suppressNextNodeClick) {
@@ -1478,21 +1509,6 @@ function buildNodeElement(state, node) {
     }
     selectId(state, node.id, { additive: isMultiSelectModifier(event) });
   });
-  if (node.draggable && state.payload.position_edit_enabled) {
-    card.addEventListener("pointerdown", (event) => {
-      if (state.editingTitleNodeId === node.id) {
-        return;
-      }
-      if (event.target?.closest?.(".flow-node-text.is-editing")) {
-        return;
-      }
-      startNodeDrag(event, state, node.id);
-    });
-    card.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-    });
-  }
-
   const content = createElement("span", "flow-node-content", card);
   const text = createElement("span", "flow-node-text", content);
   text.textContent = node.text;
@@ -4081,6 +4097,10 @@ function startNodeDrag(event, state, nodeId) {
   if (event.button !== 0 || state.spacePanHeld) {
     return;
   }
+  const node = state.nodePayloadsById.get(nodeId);
+  if (!canDragNode(state, node)) {
+    return;
+  }
   event.preventDefault();
   event.stopPropagation();
   clearSelection(state.ownerDocument);
@@ -4111,12 +4131,21 @@ function startNodeDrag(event, state, nodeId) {
   destroyEditHud(state);
   const start = { x: event.clientX, y: event.clientY };
   let dragDistancePx = 0;
+  let positionsChanged = false;
   const ownerDocument = state.ownerDocument;
   const previousUserSelect = ownerDocument.body ? ownerDocument.body.style.userSelect : "";
   const previousCursor = ownerDocument.body ? ownerDocument.body.style.cursor : "";
+  const pointerCaptureTarget = event.currentTarget;
   if (ownerDocument.body) {
     ownerDocument.body.style.userSelect = "none";
     ownerDocument.body.style.cursor = "grabbing";
+  }
+  if (pointerCaptureTarget && typeof pointerCaptureTarget.setPointerCapture === "function") {
+    try {
+      pointerCaptureTarget.setPointerCapture(event.pointerId);
+    } catch (_error) {
+      // Document listeners below remain the fallback.
+    }
   }
   const move = (moveEvent) => {
     moveEvent.preventDefault();
@@ -4145,13 +4174,21 @@ function startNodeDrag(event, state, nodeId) {
     if (!changed) {
       return;
     }
+    positionsChanged = true;
     state.positionsVersion += 1;
     queueRender(state);
   };
-  const stop = () => {
+  const stop = (stopEvent) => {
     ownerDocument.removeEventListener("pointermove", move);
     ownerDocument.removeEventListener("pointerup", stop);
     ownerDocument.removeEventListener("pointercancel", stop);
+    if (pointerCaptureTarget && typeof pointerCaptureTarget.releasePointerCapture === "function") {
+      try {
+        pointerCaptureTarget.releasePointerCapture(stopEvent?.pointerId);
+      } catch (_error) {
+        // Pointer capture may already be gone after cancel/up outside the card.
+      }
+    }
     if (ownerDocument.body) {
       ownerDocument.body.style.userSelect = previousUserSelect;
       ownerDocument.body.style.cursor = previousCursor;
@@ -4162,7 +4199,13 @@ function startNodeDrag(event, state, nodeId) {
     }
     state.draggingNodeId = null;
     state.draggingNodeIds = [];
-    state.component.setStateValue("positions", copyPositionMap(state.positions));
+    if (
+      positionsChanged
+      && state.component
+      && typeof state.component.setStateValue === "function"
+    ) {
+      state.component.setStateValue("positions", copyPositionMap(state.positions));
+    }
     syncSelectionEditHud(state);
     queueRender(state);
   };
