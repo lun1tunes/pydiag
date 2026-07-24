@@ -363,10 +363,12 @@ def test_create_and_delete_flow_source_process() -> None:
     from pydiag.common.graph_source_admin import (
         CreateGraphSourceProcessCommand,
         DeleteGraphSourceProcessCommand,
+        UpdateGraphSourceProcessCommand,
     )
     from pydiag.infrastructure.flow_source_graph import (
         create_flow_source_payload_process,
         delete_flow_source_payload_process,
+        update_flow_source_payload_process,
     )
 
     payload = valid_flow_source_payload()
@@ -392,3 +394,107 @@ def test_create_and_delete_flow_source_process() -> None:
     )
     assert deleted["version"] == 9
     assert "block_podgotovka" not in deleted.get("processes", {})
+
+
+def test_update_process_empty_membership_deletes_process() -> None:
+    from pydiag.common.graph_source_admin import (
+        CreateGraphSourceProcessCommand,
+        UpdateGraphSourceProcessCommand,
+    )
+    from pydiag.infrastructure.flow_source_graph import (
+        create_flow_source_payload_process,
+        update_flow_source_payload_process,
+    )
+
+    payload = valid_flow_source_payload()
+    created = create_flow_source_payload_process(
+        payload,
+        command=CreateGraphSourceProcessCommand(
+            title="Блок",
+            node_ids=("review_data", "data_complete"),
+            process_id="block_test",
+        ),
+        expected_version=7,
+    )
+    emptied = update_flow_source_payload_process(
+        created,
+        command=UpdateGraphSourceProcessCommand(
+            process_id="block_test",
+            node_ids=(),
+        ),
+        expected_version=8,
+    )
+    assert "block_test" not in emptied.get("processes", {})
+    assert emptied["version"] == 9
+
+
+def test_create_process_claims_members_and_deletes_emptied_donor() -> None:
+    from pydiag.common.graph_source_admin import CreateGraphSourceProcessCommand
+    from pydiag.infrastructure.flow_source_graph import create_flow_source_payload_process
+
+    payload = valid_flow_source_payload()
+    payload["processes"] = {
+        "donor": {
+            "title": "Донор",
+            "node_ids": ["review_data", "data_complete"],
+        }
+    }
+    created = create_flow_source_payload_process(
+        payload,
+        command=CreateGraphSourceProcessCommand(
+            title="Новый",
+            node_ids=("review_data", "data_complete"),
+            process_id="block_new",
+        ),
+        expected_version=7,
+    )
+    assert "donor" not in created["processes"]
+    assert created["processes"]["block_new"]["node_ids"] == [
+        "review_data",
+        "data_complete",
+    ]
+
+
+def test_soft_delete_node_removes_from_process_and_prunes_empty() -> None:
+    from pydiag.common.graph_source_admin import (
+        CreateGraphSourceProcessCommand,
+        UpdateGraphSourceNodeCommand,
+    )
+    from pydiag.infrastructure.flow_source_graph import (
+        create_flow_source_payload_process,
+        update_flow_source_payload_node,
+    )
+
+    payload = valid_flow_source_payload()
+    created = create_flow_source_payload_process(
+        payload,
+        command=CreateGraphSourceProcessCommand(
+            title="Один",
+            node_ids=("review_data",),
+            process_id="block_one",
+        ),
+        expected_version=7,
+    )
+    node = created["nodes"]["review_data"]
+    layout = created["layout"]["review_data"]
+    soft_deleted = update_flow_source_payload_node(
+        created,
+        command=UpdateGraphSourceNodeCommand(
+            node_id="review_data",
+            title=node["title"],
+            kind=node["kind"],
+            layout_x=layout["x"],
+            layout_y=layout["y"],
+            layout_w=layout["w"],
+            layout_h=layout["h"],
+            responsible=node.get("responsible"),
+            participants=tuple(node.get("participants") or []),
+            approvers=tuple(node.get("approvers") or []),
+            duration=node.get("duration"),
+            note=node.get("note"),
+            duration_context=node.get("duration_context"),
+            deleted=True,
+        ),
+        expected_version=8,
+    )
+    assert "block_one" not in soft_deleted.get("processes", {})

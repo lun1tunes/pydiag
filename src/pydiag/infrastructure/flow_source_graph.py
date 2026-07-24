@@ -991,8 +991,14 @@ def remove_nodes_from_processes(
         return
     for process_id, process in list(document.processes.items()):
         filtered = [node_id for node_id in process.node_ids if node_id not in node_ids]
-        if filtered != process.node_ids:
-            document.processes[process_id] = process.model_copy(update={"node_ids": filtered})
+        if filtered == process.node_ids:
+            continue
+        if not filtered:
+            del document.processes[process_id]
+        else:
+            document.processes[process_id] = process.model_copy(
+                update={"node_ids": filtered}
+            )
 
 
 def claim_nodes_for_process(
@@ -1096,6 +1102,10 @@ def update_flow_source_payload_process(
             process_id=command.process_id,
             node_ids=list(command.node_ids),
         )
+        if not node_ids:
+            # Empty membership deletes the process frame (cards remain).
+            del updated.processes[command.process_id]
+            return updated.model_dump(mode="json")
     updated.processes[command.process_id] = FlowSourceProcess(
         title=title,
         node_ids=node_ids,

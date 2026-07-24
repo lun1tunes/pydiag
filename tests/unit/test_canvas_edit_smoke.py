@@ -116,7 +116,14 @@ def _gateway(graph_path: Path, wells_path: Path, source_path: Path):
     return Gateway()
 
 
+def _assert_no_remount(st_module: FakeStreamlitModule, *, before: int) -> None:
+    """Production canvas consumes pass rerun=False — zero remounts."""
+    assert st_module.reruns == before
+    assert "app" not in st_module.rerun_scopes[before:]
+
+
 def _assert_fragment_only(st_module: FakeStreamlitModule, *, before: int) -> None:
+    """quiet=True + default rerun=True remounts fragment only (never app)."""
     assert st_module.reruns == before + 1
     assert st_module.rerun_scopes[-1] == "fragment"
     assert "app" not in st_module.rerun_scopes[before:]
@@ -171,7 +178,7 @@ def test_canvas_edit_menu_js_covers_every_action() -> None:
     assert ".flow-edit-confirm__message" in css
 
 
-def test_smoke_all_node_edit_buttons_use_fragment_rerun(tmp_path: Path) -> None:
+def test_smoke_all_node_edit_buttons_use_no_remount(tmp_path: Path) -> None:
     graph_path, wells_path, source_path = _prepare_workspace(tmp_path)
     st_module = FakeStreamlitModule()
     st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY] = 7
@@ -208,10 +215,11 @@ def test_smoke_all_node_edit_buttons_use_fragment_rerun(tmp_path: Path) -> None:
             {"node_id": node_id, **patch},
             quiet=True,
             record_history=True,
+            rerun=False,
         )
         assert ok is True, f"{field} failed: {st_module.errors}"
         assert st_module.errors == []
-        _assert_fragment_only(st_module, before=before)
+        _assert_no_remount(st_module, before=before)
         assert st_module.session_state.get("selected_id") == node_id
         assert int(st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY]) == epoch_before
 
@@ -223,6 +231,27 @@ def test_smoke_all_node_edit_buttons_use_fragment_rerun(tmp_path: Path) -> None:
     assert node["participants"] == ["planning"]
     assert node["duration"] == "45 minutes"
     assert node["note"] == "smoke note"
+
+
+def test_smoke_quiet_edit_defaults_to_fragment_not_app(tmp_path: Path) -> None:
+    """Inspector-style quiet=True (rerun default) must never app-remount."""
+    graph_path, wells_path, source_path = _prepare_workspace(tmp_path)
+    st_module = FakeStreamlitModule()
+    coordinator = StreamlitSessionCoordinator(
+        st_module,
+        _gateway(graph_path, wells_path, source_path),  # type: ignore[arg-type]
+    )
+    graph, wells = coordinator.load_app_data(force=True)
+    before = st_module.reruns
+    ok = coordinator.apply_canvas_node_edit(
+        graph,
+        wells,
+        {"node_id": "proc_initial_review", "title": "Fragment only"},
+        quiet=True,
+        record_history=True,
+    )
+    assert ok is True
+    _assert_fragment_only(st_module, before=before)
 
 
 def test_smoke_pending_node_edit_consume_path_for_each_field(documents, tmp_path: Path) -> None:
@@ -261,10 +290,10 @@ def test_smoke_pending_node_edit_consume_path_for_each_field(documents, tmp_path
         pending = consume_pending_canvas_node_edit(st_module.session_state, graph=graph)
         assert pending is not None
         ok = coordinator.apply_canvas_node_edit(
-            graph, wells, pending, quiet=True, record_history=True
+            graph, wells, pending, quiet=True, record_history=True, rerun=False
         )
         assert ok is True
-        _assert_fragment_only(st_module, before=before)
+        _assert_no_remount(st_module, before=before)
         assert int(st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY]) == epoch_before
         _ = runtime  # keep wiring import used for parity with production runtime class
 
@@ -278,7 +307,7 @@ def test_smoke_pending_node_edit_consume_path_for_each_field(documents, tmp_path
     assert node["note"] == "via pending"
 
 
-def test_smoke_edge_kind_and_delete_use_fragment_rerun(tmp_path: Path) -> None:
+def test_smoke_edge_kind_and_delete_use_no_remount(tmp_path: Path) -> None:
     graph_path, wells_path, source_path = _prepare_workspace(tmp_path)
     st_module = FakeStreamlitModule()
     st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY] = 11
@@ -306,9 +335,10 @@ def test_smoke_edge_kind_and_delete_use_fragment_rerun(tmp_path: Path) -> None:
             note=draft.note,
         ),
         quiet=True,
+        rerun=False,
     )
     assert ok is True
-    _assert_fragment_only(st_module, before=before)
+    _assert_no_remount(st_module, before=before)
     assert int(st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY]) == epoch_before
 
     # pending_edge_edit consume path (kind)
@@ -336,9 +366,10 @@ def test_smoke_edge_kind_and_delete_use_fragment_rerun(tmp_path: Path) -> None:
             note=draft.note,
         ),
         quiet=True,
+        rerun=False,
     )
     assert ok is True
-    _assert_fragment_only(st_module, before=before)
+    _assert_no_remount(st_module, before=before)
 
     saved = load_structured_payload(source_path.read_bytes())
     transition = next(
@@ -365,9 +396,10 @@ def test_smoke_edge_kind_and_delete_use_fragment_rerun(tmp_path: Path) -> None:
             deleted=True,
         ),
         quiet=True,
+        rerun=False,
     )
     assert ok is True
-    _assert_fragment_only(st_module, before=before)
+    _assert_no_remount(st_module, before=before)
     assert st_module.session_state.get("selected_id") is None
     assert int(st_module.session_state[FLOW_CANVAS_SESSION_EPOCH_KEY]) == epoch_before
 

@@ -146,6 +146,7 @@ function createCanvasState(root, component, ownerDocument) {
     pendingResponsibleFilter: undefined,
     lastHostResponsibleFilter: [],
     sessionEpoch: null,
+    renderedFilterDimSignature: null,
     isPanning: false,
     isMarqueeSelecting: false,
     draggingNodeId: null,
@@ -438,6 +439,7 @@ function syncStateFromPayload(state) {
       state.renderedSelectedId = null;
       state.renderedSelectedNodeIds = new Set();
       state.renderedSelectedEdgeIds = new Set();
+      state.renderedFilterDimSignature = null;
       state.responsibleFilter = [];
       state.pendingResponsibleFilter = undefined;
       state.lastHostResponsibleFilter = [];
@@ -484,6 +486,12 @@ function syncStateFromPayload(state) {
       }
     }
     state.selectedEdgeIds = retainedEdges;
+  }
+  if (state.selectedProcessId) {
+    const processes = Array.isArray(payload.processes) ? payload.processes : [];
+    if (!processes.some((item) => item && item.id === state.selectedProcessId)) {
+      state.selectedProcessId = null;
+    }
   }
 
   if ((graphChanged || state.draggingNodeId === null) && !samePositionMaps(state.positions, nextPositions)) {
@@ -618,15 +626,16 @@ function renderState(state) {
     const positionsChanged = state.renderedPositionsVersion !== state.positionsVersion;
     const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;
     if (positionsChanged) {
+      const dragging = state.draggingNodeIds.length > 0 || state.draggingNodeId;
       if (state.draggingNodeIds.length) {
         for (const nodeId of state.draggingNodeIds) {
           updateDraggedNode(state, nodeId);
         }
         // Keep wires glued to cards while dragging (before save / server rebuild).
-        updateEdgeGeometry(state);
+        updateEdgeGeometry(state, state.draggingNodeIds);
       } else if (state.draggingNodeId) {
         updateDraggedNode(state, state.draggingNodeId);
-        updateEdgeGeometry(state);
+        updateEdgeGeometry(state, [state.draggingNodeId]);
       } else {
         updateNodePositions(state);
         updateMinimapNodePositions(state);
@@ -634,7 +643,10 @@ function renderState(state) {
       }
       state.renderedPositionsVersion = state.positionsVersion;
       state.renderedEdgeGeometryVersion = state.edgeGeometryVersion;
-      layoutAllNodeNotes(state);
+      // Note collision is expensive O(n²); skip mid-drag (notes follow shells).
+      if (!dragging) {
+        layoutAllNodeNotes(state);
+      }
       syncProcessFrames(state);
     } else if (edgeGeometryChanged) {
       // Same revision + same live positions, but host re-routed edges
@@ -1036,6 +1048,18 @@ function syncResponsibleFilterDim(state) {
   if (!state.payload || !Array.isArray(state.payload.nodes)) {
     return;
   }
+  const filterKeys = normalizeResponsibleFilter(state.responsibleFilter);
+  const search = String(state.payload.search || "");
+  const signature = [
+    state.payload.revision,
+    search,
+    filterKeys.join("\0"),
+    state.sceneTopologySignature || "",
+  ].join("|");
+  if (state.renderedFilterDimSignature === signature) {
+    return;
+  }
+  state.renderedFilterDimSignature = signature;
   const activeIds = new Set();
   for (const node of state.payload.nodes) {
     const active = node.active !== false && nodeMatchesClientFilters(node, state);
@@ -1155,6 +1179,7 @@ function syncMinimapGeometry(state) {
 function clearScene(state) {
   closeActiveEditPopover(state);
   destroyEditHud(state);
+  state.renderedFilterDimSignature = null;
   state.dom.defs.replaceChildren();
   state.dom.edgeLayer.replaceChildren();
   state.dom.labelsLayer.replaceChildren();
@@ -2750,7 +2775,11 @@ function openAssignToProcessPopover(state, nodeIds, anchor) {
       const nextMembers = (current.member_ids || []).filter(
         (id) => !nodeIds.includes(id),
       );
-      commitProcessEdit(state, current.id, { member_ids: nextMembers });
+      if (!nextMembers.length) {
+        commitProcessDelete(state, current.id);
+      } else {
+        commitProcessEdit(state, current.id, { member_ids: nextMembers });
+      }
     });
   }
 
@@ -2977,11 +3006,16 @@ function updateNodePositions(state) {
     }
     syncNodeShellPosition(elements.shell, state.positions[node.id] || node.position);
   }
-  syncProcessFrames(state);
 }
 
-function updateEdgeGeometry(state) {
+function updateEdgeGeometry(state, nodeIds = null) {
+  const touch = Array.isArray(nodeIds) && nodeIds.length
+    ? new Set(nodeIds)
+    : null;
   for (const edge of state.payload.edges || []) {
+    if (touch && !touch.has(edge.source) && !touch.has(edge.target)) {
+      continue;
+    }
     const elements = state.edgeElements.get(edge.id);
     if (!elements || !Array.isArray(edge.points) || edge.points.length < 2) {
       continue;
@@ -3005,6 +3039,9 @@ function updateEdgeGeometry(state) {
   for (const path of state.dom.minimapEdgeLayer.querySelectorAll("[data-edge-id]")) {
     const edge = state.edgePayloadsById.get(path.dataset.edgeId);
     if (!edge || !Array.isArray(edge.points) || edge.points.length < 2) {
+      continue;
+    }
+    if (touch && !touch.has(edge.source) && !touch.has(edge.target)) {
       continue;
     }
     path.setAttribute("d", roundedPath(liveEdgePoints(state, edge)));
@@ -4064,6 +4101,11 @@ function startNodeDrag(event, state, nodeId) {
   if (!origins[nodeId]) {
     return;
   }
+  // Dragging a card outside the current multi-select replaces selection,
+  // otherwise a stale multi-set would remain after suppressNextNodeClick.
+  if (!state.selectedNodeIds.has(nodeId)) {
+    selectId(state, nodeId, { additive: false });
+  }
   state.draggingNodeId = nodeId;
   state.draggingNodeIds = Object.keys(origins);
   destroyEditHud(state);
@@ -4138,7 +4180,7 @@ function resolveDragNodeIds(state, nodeId) {
 }
 
 function isMultiSelectModifier(event) {
-  return Boolean(event && (event.ctrlKey || event.metaKey));
+  return Boolean(event && (event.ctrlKey || event.metaKey || event.shiftKey));
 }
 
 function isNodeSelected(state, nodeId) {
@@ -4783,6 +4825,10 @@ function selectId(state, value, options = {}) {
 }
 
 function setSelectionSets(state, primaryId, nextNodeIds, nextEdgeIds) {
+  if (state.selectedProcessId) {
+    state.selectedProcessId = null;
+    syncProcessFrames(state);
+  }
   const previousSelectedId = state.selectedId;
   const previousSelectedNodeIds = new Set(state.selectedNodeIds);
   const previousSelectedEdgeIds = new Set(state.selectedEdgeIds);

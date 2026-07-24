@@ -12,6 +12,10 @@ CommandKind = Literal[
     "delete_node",
     "update_edge",
     "delete_edge",
+    "batch",
+    "create_process",
+    "update_process",
+    "delete_process",
 ]
 
 EDIT_UNDO_KEY = "_flow_edit_undo"
@@ -31,13 +35,17 @@ __all__ = [
     "peek_undo",
     "pop_redo",
     "pop_undo",
+    "push_batch_command",
     "push_create_edge_command",
     "push_create_node_command",
+    "push_create_process_command",
     "push_delete_edge_command",
     "push_delete_node_command",
+    "push_delete_process_command",
     "push_move_nodes_command",
     "push_update_edge_command",
     "push_update_node_command",
+    "push_update_process_command",
 ]
 
 
@@ -218,6 +226,79 @@ def push_delete_edge_command(
         {
             "kind": "delete_edge",
             "edge_id": edge_id,
+            "before": dict(before),
+        },
+    )
+
+
+def push_batch_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    commands: list[dict[str, Any]],
+) -> None:
+    """Push one undo step for a bulk canvas action (delete/edit many)."""
+    steps = [dict(item) for item in commands if isinstance(item, dict) and item.get("kind")]
+    if not steps:
+        return
+    if len(steps) == 1:
+        _push(session_state, steps[0])
+        return
+    _push(
+        session_state,
+        {
+            "kind": "batch",
+            "commands": steps,
+        },
+    )
+
+
+def push_create_process_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    process_id: str,
+    after: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "create_process",
+            "process_id": process_id,
+            "after": dict(after),
+        },
+    )
+
+
+def push_update_process_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    process_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    if before == after:
+        return
+    _push(
+        session_state,
+        {
+            "kind": "update_process",
+            "process_id": process_id,
+            "before": dict(before),
+            "after": dict(after),
+        },
+    )
+
+
+def push_delete_process_command(
+    session_state: MutableMapping[str, Any],
+    *,
+    process_id: str,
+    before: Mapping[str, Any],
+) -> None:
+    _push(
+        session_state,
+        {
+            "kind": "delete_process",
+            "process_id": process_id,
             "before": dict(before),
         },
     )

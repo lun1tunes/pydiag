@@ -28,15 +28,19 @@ from pydiag.application.edit_history import (
     can_undo,
     pop_redo,
     pop_undo,
+    push_batch_command,
     push_create_edge_command,
     push_create_node_command,
+    push_create_process_command,
     push_delete_edge_command,
     push_delete_node_command,
+    push_delete_process_command,
     push_move_nodes_command,
     push_onto_undo_from_redo,
     push_onto_undo_keep_redo,
     push_update_edge_command,
     push_update_node_command,
+    push_update_process_command,
 )
 from pydiag.application.flow_position_edit import graph_node_positions
 from pydiag.application import (
@@ -245,6 +249,8 @@ class StreamlitSessionCoordinator:
         graph: FlowGraphDocument,
         expected_version: int,
         success_message: str,
+        quiet: bool = False,
+        rerun: bool = True,
     ) -> None:
         if not self.wells_edit_available():
             self.st_module.error(
@@ -264,7 +270,12 @@ class StreamlitSessionCoordinator:
             reload_data=self.load_app_data,
             success_message=success_message,
         )
-        self.finalize_persistence(result.should_rerun, result.error_message)
+        self.finalize_persistence(
+            result.should_rerun,
+            result.error_message,
+            scope="fragment" if quiet else "app",
+            rerun=rerun,
+        )
 
     def save_graph_positions(
         self,
@@ -348,6 +359,12 @@ class StreamlitSessionCoordinator:
             )
             return False
 
+        process_side_effects: list[dict[str, Any]] = []
+        if command.deleted is True:
+            process_side_effects = process_claim_side_effect_commands(
+                graph,
+                claimed_node_ids={command.node_id},
+            )
         result = persist_graph_document_update(
             self.session_state,
             save=lambda: self.documents_gateway.save_graph_source_node(
@@ -368,11 +385,22 @@ class StreamlitSessionCoordinator:
         )
         if record_history and result.saved and before_snapshot is not None:
             if command.deleted is True:
-                push_delete_node_command(
-                    self.session_state,
-                    node_id=command.node_id,
-                    before=before_snapshot,
-                )
+                delete_step = {
+                    "kind": "delete_node",
+                    "node_id": command.node_id,
+                    "before": before_snapshot,
+                }
+                if process_side_effects:
+                    push_batch_command(
+                        self.session_state,
+                        commands=[*process_side_effects, delete_step],
+                    )
+                else:
+                    push_delete_node_command(
+                        self.session_state,
+                        node_id=command.node_id,
+                        before=before_snapshot,
+                    )
             else:
                 push_update_node_command(
                     self.session_state,
@@ -729,14 +757,18 @@ class StreamlitSessionCoordinator:
         command: CreateGraphSourceProcessCommand,
         *,
         quiet: bool = False,
+        record_history: bool = True,
         rerun: bool = True,
-    ) -> bool:
+    ) -> str | None:
         if not self.graph_source_edit_available():
             self.st_module.error(
                 self.graph_source_edit_block_reason()
                 or "Редактирование схемы сейчас недоступно."
             )
-            return False
+            return None
+
+        before_ids = set(graph.processes)
+        created_process_id: str | None = None
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.create_graph_source_process(
@@ -751,13 +783,51 @@ class StreamlitSessionCoordinator:
             reload_data=self.load_app_data,
             success_message=None if quiet else "Процесс создан",
         )
+        claimed = {str(node_id) for node_id in command.node_ids}
+        side_effects = process_claim_side_effect_commands(
+            graph,
+            claimed_node_ids=claimed,
+        )
+        if result.saved:
+            updated, _ = self.load_app_data()
+            new_ids = set(updated.processes) - before_ids
+            if command.process_id and command.process_id in updated.processes:
+                created_process_id = command.process_id
+            elif len(new_ids) == 1:
+                created_process_id = next(iter(new_ids))
+            elif new_ids:
+                title = command.title.strip()
+                for process_id, process in updated.processes.items():
+                    if process_id in new_ids and process.title == title:
+                        created_process_id = process_id
+                        break
+                if created_process_id is None:
+                    created_process_id = sorted(new_ids)[0]
+            if record_history and created_process_id:
+                process = updated.processes[created_process_id]
+                create_step = {
+                    "kind": "create_process",
+                    "process_id": created_process_id,
+                    "after": process_snapshot(process),
+                }
+                if side_effects:
+                    push_batch_command(
+                        self.session_state,
+                        commands=[*side_effects, create_step],
+                    )
+                else:
+                    push_create_process_command(
+                        self.session_state,
+                        process_id=created_process_id,
+                        after=create_step["after"],
+                    )
         self.finalize_persistence(
             result.should_rerun,
             result.error_message,
             scope="fragment" if quiet else "app",
             rerun=rerun,
         )
-        return result.saved
+        return created_process_id if result.saved else None
 
     def update_graph_source_process(
         self,
@@ -765,6 +835,7 @@ class StreamlitSessionCoordinator:
         command: UpdateGraphSourceProcessCommand,
         *,
         quiet: bool = False,
+        record_history: bool = True,
         rerun: bool = True,
     ) -> bool:
         if not self.graph_source_edit_available():
@@ -773,6 +844,11 @@ class StreamlitSessionCoordinator:
                 or "Редактирование схемы сейчас недоступно."
             )
             return False
+        current = graph.processes.get(command.process_id)
+        if current is None:
+            self.st_module.error(f"Неизвестный процесс: {command.process_id}")
+            return False
+        before = process_snapshot(current)
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.update_graph_source_process(
@@ -787,6 +863,56 @@ class StreamlitSessionCoordinator:
             reload_data=self.load_app_data,
             success_message=None if quiet else "Процесс обновлён",
         )
+        side_effects: list[dict[str, Any]] = []
+        if command.node_ids is not None:
+            side_effects = process_claim_side_effect_commands(
+                graph,
+                claimed_node_ids={str(node_id) for node_id in command.node_ids},
+                exclude_process_id=command.process_id,
+            )
+        if result.saved and record_history:
+            updated, _ = self.load_app_data()
+            after_process = updated.processes.get(command.process_id)
+            steps = list(side_effects)
+            if after_process is None:
+                # Membership emptied → process deleted.
+                steps.append(
+                    {
+                        "kind": "delete_process",
+                        "process_id": command.process_id,
+                        "before": before,
+                    }
+                )
+            else:
+                after = process_snapshot(after_process)
+                if before != after:
+                    steps.append(
+                        {
+                            "kind": "update_process",
+                            "process_id": command.process_id,
+                            "before": before,
+                            "after": after,
+                        }
+                    )
+            if len(steps) == 1:
+                step = steps[0]
+                if step["kind"] == "delete_process":
+                    push_delete_process_command(
+                        self.session_state,
+                        process_id=str(step["process_id"]),
+                        before=step["before"],
+                    )
+                elif step["kind"] == "update_process":
+                    push_update_process_command(
+                        self.session_state,
+                        process_id=str(step["process_id"]),
+                        before=step["before"],
+                        after=step["after"],
+                    )
+                else:
+                    push_batch_command(self.session_state, commands=steps)
+            elif steps:
+                push_batch_command(self.session_state, commands=steps)
         self.finalize_persistence(
             result.should_rerun,
             result.error_message,
@@ -801,6 +927,7 @@ class StreamlitSessionCoordinator:
         command: DeleteGraphSourceProcessCommand,
         *,
         quiet: bool = False,
+        record_history: bool = True,
         rerun: bool = True,
     ) -> bool:
         if not self.graph_source_edit_available():
@@ -809,6 +936,11 @@ class StreamlitSessionCoordinator:
                 or "Редактирование схемы сейчас недоступно."
             )
             return False
+        current = graph.processes.get(command.process_id)
+        if current is None:
+            self.st_module.error(f"Неизвестный процесс: {command.process_id}")
+            return False
+        before = process_snapshot(current)
 
         def save() -> FlowGraphDocument:
             return self.documents_gateway.delete_graph_source_process(
@@ -823,6 +955,12 @@ class StreamlitSessionCoordinator:
             reload_data=self.load_app_data,
             success_message=None if quiet else "Процесс удалён",
         )
+        if result.saved and record_history:
+            push_delete_process_command(
+                self.session_state,
+                process_id=command.process_id,
+                before=before,
+            )
         self.finalize_persistence(
             result.should_rerun,
             result.error_message,
@@ -873,6 +1011,25 @@ class StreamlitSessionCoordinator:
         rerun: bool = True,
     ) -> bool:
         kind = command.get("kind")
+        if kind == "batch":
+            steps = command.get("commands")
+            if not isinstance(steps, list) or not steps:
+                return False
+            ordered = list(reversed(steps)) if reverse else list(steps)
+            for step in ordered:
+                if not isinstance(step, dict):
+                    return False
+                current_graph, _wells = self.load_app_data()
+                if not self._apply_history_command(
+                    current_graph,
+                    step,
+                    reverse=reverse,
+                    rerun=False,
+                ):
+                    return False
+            if rerun:
+                self.finalize_persistence(True, None, scope="fragment", rerun=True)
+            return True
         if kind == "move_nodes":
             payload = command.get("before" if reverse else "after")
             if not isinstance(payload, dict):
@@ -1037,6 +1194,60 @@ class StreamlitSessionCoordinator:
                 record_history=False,
                 rerun=rerun,
             )
+        if kind == "create_process":
+            process_id = command.get("process_id")
+            after = command.get("after")
+            if not isinstance(process_id, str) or not isinstance(after, dict):
+                return False
+            if reverse:
+                return self.delete_graph_source_process(
+                    graph,
+                    DeleteGraphSourceProcessCommand(process_id=process_id),
+                    quiet=True,
+                    record_history=False,
+                    rerun=rerun,
+                )
+            created = self.create_graph_source_process(
+                graph,
+                create_command_from_process_snapshot(process_id, after),
+                quiet=True,
+                record_history=False,
+                rerun=rerun,
+            )
+            return created is not None
+        if kind == "update_process":
+            process_id = command.get("process_id")
+            payload = command.get("before" if reverse else "after")
+            if not isinstance(process_id, str) or not isinstance(payload, dict):
+                return False
+            return self.update_graph_source_process(
+                graph,
+                update_command_from_process_snapshot(process_id, payload),
+                quiet=True,
+                record_history=False,
+                rerun=rerun,
+            )
+        if kind == "delete_process":
+            process_id = command.get("process_id")
+            before = command.get("before")
+            if not isinstance(process_id, str) or not isinstance(before, dict):
+                return False
+            if reverse:
+                created = self.create_graph_source_process(
+                    graph,
+                    create_command_from_process_snapshot(process_id, before),
+                    quiet=True,
+                    record_history=False,
+                    rerun=rerun,
+                )
+                return created is not None
+            return self.delete_graph_source_process(
+                graph,
+                DeleteGraphSourceProcessCommand(process_id=process_id),
+                quiet=True,
+                record_history=False,
+                rerun=rerun,
+            )
         return False
 
     def working_schema_selected(self) -> bool:
@@ -1088,7 +1299,18 @@ class StreamlitSessionCoordinator:
             try:
                 self.st_module.rerun(scope=rerun_scope)
             except TypeError:
+                # Older Streamlit without scope= — stay put for fragment callers.
+                if scope == "fragment":
+                    return
                 self.st_module.rerun()
+            except Exception as exc:
+                # Streamlit rejects fragment scope outside a fragment rerun
+                # (AppTest / first full-script pass). Persist already succeeded;
+                # do not escalate to app remount (that wipes the canvas host).
+                message = str(exc)
+                if scope == "fragment" and "fragment" in message.lower():
+                    return
+                raise
 
     def _set_selected_graph_version(self, version_id: str | None) -> None:
         if version_id is None:
@@ -1113,6 +1335,83 @@ def _positions_signature(positions: dict[str, tuple[float, float]]) -> tuple[tup
             (node_id, round(float(xy[0]), 2), round(float(xy[1]), 2))
             for node_id, xy in positions.items()
         )
+    )
+
+
+def process_snapshot(process: Any) -> dict[str, Any]:
+    return {
+        "title": str(getattr(process, "title", "") or ""),
+        "node_ids": list(getattr(process, "node_ids", []) or []),
+    }
+
+
+def process_claim_side_effect_commands(
+    graph: FlowGraphDocument,
+    *,
+    claimed_node_ids: set[str],
+    exclude_process_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """History steps for processes that lose members to exclusive claim."""
+    if not claimed_node_ids:
+        return []
+    steps: list[dict[str, Any]] = []
+    for process_id, process in graph.processes.items():
+        if exclude_process_id is not None and process_id == exclude_process_id:
+            continue
+        member_ids = list(process.node_ids)
+        if not claimed_node_ids.intersection(member_ids):
+            continue
+        before = process_snapshot(process)
+        remaining = [node_id for node_id in member_ids if node_id not in claimed_node_ids]
+        if not remaining:
+            steps.append(
+                {
+                    "kind": "delete_process",
+                    "process_id": process_id,
+                    "before": before,
+                }
+            )
+        else:
+            steps.append(
+                {
+                    "kind": "update_process",
+                    "process_id": process_id,
+                    "before": before,
+                    "after": {
+                        "title": before["title"],
+                        "node_ids": remaining,
+                    },
+                }
+            )
+    return steps
+
+
+def create_command_from_process_snapshot(
+    process_id: str,
+    snapshot: dict[str, Any],
+) -> CreateGraphSourceProcessCommand:
+    node_ids = snapshot.get("node_ids") or []
+    return CreateGraphSourceProcessCommand(
+        title=str(snapshot.get("title") or "Процесс").strip() or "Процесс",
+        node_ids=tuple(str(item) for item in node_ids)
+        if isinstance(node_ids, list)
+        else (),
+        process_id=process_id,
+    )
+
+
+def update_command_from_process_snapshot(
+    process_id: str,
+    snapshot: dict[str, Any],
+) -> UpdateGraphSourceProcessCommand:
+    node_ids = snapshot.get("node_ids") or []
+    title = str(snapshot.get("title") or "").strip() or "Процесс"
+    return UpdateGraphSourceProcessCommand(
+        process_id=process_id,
+        title=title,
+        node_ids=tuple(str(item) for item in node_ids)
+        if isinstance(node_ids, list)
+        else (),
     )
 
 

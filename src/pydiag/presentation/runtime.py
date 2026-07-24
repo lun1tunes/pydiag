@@ -240,9 +240,36 @@ class StreamlitAppRuntime:
                 wells_edit_block_reason=session.wells_edit_block_reason,
                 load_graph_source_node=session.load_graph_source_node,
                 load_graph_source_edge=session.load_graph_source_edge,
-                persist_graph_source_node_update=session.save_graph_source_node,
-                persist_graph_source_edge_update=session.save_graph_source_edge,
-                persist_graph_source_edge_create=session.create_graph_source_edge,
+                # Inspector sits in the workspace fragment with the canvas.
+                # quiet=True → fragment-scoped remount (document store keeps
+                # camera/selection). Never app-scope: that remounts the host.
+                persist_graph_source_node_update=lambda graph, command: (
+                    session.save_graph_source_node(
+                        graph,
+                        command,
+                        quiet=True,
+                        record_history=True,
+                        rerun=True,
+                    )
+                ),
+                persist_graph_source_edge_update=lambda graph, command: (
+                    session.save_graph_source_edge(
+                        graph,
+                        command,
+                        quiet=True,
+                        record_history=True,
+                        rerun=True,
+                    )
+                ),
+                persist_graph_source_edge_create=lambda graph, command: (
+                    session.create_graph_source_edge(
+                        graph,
+                        command,
+                        quiet=True,
+                        record_history=True,
+                        rerun=True,
+                    )
+                ),
                 graph_source_edit_available=session.graph_source_edit_available,
                 graph_source_edit_block_reason=session.graph_source_edit_block_reason,
                 live_layout_xy_for_node=live_layout_xy_for_node,
@@ -269,6 +296,8 @@ class StreamlitAppRuntime:
             graph=graph,
             expected_version=expected_version,
             success_message=success_message,
+            quiet=True,
+            rerun=True,
         )
 
     def _render_flow(
@@ -390,16 +419,63 @@ class StreamlitAppRuntime:
             return
         node_ids = pending.get("node_ids") or []
         patch = dict(pending.get("patch") or {})
+        from pydiag.application.edit_history import push_batch_command
+        from pydiag.presentation.runtime_session import node_snapshot_from_draft
+
+        history_steps: list[dict[str, Any]] = []
         for node_id in node_ids:
             current_graph, current_wells = session.load_app_data()
-            session.apply_canvas_node_edit(
+            try:
+                draft = session.load_graph_source_node(str(node_id))
+            except Exception as exc:
+                self.st_module.error(str(exc))
+                continue
+            before = node_snapshot_from_draft(draft)
+            process_steps: list[dict[str, Any]] = []
+            if patch.get("deleted") is True:
+                from pydiag.presentation.runtime_session import (
+                    process_claim_side_effect_commands,
+                )
+
+                process_steps = process_claim_side_effect_commands(
+                    current_graph,
+                    claimed_node_ids={str(node_id)},
+                )
+            ok = session.apply_canvas_node_edit(
                 current_graph,
                 current_wells,
                 {"node_id": node_id, **patch},
                 quiet=True,
-                record_history=True,
+                record_history=False,
                 rerun=False,
             )
+            if not ok:
+                continue
+            if patch.get("deleted") is True:
+                history_steps.extend(process_steps)
+                history_steps.append(
+                    {
+                        "kind": "delete_node",
+                        "node_id": str(node_id),
+                        "before": before,
+                    }
+                )
+                continue
+            try:
+                after_draft = session.load_graph_source_node(str(node_id))
+            except Exception:
+                continue
+            after = node_snapshot_from_draft(after_draft)
+            if before != after:
+                history_steps.append(
+                    {
+                        "kind": "update_node",
+                        "node_id": str(node_id),
+                        "before": before,
+                        "after": after,
+                    }
+                )
+        push_batch_command(session.session_state, commands=history_steps)
 
     def _consume_pending_canvas_node_create(self, graph: FlowGraphDocument) -> None:
         session = self.session
@@ -579,8 +655,13 @@ class StreamlitAppRuntime:
             return
         edge_ids = pending.get("edge_ids") or []
         patch = dict(pending.get("patch") or {})
-        from pydiag.presentation.runtime_session import edge_snapshot_from_draft
+        from pydiag.application.edit_history import push_batch_command
+        from pydiag.presentation.runtime_session import (
+            edge_snapshot_from_draft,
+            edge_snapshot_from_command,
+        )
 
+        history_steps: list[dict[str, Any]] = []
         for edge_id in edge_ids:
             current_graph, _wells = session.load_app_data()
             try:
@@ -592,26 +673,50 @@ class StreamlitAppRuntime:
             if kind not in {"default", "yes", "no", "dashed"}:
                 kind = draft.kind
             before = edge_snapshot_from_draft(draft)
-            session.save_graph_source_edge(
+            command = UpdateGraphSourceEdgeCommand(
+                edge_id=draft.edge_id,
+                source=draft.source,
+                target=draft.target,
+                kind=kind,  # type: ignore[arg-type]
+                label=draft.label,
+                condition=draft.condition,
+                note=draft.note,
+                deleted=True if patch.get("deleted") is True else None,
+            )
+            ok = session.save_graph_source_edge(
                 current_graph,
-                UpdateGraphSourceEdgeCommand(
-                    edge_id=draft.edge_id,
-                    source=draft.source,
-                    target=draft.target,
-                    kind=kind,  # type: ignore[arg-type]
-                    label=draft.label,
-                    condition=draft.condition,
-                    note=draft.note,
-                    deleted=True if patch.get("deleted") is True else None,
-                ),
+                command,
                 quiet=True,
-                record_history=True,
+                record_history=False,
                 before_snapshot=before,
                 rerun=False,
             )
+            if not ok:
+                continue
+            if patch.get("deleted") is True:
+                history_steps.append(
+                    {
+                        "kind": "delete_edge",
+                        "edge_id": draft.edge_id,
+                        "before": before,
+                    }
+                )
+            else:
+                after = edge_snapshot_from_command(command)
+                if before != after:
+                    history_steps.append(
+                        {
+                            "kind": "update_edge",
+                            "edge_id": draft.edge_id,
+                            "before": before,
+                            "after": after,
+                        }
+                    )
+        push_batch_command(session.session_state, commands=history_steps)
 
     def _consume_pending_canvas_process_create(self, graph: FlowGraphDocument) -> None:
         session = self.session
+        graph, _wells = session.load_app_data()
         pending = consume_pending_canvas_process_create(
             session.session_state,
             graph=graph,
@@ -642,6 +747,7 @@ class StreamlitAppRuntime:
 
     def _consume_pending_canvas_process_edit(self, graph: FlowGraphDocument) -> None:
         session = self.session
+        graph, _wells = session.load_app_data()
         pending = consume_pending_canvas_process_edit(
             session.session_state,
             graph=graph,
@@ -680,6 +786,7 @@ class StreamlitAppRuntime:
 
     def _consume_pending_canvas_process_delete(self, graph: FlowGraphDocument) -> None:
         session = self.session
+        graph, _wells = session.load_app_data()
         pending = consume_pending_canvas_process_delete(
             session.session_state,
             graph=graph,

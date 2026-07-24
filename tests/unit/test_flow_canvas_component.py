@@ -67,20 +67,24 @@ def test_flow_canvas_reuses_persistent_dom_and_patches_only_changed_scene_parts(
     assert "const edgeGeometryChanged = state.renderedEdgeGeometryVersion !== state.edgeGeometryVersion;" in js
     assert "updateNodePositions(state);" in js
     assert "updateEdgeGeometry(state);" in js
-    assert "function updateEdgeGeometry(state) {" in js
+    assert "function updateEdgeGeometry(state, nodeIds = null) {" in js
     assert "function nodeMatchesClientFilters(node, state) {" in js
     assert "state.payload?.kind_filter" in js
     assert "state.payload?.search" in js
     assert "function updateDraggedNode(state, nodeId) {" in js
     assert "updateDraggedNode(state, state.draggingNodeId);" in js
-    assert "updateEdgeGeometry(state);" in js
+    assert "updateEdgeGeometry(state, [state.draggingNodeId]);" in js
     assert "function liveEdgePoints(state, edge) {" in js
     assert "function nodePositionDelta(state, nodeId) {" in js
-    # Drag path must refresh wires, not only the card shell.
+    # Drag path must refresh incident wires only, not only the card shell.
     drag_block_start = js.index("if (state.draggingNodeIds.length) {")
-    drag_block = js[drag_block_start : drag_block_start + 450]
+    drag_block = js[drag_block_start : drag_block_start + 900]
     assert "updateDraggedNode(state, nodeId);" in drag_block
-    assert "updateEdgeGeometry(state);" in drag_block
+    assert "updateEdgeGeometry(state, state.draggingNodeIds);" in drag_block
+    assert "if (!dragging) {" in drag_block
+    assert "layoutAllNodeNotes(state);" in drag_block
+    assert "syncProcessFrames(state);" in drag_block
+    assert "renderedFilterDimSignature" in js
     assert "updateSelectionState(" in js
     assert "state.dom.stage.style.transform =" in js
 
@@ -254,6 +258,7 @@ def test_flow_canvas_supports_selection_edit_hud() -> None:
     assert "startMarqueeSelect" in js
     assert "event.button !== 0 || state.spacePanHeld" in js
     assert "event.button === 2" in js
+    assert "event.ctrlKey || event.metaKey || event.shiftKey" in js
     assert "cursor: default" in css
     assert "cursor: grabbing" in css
     assert ".flow-node-card" in css and "cursor: pointer" in css
